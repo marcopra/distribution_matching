@@ -11,8 +11,11 @@ matplotlib.use('Agg')  # Use non-interactive backend for saving figures
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
 from env import TwoRoomsEnv, SingleRoomEnv
+import jax
+import jax.numpy as jnp
+from jax import grad, jit
 
-SECOND_TERM = False
+SECOND_TERM = True
 class DistributionMatcher:
     """
     Policy optimizer for matching target state distributions using mirror descent.
@@ -44,6 +47,7 @@ class DistributionMatcher:
         
         # History tracking
         self.kl_history = []
+        self.gradient_difference_history = []  # Track gradient comparison
         
     def _create_uniform_policy(self) -> np.ndarray:
         """Create uniform random policy operator."""
@@ -114,15 +118,13 @@ class DistributionMatcher:
     
     def kl_divergence(self, p: np.ndarray, q: np.ndarray) -> float:
         """Compute KL(p||q) with numerical stability."""
-
         try:
             second_term = -np.sum(self.policy_operator * np.nan_to_num(np.log(self.policy_operator/self.uniform_policy_operator), nan=0.0))*int(SECOND_TERM)
         except Warning as w:
             print("Warning in KL divergence second term computation:", w)
             print("Second term set to 0.0 for stability.")
             second_term = 0.0
-
-        return (1-self.alpha) * np.sum(np.nan_to_num(p * np.log(p / q), nan=0.0)) + self.alpha*second_term
+        return (1-self.alpha) * np.sum(p * np.log(p / q)) + self.alpha*second_term
 
     def compute_gradient_kl(self, nu0: np.ndarray, nu_target: np.ndarray) -> np.ndarray:
         """
@@ -180,9 +182,113 @@ class DistributionMatcher:
         
         return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
     
+    def kl_divergence_jax(self, P: jnp.ndarray, nu0: jnp.ndarray, nu_target: jnp.ndarray) -> float:
+        """
+        JAX-compatible KL divergence computation for automatic differentiation.
+        
+        Args:
+            P: Policy operator (n_states * n_actions, n_states)
+            nu0: Initial state distribution
+            nu_target: Target state distribution
+        
+        Returns:
+            KL divergence value
+        """
+        eps = 1e-10
+        I = jnp.eye(self.n_states)
+        M = self.T_operator @ P
+        
+        if self.gradient_type == 'reverse':
+            nu_pi = (1 - self.gamma) * jnp.linalg.solve(I - self.gamma * M, nu0)
+            
+            kl_first_term = jnp.sum(nu_pi * jnp.log(nu_pi / nu_target))
+        else:  # forward
+            nu_tilde = (I - self.gamma * M) @ nu_target
+            nu0_clipped = jnp.clip(nu0, eps, 1.0)
+            nu0_clipped = nu0_clipped / nu0_clipped.sum()
+            nu_tilde_clipped = jnp.clip(nu_tilde, eps, 1.0)
+            nu_tilde_clipped = nu_tilde_clipped / nu_tilde_clipped.sum()
+            
+            kl_first_term = jnp.sum(nu0_clipped * jnp.log(nu0_clipped / nu_tilde_clipped))
+        
+        # Second term (KL regularization)
+        if SECOND_TERM:
+            log_ratio = jnp.where(
+                self.uniform_policy_operator > eps,
+                jnp.log(P / self.uniform_policy_operator),
+                0.0
+            )
+            second_term = -jnp.sum(P * log_ratio)
+        else:
+            second_term = 0.0
+        
+        return (1 - self.alpha) * kl_first_term + self.alpha * second_term
+    
+    def compute_gradient_kl_autograd(self, nu0: np.ndarray, nu_target: np.ndarray) -> np.ndarray:
+        """
+        Compute gradient of KL divergence using JAX automatic differentiation.
+        
+        Args:
+            nu0: Initial state distribution
+            nu_target: Target state distribution
+        
+        Returns:
+            Gradient of shape (n_states * n_actions, n_states)
+        """
+        # Convert to JAX arrays
+        P_jax = jnp.array(self.policy_operator)
+        nu0_jax = jnp.array(nu0)
+        nu_target_jax = jnp.array(nu_target)
+        
+        # Define loss function
+        def loss_fn(P):
+            return self.kl_divergence_jax(P, nu0_jax, nu_target_jax)
+        
+        # Compute gradient using JAX
+        grad_fn = grad(loss_fn)
+        gradient_jax = grad_fn(P_jax)
+        
+        return np.array(gradient_jax)
+    
+    def compare_gradients(self, nu0: np.ndarray, nu_target: np.ndarray) -> dict:
+        """
+        Compare analytical gradient with autograd gradient.
+        
+        Args:
+            nu0: Initial state distribution
+            nu_target: Target state distribution
+        
+        Returns:
+            Dictionary with comparison metrics
+        """
+        grad_analytical = self.compute_gradient_kl(nu0, nu_target)
+        grad_autograd = self.compute_gradient_kl_autograd(nu0, nu_target)
+        print("Computed both analytical and autograd gradients for comparison.")
+        print(f"Analytical gradient : {grad_analytical}")
+        print(f"autograd gradient : {grad_autograd}")
+        print(f"Ratio (analytical / autograd): {grad_analytical / grad_autograd}")
+        exit()
+        # Compute various difference metrics
+        l2_diff = np.linalg.norm(grad_analytical - grad_autograd)
+        relative_diff = l2_diff / (np.linalg.norm(grad_analytical) + 1e-10)
+        max_abs_diff = np.max(np.abs(grad_analytical - grad_autograd))
+        cos_similarity = np.dot(grad_analytical.flatten(), grad_autograd.flatten()) / (
+            np.linalg.norm(grad_analytical) * np.linalg.norm(grad_autograd) + 1e-10
+        )
+        
+        return {
+            'analytical': grad_analytical,
+            'autograd': grad_autograd,
+            'l2_difference': l2_diff,
+            'relative_difference': relative_diff,
+            'max_absolute_difference': max_abs_diff,
+            'cosine_similarity': cos_similarity
+        }
+    
     def optimize(self, nu0: np.ndarray, nu_target: np.ndarray, 
                  n_updates: int = 1000, verbose: bool = True, 
-                 print_every: int = None, save_path_prefix: str = None) -> None:
+                 print_every: int = None, save_path_prefix: str = None,
+                 compare_gradients: bool = False, gradient_check_every: int = 100) -> None:
         """
         Run mirror descent optimization to match target distribution.
         
@@ -193,6 +299,8 @@ class DistributionMatcher:
             verbose: Whether to print progress
             print_every: Save and print results every n iterations (None = only at end)
             save_path_prefix: Prefix for saving intermediate visualizations (e.g., '/path/to/results')
+            compare_gradients: Whether to compare analytical vs autograd gradients
+            gradient_check_every: Frequency of gradient comparison checks
         """
         if verbose:
             print("Starting optimization...")
@@ -203,12 +311,15 @@ class DistributionMatcher:
             print(f"Learning rate η: {self.eta}")
             print(f"Number of updates: {n_updates}")
             print(f"Gradient type: {self.gradient_type}")
+            if compare_gradients:
+                print(f"Gradient comparison: ENABLED (every {gradient_check_every} iterations)")
             if print_every:
                 print(f"Saving results every: {print_every} iterations")
             print("="*60 + "\n")
         
         self.kl_history = []
-        self.policy_distance_history = []  # Track L2 distance from uniform policy
+        self.policy_distance_history = []
+        self.gradient_difference_history = []
         
         for iteration in range(n_updates):
             # Compute KL divergence
@@ -218,8 +329,15 @@ class DistributionMatcher:
             else:  # forward
                 I = np.eye(self.n_states)
                 M = self.M_pi_operator(self.policy_operator)
-                kl = self.kl_divergence(nu0, (I - self.gamma * M)/(1-self.gamma) @ nu_target)
+                kl = self.kl_divergence(nu0, (I - self.gamma * M) @ nu_target)
             
+            # print M max eigenvalue
+            eigs = np.linalg.eigvals(self.M_pi_operator(self.policy_operator))
+            max_eig = np.max(np.abs(eigs))
+            if max_eig >= 1.0:
+                print(f"⚠️  Warning: Max eigenvalue of M_π is {max_eig:.6f} >= 1.0, may cause instability.")
+            if iteration % 1000 == 0:
+                print(f"Iter {iteration:5d}: Max eigenvalue of M_π: {max_eig:.6f}")
             self.kl_history.append(kl)
             
             # Compute L2 distance from uniform policy
@@ -228,6 +346,28 @@ class DistributionMatcher:
             
             # Compute gradient and update policy
             gradient = self.compute_gradient_kl(nu0, nu_target)
+            
+            # Gradient comparison
+            if compare_gradients and iteration % gradient_check_every == 0:
+                comparison = self.compare_gradients(nu0, nu_target)
+                self.gradient_difference_history.append({
+                    'iteration': iteration,
+                    'l2_diff': comparison['l2_difference'],
+                    'relative_diff': comparison['relative_difference'],
+                    'max_abs_diff': comparison['max_absolute_difference'],
+                    'cos_sim': comparison['cosine_similarity']
+                })
+                
+                if verbose:
+                    print(f"\n{'='*60}")
+                    print(f"GRADIENT COMPARISON (iteration {iteration})")
+                    print(f"{'='*60}")
+                    print(f"L2 difference: {comparison['l2_difference']:.6e}")
+                    print(f"Relative difference: {comparison['relative_difference']:.6e}")
+                    print(f"Max absolute difference: {comparison['max_absolute_difference']:.6e}")
+                    print(f"Cosine similarity: {comparison['cosine_similarity']:.10f}")
+                    print(f"{'='*60}\n")
+            
             self.policy_operator = self.mirror_descent_update(gradient)
             
             # Print progress
@@ -257,11 +397,72 @@ class DistributionMatcher:
                     if verbose:
                         print(f"Saved visualization to: {save_path}\n")
         
+        # Final gradient comparison
+        if compare_gradients and verbose:
+            print(f"\n{'='*60}")
+            print("FINAL GRADIENT COMPARISON")
+            print(f"{'='*60}")
+            final_comparison = self.compare_gradients(nu0, nu_target)
+            print(f"L2 difference: {final_comparison['l2_difference']:.6e}")
+            print(f"Relative difference: {final_comparison['relative_difference']:.6e}")
+            print(f"Max absolute difference: {final_comparison['max_absolute_difference']:.6e}")
+            print(f"Cosine similarity: {final_comparison['cosine_similarity']:.10f}")
+            print(f"{'='*60}\n")
+            
+            # Plot gradient comparison history
+            if self.gradient_difference_history and save_path_prefix:
+                self._plot_gradient_comparison(save_path_prefix)
+        
         if verbose:
             print(f"\nOptimization complete!")
             print(f"Final KL: {self.kl_history[-1]:.6f}")
             print(f"Final Policy L2 distance: {self.policy_distance_history[-1]:.6f}")
+    
+    def _plot_gradient_comparison(self, save_path_prefix: str):
+        """Plot gradient comparison metrics over iterations."""
+        if not self.gradient_difference_history:
+            return
+        
+        iterations = [d['iteration'] for d in self.gradient_difference_history]
+        l2_diffs = [d['l2_diff'] for d in self.gradient_difference_history]
+        rel_diffs = [d['relative_diff'] for d in self.gradient_difference_history]
+        max_diffs = [d['max_abs_diff'] for d in self.gradient_difference_history]
+        cos_sims = [d['cos_sim'] for d in self.gradient_difference_history]
+        
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        axes[0, 0].semilogy(iterations, l2_diffs, 'b-', linewidth=2)
+        axes[0, 0].set_xlabel('Iteration')
+        axes[0, 0].set_ylabel('L2 Difference')
+        axes[0, 0].set_title('L2 Norm of Gradient Difference')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        axes[0, 1].semilogy(iterations, rel_diffs, 'r-', linewidth=2)
+        axes[0, 1].set_xlabel('Iteration')
+        axes[0, 1].set_ylabel('Relative Difference')
+        axes[0, 1].set_title('Relative Gradient Difference')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        axes[1, 0].semilogy(iterations, max_diffs, 'g-', linewidth=2)
+        axes[1, 0].set_xlabel('Iteration')
+        axes[1, 0].set_ylabel('Max Absolute Difference')
+        axes[1, 0].set_title('Maximum Element-wise Difference')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        axes[1, 1].plot(iterations, cos_sims, 'm-', linewidth=2)
+        axes[1, 1].set_xlabel('Iteration')
+        axes[1, 1].set_ylabel('Cosine Similarity')
+        axes[1, 1].set_title('Gradient Cosine Similarity')
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].set_ylim([0.99, 1.01])  # Zoom in if gradients are close
+        
+        plt.tight_layout()
+        save_path = f"{save_path_prefix}_gradient_comparison.png"
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Gradient comparison plot saved to: {save_path}")
+        plt.close(fig)
 
+    
     def get_policy_per_state(self, uniform_policy: bool = False) -> np.ndarray:
         """
         Extract policy probabilities π(a|s) for each state.
@@ -881,7 +1082,7 @@ def main():
     print(f"Environment created with {env.n_states} states\n")
 
     # Parameters
-    eta = 1e-3
+    eta = 1e-4
     gradient_type = 'reverse'  # 'reverse' or 'forward'
     n_updates = 1_000_000
     print_every = 20_000  # Save results every <print_every> iterations
@@ -954,7 +1155,9 @@ def main():
         n_updates=n_updates, 
         verbose=True,
         print_every=print_every,
-        save_path_prefix='/home/mprattico/distribution_matching/distribution_matching_results'
+        save_path_prefix='/home/mprattico/distribution_matching/distribution_matching_results',
+        compare_gradients=True,  # Enable gradient comparison
+        gradient_check_every=1000  # Check every 1000 iterations
     )
     
     # Compute final distribution
