@@ -1,0 +1,35 @@
+# Main configuration for distribution matching experiments
+defaults:
+  - env: four_rooms  # Options: single_room, two_rooms, four_rooms
+  - _self_
+
+# Experiment hyperparameters
+experiment:
+  # Optimization parameters
+  gamma: 0.99  # Discount factor for occupancy measure
+  eta: 0.01  # Learning rate for mirror descent
+  alpha: 0.0  # Alpha parameter for KL divergence
+  gradient_type: 'reverse'  # Type of KL gradient: 'reverse' or 'forward'
+  
+  # Training parameters
+  n_updates: 100000  # Number of optimization updates
+  print_every: 20000  # Save results every N iterations
+  
+  # Rollout parameters
+  n_rollouts: 1  # Number of rollout episodes
+  horizon: 9  # Rollout horizon (number of steps)
+  
+  # Initial distribution
+  initial_mode: 'dirac_delta' 
+  
+  # Random seed
+  seed: 42
+
+# Output paths
+output:
+  save_dir: '/home/mprattico/distribution_matching'
+  results_uniform: '${output.save_dir}/distribution_matching_results_uniform.png'
+  results_optimized: '${output.save_dir}/distribution_matching_results.png'
+  trajectory_uniform: '${output.save_dir}/trajectory_uniform_policy.png'
+  trajectory_optimized: '${output.save_dir}/trajectory_optimized_policy.png'
+  results_prefix: '${output.save_dir}/distribution_matching_results'

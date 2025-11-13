@@ -10,22 +10,25 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for saving figures
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
+import gymnasium as gym
+import hydra
+from omegaconf import DictConfig
 from env import TwoRoomsEnv, SingleRoomEnv
+import os
 
-SECOND_TERM = False
 class DistributionMatcher:
     """
     Policy optimizer for matching target state distributions using mirror descent.
     
     Args:
-        env: TwoRoomsEnv instance
+        env: gym.Env instance
         gamma: Discount factor for occupancy measure
         eta: Learning rate for mirror descent
         gradient_type: Type of KL gradient ('reverse' or 'forward')
     """
     
-    def __init__(self, env: TwoRoomsEnv, gamma: float = 0.9, 
-                 eta: float = 0.1, alpha = 0.1,gradient_type: str = 'reverse'):
+    def __init__(self, env: gym.Env , gamma: float = 0.9, 
+                 eta: float = 0.1, alpha = 0.1, gradient_type: str = 'reverse'):
         self.env = env
         self.gamma = gamma
         self.eta = eta
@@ -115,11 +118,9 @@ class DistributionMatcher:
     def kl_divergence(self, p: np.ndarray, q: np.ndarray) -> float:
         """Compute KL(p||q) with numerical stability."""
 
-        try:
-            second_term = -np.sum(self.policy_operator * np.nan_to_num(np.log(self.policy_operator/self.uniform_policy_operator), nan=0.0))*int(SECOND_TERM)
-        except Warning as w:
-            print("Warning in KL divergence second term computation:", w)
-            print("Second term set to 0.0 for stability.")
+        if self.alpha > 0:
+            second_term = -np.sum(self.policy_operator * np.nan_to_num(np.log(self.policy_operator/self.uniform_policy_operator), nan=0.0))
+        else:
             second_term = 0.0
 
         return (1-self.alpha) * np.sum(np.nan_to_num(p * np.log(p / q), nan=0.0)) + self.alpha*second_term
@@ -137,10 +138,11 @@ class DistributionMatcher:
         """
         I = np.eye(self.n_states)
         M = self.M_pi_operator(self.policy_operator)
+        second_term = np.nan_to_num(1 + self.policy_operator/self.uniform_policy_operator, nan=0.0) if self.alpha > 0 else 0.0  
         
         if self.gradient_type == 'forward':
             r = nu0 / ((I - self.gamma * M) @ nu_target)
-            gradient =(1-self.alpha) * (self.gamma * self.T_operator.T @ r @ nu_target.T)/(1-self.gamma)- self.alpha * np.nan_to_num(1 + self.policy_operator/self.uniform_policy_operator, nan=0.0)*int(SECOND_TERM)
+            gradient =(1-self.alpha) * (self.gamma * self.T_operator.T @ r @ nu_target.T)/(1-self.gamma)- self.alpha * second_term
             
         elif self.gradient_type == 'reverse':
             nu_pi_over_nu_target = np.clip(
@@ -151,35 +153,13 @@ class DistributionMatcher:
             
             gradient = self.gamma * np.linalg.solve(I - self.gamma * M, self.T_operator).T
             gradient = gradient @ (np.ones_like(log_nu_pi_over_nu_target) + log_nu_pi_over_nu_target)
-            gradient = (1-self.alpha) *(1 - self.gamma) * gradient @ np.linalg.solve(I - self.gamma * M, nu0).T - self.alpha * np.nan_to_num(1 + self.policy_operator/self.uniform_policy_operator, nan=0.0)*int(SECOND_TERM)
+            
+            gradient = (1-self.alpha) *(1 - self.gamma) * gradient @ np.linalg.solve(I - self.gamma * M, nu0).T - self.alpha * second_term
         else:
             raise ValueError(f"Unknown gradient type: {self.gradient_type}")
         
         return gradient
     
-    # def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
-    #     """
-    #     Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
-        
-    #     Args:
-    #         gradient: Policy gradient
-        
-    #     Returns:
-    #         Updated policy operator
-    #     """
-    #     policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
-    #     new_policy_3d = np.zeros_like(policy_3d)
-    #     gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
-        
-        
-    #     # Normalize the block-diagonal elements (policy probabilities per state)
-    #     for s in range(self.n_states):
-    #         new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(-self.eta * gradient_3d[s, :, s])
-    #         policy_s_actions = new_policy_3d[s, :, s]
-    #         new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
-        
-    #     return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
-
     def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
         """
         Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
@@ -190,18 +170,136 @@ class DistributionMatcher:
         Returns:
             Updated policy operator
         """
-        # Reshape the policy and gradient to 3D
         policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
+        new_policy_3d = np.zeros_like(policy_3d)
         gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
         
-        # Apply the mirror descent update for all states at once
-        exp_grad = np.exp(-self.eta * gradient_3d)
-        new_policy_3d = policy_3d * exp_grad
         
-        # Normalize the new policies for each state (along actions dimension)
-        new_policy_3d /= np.sum(new_policy_3d, axis=1, keepdims=True) + 1e-10
+        # Normalize the block-diagonal elements (policy probabilities per state)
+        for s in range(self.n_states):
+            new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(-self.eta * gradient_3d[s, :, s])
+            policy_s_actions = new_policy_3d[s, :, s]
+            new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
         
         return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+
+    # def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
+    #     """
+    #     Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
+        
+    #     Args:
+    #         gradient: Policy gradient
+        
+    #     Returns:
+    #         Updated policy operator
+    #     """
+    #     # Reshape the policy and gradient to 3D
+    #     policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
+    #     gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
+        
+    #     # Apply the mirror descent update for all states at once
+    #     exp_grad = np.exp(-self.eta * gradient_3d)
+    #     new_policy_3d = policy_3d * exp_grad
+        
+    #     # Normalize the new policies for each state (along actions dimension)
+    #     new_policy_3d /= np.sum(new_policy_3d, axis=1, keepdims=True) + 1e-10
+        
+    #     return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+    
+    def save_policy(self, filepath: str) -> None:
+        """
+        Save the learned policy operator to a file.
+        
+        Args:
+            filepath: Path where to save the policy (will add .npy extension)
+        """
+        np.save(filepath, self.policy_operator)
+        print(f"Policy operator saved to: {filepath}.npy")
+    
+    def load_policy(self, filepath: str) -> None:
+        """
+        Load a policy operator from a file.
+        
+        Args:
+            filepath: Path to the saved policy file
+        """
+        self.policy_operator = np.load(filepath)
+        print(f"Policy operator loaded from: {filepath}")
+    
+    def save_transition_matrix(self, filepath: str) -> None:
+        """
+        Save the transition matrix to a file.
+        
+        Args:
+            filepath: Path where to save the transition matrix (will add .npy extension)
+        """
+        np.save(filepath, self.T_operator)
+        print(f"Transition matrix saved to: {filepath}.npy")
+    
+    def save_training_data(self, save_dir: str, verbose: bool = True) -> None:
+        """
+        Save all training artifacts (policy, transition matrix, histories).
+        
+        Args:
+            save_dir: Directory where to save the data
+            verbose: Whether to print save messages
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Save policy operator
+        np.save(os.path.join(save_dir, "policy_operator.npy"), self.policy_operator)
+        if verbose:
+            print(f"Policy operator saved to: {os.path.join(save_dir, 'policy_operator.npy')}")
+        
+        # Save transition matrix
+        np.save(os.path.join(save_dir, "transition_matrix.npy"), self.T_operator)
+        if verbose:
+            print(f"Transition matrix saved to: {os.path.join(save_dir, 'transition_matrix.npy')}")
+        
+        # Save uniform policy for reference
+        np.save(os.path.join(save_dir, "uniform_policy_operator.npy"), self.uniform_policy_operator)
+        if verbose:
+            print(f"Uniform policy operator saved to: {os.path.join(save_dir, 'uniform_policy_operator.npy')}")
+        
+        
+        # Save metadata
+        metadata = {
+            'n_states': self.n_states,
+            'n_actions': self.n_actions,
+            'gamma': self.gamma,
+            'eta': self.eta,
+            'alpha': self.alpha,
+            'gradient_type': self.gradient_type,
+            'n_updates': len(self.kl_history)
+        }
+        np.save(os.path.join(save_dir, "metadata.npy"), metadata)
+        if verbose:
+            print(f"Metadata saved to: {os.path.join(save_dir, 'metadata.npy')}")
+            print(f"\n✓ All training data saved to: {save_dir}")
+    
+    @staticmethod
+    def load_training_data(load_dir: str) -> dict:
+        """
+        Load all training artifacts from a directory.
+        
+        Args:
+            load_dir: Directory from where to load the data
+            
+        Returns:
+            Dictionary containing all loaded data
+        """
+        data = {}
+        data['policy_operator'] = np.load(os.path.join(load_dir, "policy_operator.npy"))
+        data['transition_matrix'] = np.load(os.path.join(load_dir, "transition_matrix.npy"))
+        data['uniform_policy_operator'] = np.load(os.path.join(load_dir, "uniform_policy_operator.npy"))
+        
+        if os.path.exists(os.path.join(load_dir, "policy_distance_history.npy")):
+            data['policy_distance_history'] = np.load(os.path.join(load_dir, "policy_distance_history.npy"))
+        
+        data['metadata'] = np.load(os.path.join(load_dir, "metadata.npy"), allow_pickle=True).item()
+        
+        print(f"✓ Training data loaded from: {load_dir}")
+        return data
     
     def optimize(self, nu0: np.ndarray, nu_target: np.ndarray, 
                  n_updates: int = 1000, verbose: bool = True, 
@@ -271,14 +369,20 @@ class DistributionMatcher:
                     # Compute current distribution
                     nu_current = self.compute_discounted_occupancy(nu0)
                     
-                    # Create visualizer and save (don't show)
+                    # Create visualizer and save image
                     visualizer = DistributionVisualizer(self.env, self)
                     save_path = f"{save_path_prefix}_iter{iteration+1:06d}.png"
                     visualizer.plot_results(nu0, nu_target, nu_current, save_path=save_path)
-                    # No plt.close() needed here because plot_results now handles it
+                    
+                    # Save training data at checkpoint (overwriting files with same names)
+                    # Extract directory from save_path_prefix
+                    checkpoint_dir = os.path.dirname(save_path_prefix)
+                    data_dir = os.path.join(checkpoint_dir, "trained_model")
+                    self.save_training_data(data_dir, verbose=False)
                     
                     if verbose:
-                        print(f"Saved visualization to: {save_path}\n")
+                        print(f"Saved visualization to: {save_path}")
+                        print(f"Saved training data to: {data_dir}\n")
         
         if verbose:
             print(f"\nOptimization complete!")
@@ -328,35 +432,36 @@ class DistributionMatcher:
         action_probs = action_probs / np.sum(action_probs)  # Normalize probabilities, it could be slightly off due to numerical issues
         return np.random.choice(self.n_actions, p=action_probs)
     
-    def stochasticity_check(self):
+    def stochasticity_check(self, operator = None) -> None:
         """Check and report policy stochasticity statistics."""
-        policy_per_state = self.get_policy_per_state()
+        if operator is None:
+            operator = self.policy_operator
         
-        total_deviation = 0.0
-        max_deviation = 0.0
-        max_deviation_state = -1
         
-        for s in range(self.n_states):
-            prob_sum = np.sum(policy_per_state[s, :])
-            deviation = abs(prob_sum - 1.0)
-            total_deviation += deviation
-            
-            if deviation > max_deviation:
-                max_deviation = deviation
-                max_deviation_state = s
+        reference = np.ones((self.n_states))
+
+        if len(operator.shape) == 1 or (len(operator.shape) == 2 and 1 == operator.shape[1]):
+            summed_operator = operator.sum(axis=0)
+            reference = np.ones((1))
+        elif len(operator.shape) == 2:
+            if operator.shape[0] == self.n_states:
+                summed_operator = operator.sum(axis=1)
+            elif operator.shape[1] == self.n_states:
+                summed_operator = operator.sum(axis=0)
+        else:
+            raise ValueError("Operator shape is incompatible for stochasticity check.")
         
-        avg_deviation = total_deviation / self.n_states
+    
+        avg_deviation = np.mean(np.abs(summed_operator - reference.flatten()))
+        total_deviation = np.sum(np.abs(summed_operator - reference.flatten())) 
+        max_deviation = np.max(np.abs(summed_operator - reference.flatten()))
+        max_deviation_state = np.argmax(np.abs(summed_operator - reference.flatten()))
         print(f"\n{'='*60}")
         print("POLICY STOCHASTICITY CHECK")
         print(f"{'='*60}")
         print(f"Total sum deviation from 1.0: {total_deviation:.10e}")
         print(f"Average deviation per state: {avg_deviation:.10e}")
         print(f"Max deviation: {max_deviation:.10e} (state {max_deviation_state})")
-        
-        if max_deviation_state >= 0:
-            print(f"\nState {max_deviation_state} probabilities:")
-            print(f"  Values: {policy_per_state[max_deviation_state, :]}")
-            print(f"  Sum: {np.sum(policy_per_state[max_deviation_state, :]):.10f}")
         
         if total_deviation > 1e-6:
             print(f"\n⚠️  WARNING: Policy significantly deviates from stochastic!")
@@ -408,7 +513,7 @@ class DistributionMatcher:
 class DistributionVisualizer:
     """Visualizer for distribution matching results."""
     
-    def __init__(self, env: TwoRoomsEnv, matcher: DistributionMatcher):
+    def __init__(self, env: gym.Env , matcher: DistributionMatcher):
         self.env = env
         self.matcher = matcher
         
@@ -803,13 +908,16 @@ class DistributionVisualizer:
         ax.legend()
 
 
-def create_initial_distribution(env: TwoRoomsEnv, mode: str = 'corner') -> np.ndarray:
+def create_initial_distribution(env: gym.Env , mode: str = 'uniform') -> np.ndarray:
     """
     Create initial state distribution.
     
     Args:
-        env: TwoRoomsEnv instance
-        mode: Distribution mode ('top_left_cell', 'corner', 'uniform', 'left_room', 'corridor')
+        env: gym.Env instance
+        mode: Distribution mode ('top_left_cell', 'uniform', 'dirac_delta')
+            - 'top_left_cell': Single cell at top-left (0, 0)
+            - 'uniform': Uniform distribution over all states
+            - 'dirac_delta': Dirac delta at the environment's start position (must be set)
     
     Returns:
         Initial distribution as column vector
@@ -820,52 +928,37 @@ def create_initial_distribution(env: TwoRoomsEnv, mode: str = 'corner') -> np.nd
         # Single cell at top-left (0, 0)
         if (0, 0) in env.state_to_idx:
             nu0[env.state_to_idx[(0, 0)]] = 1.0
-    elif mode == 'corner':
-        # Uniform over top-left 2x2 corner
-        corner_coords = [(0, 0), (1, 0), (0, 1), (1, 1)]
-        valid_corners = [coord for coord in corner_coords if coord in env.state_to_idx]
-        for coord in valid_corners:
-            nu0[env.state_to_idx[coord]] = 1.0 / len(valid_corners)
-    elif mode == 'left_room':
-        # Uniform over left room
-        if hasattr(env, 'room_size'):  # TwoRoomsEnv
-            left_states = [s for s, (x, y) in env.idx_to_state.items() if x < env.room_size]
-        else:  # SingleRoomEnv - use all states
-            left_states = list(range(env.n_states))
-        for s in left_states:
-            nu0[s] = 1.0 / len(left_states)
-    elif mode == 'corridor':
-        # Uniform over corridor cells
-        if hasattr(env, 'corridor_y') and hasattr(env, 'corridor_length'):
-            corridor_states = []
-            for i in range(env.corridor_length):
-                x = env.room_size + i
-                y = env.corridor_y
-                if (x, y) in env.state_to_idx:
-                    corridor_states.append(env.state_to_idx[(x, y)])
-            if corridor_states:
-                for s in corridor_states:
-                    nu0[s] = 1.0 / len(corridor_states)
-            else:
-                # Fallback to uniform if no corridor
-                nu0 = np.ones(env.n_states) / env.n_states
         else:
-            # Fallback to uniform for SingleRoomEnv
-            nu0 = np.ones(env.n_states) / env.n_states
+            raise ValueError("Cell (0, 0) is not a valid cell in this environment")
+    
     elif mode == 'uniform':
         # Uniform over all states
         nu0 = np.ones(env.n_states) / env.n_states
+    
+    elif mode == 'dirac_delta':
+        # Dirac delta at the environment's start position
+        if env.start_position is None:
+            raise ValueError(
+                "mode='dirac_delta' requires start_position to be set in the environment. "
+                "Please specify start_position in the config or use reset(options={'start_position': ...})"
+            )
+        if env.start_position not in env.state_to_idx:
+            raise ValueError(f"Start position {env.start_position} is not a valid cell")
+        nu0[env.state_to_idx[env.start_position]] = 1.0
+    
     else:
-        raise ValueError(f"Unknown mode: {mode}. Choose from 'top_left_cell', 'corner', 'uniform', 'left_room', 'corridor'")
+        raise ValueError(
+            f"Unknown mode: {mode}. Choose from 'top_left_cell', 'uniform', 'dirac_delta'"
+        )
     
     return nu0.reshape((-1, 1))
 
-def compute_target_distribution(env: TwoRoomsEnv, gamma: float) -> np.ndarray:
+def compute_target_distribution(env: gym.Env , gamma: float) -> np.ndarray:
     """
     Compute target distribution (uniform over all states).
     
     Args:
-        env: TwoRoomsEnv instance
+        env: gym.Env instance
     
     Returns:
         Target distribution as column vector
@@ -892,39 +985,74 @@ def compute_target_distribution(env: TwoRoomsEnv, gamma: float) -> np.ndarray:
     return nu_target.reshape((-1, 1))
     
 
-def main():
+@hydra.main(version_base=None, config_path="configs", config_name="config")
+def main(cfg: DictConfig):
     """Main execution function."""
+    # Set random seed
+    np.random.seed(cfg.experiment.seed)
+    
     # Close any existing figures from previous runs
     plt.close('all')
     
-    # Create environment
-    # env = TwoRoomsEnv(room_size=2, corridor_length=1, corridor_y=0)
-    env = SingleRoomEnv(room_size=4)
-    env.reset()
-    print(f"Environment created with {env.n_states} states\n")
-
-    # Parameters
-    eta = 1e-3
-    gradient_type = 'reverse'  # 'reverse' or 'forward'
-    n_updates = 100_000
-    print_every = 20_000  # Save results every <print_every> iterations
-    n_rollouts = 1
-    horizon = 9
-    gamma = 0.95  # Discount factor close to 1 for long horizon
-    initial_mode = 'top_left_cell'  # 'top_left_cell', 'corner', 'uniform', 'left_room', 'corridor'
-
+    # Get Hydra output directory
+    output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    print(f"\nHydra output directory: {output_dir}\n")
     
+    # Create environment using gym.make with config parameters
+    env_kwargs = {
+        'max_steps': cfg.env.max_steps,
+        'render_mode': cfg.env.render_mode,
+        'show_coordinates': cfg.env.show_coordinates,
+        'goal_position': tuple(cfg.env.goal_position) if cfg.env.goal_position else None,
+        'start_position': tuple(cfg.env.start_position) if cfg.env.start_position else None,
+    }
+    # Add environment-specific parameters
+    if "SingleRoom" in cfg.env.name:
+        env_kwargs['room_size'] = cfg.env.room_size
+    elif "TwoRooms" in cfg.env.name:
+        env_kwargs['room_size'] = cfg.env.room_size
+        env_kwargs['corridor_length'] = cfg.env.corridor_length
+        env_kwargs['corridor_y'] = cfg.env.corridor_y
+    elif "FourRooms" in cfg.env.name:
+        env_kwargs['room_size'] = cfg.env.room_size
+        env_kwargs['corridor_length'] = cfg.env.corridor_length
+        env_kwargs['corridor_positions'] = {
+            'horizontal': cfg.env.corridor_positions.horizontal,
+            'vertical': cfg.env.corridor_positions.vertical
+        }
+    
+    # Create environment using gym.make
+    env = gym.make(cfg.env.name, **env_kwargs)
+    env.reset(seed=cfg.experiment.seed)
+    print(f"Environment: {cfg.env.name}")
+    print(f"Start position: {env.unwrapped.start_position}")
+    print(f"Environment created with {env.unwrapped.n_states} states\n")
+
+    # Get parameters from config
+    eta = cfg.experiment.eta
+    gradient_type = cfg.experiment.gradient_type
+    n_updates = cfg.experiment.n_updates
+    print_every = cfg.experiment.print_every
+    n_rollouts = cfg.experiment.n_rollouts
+    horizon = cfg.experiment.horizon
+    gamma = cfg.experiment.gamma
+    initial_mode = cfg.experiment.initial_mode
+    alpha = cfg.experiment.alpha
+    
+ 
     # Create initial and target distributions
-    nu0 = create_initial_distribution(env, mode=initial_mode)
-    nu_target = np.ones(env.n_states) / env.n_states  # Uniform target
+    # Call create_initial_distribution AFTER environment reset so start_position is set
+    nu0 = create_initial_distribution(env.unwrapped, mode=initial_mode)
+    nu_target = np.ones(env.unwrapped.n_states) / env.unwrapped.n_states  # Uniform target
     nu_target = nu_target.reshape((-1, 1))
-    # nu_target = compute_target_distribution(env, gamma)
+    # nu_target = compute_target_distribution(env.unwrapped, gamma)
     
     # Create matcher and optimize
     matcher = DistributionMatcher(
-        env=env,
+        env=env.unwrapped,
         gamma=gamma,
         eta=eta,
+        alpha=alpha,
         gradient_type=gradient_type
     )
 
@@ -932,10 +1060,10 @@ def main():
     nu_uniform = matcher.compute_discounted_occupancy(nu0, matcher.uniform_policy_operator)
     
     # Visualize results with uniform policy
-    visualizer = DistributionVisualizer(env, matcher)
+    visualizer = DistributionVisualizer(env.unwrapped, matcher)
     visualizer.plot_results(
         nu0, nu_target, nu_uniform, uniform_policy=True,
-        save_path='/home/mprattico/distribution_matching/distribution_matching_results_uniform.png'
+        save_path=os.path.join(output_dir, "results_uniform.png")
     )
     
     # ==================== UNIFORM POLICY ROLLOUTS ====================
@@ -951,20 +1079,20 @@ def main():
     uniform_rollouts = []
     for i in range(n_rollouts):
         # Sample initial state from nu0 distribution
-        np.random.seed(42 + i)
-        start_state = np.random.choice(env.n_states, p=nu0_probs)
+        np.random.seed(cfg.experiment.seed + i)
+        start_state = np.random.choice(env.unwrapped.n_states, p=nu0_probs)
 
-        _, states_i, actions_i = matcher.rollout(start_state, horizon, uniform_policy=True, seed=42+i)
+        _, states_i, actions_i = matcher.rollout(start_state, horizon, uniform_policy=True, seed=cfg.experiment.seed+i)
         unique_states = len(set(states_i))
-        coverage = unique_states / env.n_states * 100
+        coverage = unique_states / env.unwrapped.n_states * 100
         uniform_rollouts.append((states_i, actions_i, start_state))
-        print(f"  Rollout {i+1}: start_state={start_state}, {unique_states}/{env.n_states} states ({coverage:.1f}% coverage)")
+        print(f"  Rollout {i+1}: start_state={start_state}, {unique_states}/{env.unwrapped.n_states} states ({coverage:.1f}% coverage)")
     
     # Plot only first rollout for uniform policy
     print(f"\nSaving visualization for first uniform policy rollout...")
     visualizer.plot_trajectory(
         uniform_rollouts[0][0], uniform_rollouts[0][1], uniform_rollouts[0][2],
-        save_path='/home/mprattico/distribution_matching/trajectory_uniform_policy.png'
+        save_path=os.path.join(output_dir, "trajectory_uniform.png")
     )
     
     # ==================== POLICY OPTIMIZATION ====================
@@ -972,12 +1100,15 @@ def main():
     print("\n" + "="*60)
     print("POLICY OPTIMIZATION")
     print("="*60)
+    
+    # Update save_path_prefix to use output_dir
+    results_prefix = os.path.join(output_dir, "optimization")
     matcher.optimize(
         nu0, nu_target, 
         n_updates=n_updates, 
         verbose=True,
         print_every=print_every,
-        save_path_prefix='/home/mprattico/distribution_matching/distribution_matching_results'
+        save_path_prefix=results_prefix
     )
     
     # Compute final distribution
@@ -986,7 +1117,7 @@ def main():
     # Visualize optimization results
     visualizer.plot_results(
         nu0, nu_target, nu_final,
-        save_path='/home/mprattico/distribution_matching/distribution_matching_results.png'
+        save_path=os.path.join(output_dir, "results_optimized.png")
     )
     
     # ==================== OPTIMIZED POLICY ROLLOUTS ====================
@@ -999,29 +1130,46 @@ def main():
     optimized_rollouts = []
     for i in range(n_rollouts):
         # Sample initial state from nu0 distribution
-        np.random.seed(42 + i)
-        start_state = np.random.choice(env.n_states, p=nu0_probs)
+        np.random.seed(cfg.experiment.seed + i)
+        start_state = np.random.choice(env.unwrapped.n_states, p=nu0_probs)
         
-        _, states_i, actions_i = matcher.rollout(start_state, horizon, seed=42+i)
+        _, states_i, actions_i = matcher.rollout(start_state, horizon, seed=cfg.experiment.seed+i)
         unique_states = len(set(states_i))
-        coverage = unique_states / env.n_states * 100
+        coverage = unique_states / env.unwrapped.n_states * 100
         optimized_rollouts.append((states_i, actions_i, start_state))
-        print(f"  Rollout {i+1}: start_state={start_state}, {unique_states}/{env.n_states} states ({coverage:.1f}% coverage)")
+        print(f"  Rollout {i+1}: start_state={start_state}, {unique_states}/{env.unwrapped.n_states} states ({coverage:.1f}% coverage)")
     
     matcher.stochasticity_check()
     # Plot only first rollout for optimized policy
     print(f"\nSaving visualization for first optimized policy rollout...")
     visualizer.plot_trajectory(
         optimized_rollouts[0][0], optimized_rollouts[0][1], optimized_rollouts[0][2],
-        save_path='/home/mprattico/distribution_matching/trajectory_optimized_policy.png'
+        save_path=os.path.join(output_dir, "trajectory_optimized.png")
     )
+    
+    # ==================== SAVE TRAINING DATA ====================
+    print("\n" + "="*60)
+    print("SAVING TRAINING DATA")
+    print("="*60)
+    
+    # Save all training artifacts (will overwrite intermediate checkpoints)
+    trained_model_dir = os.path.join(output_dir, "trained_model")
+    matcher.save_training_data(trained_model_dir)
+    
+    # Save initial and target distributions
+    np.save(os.path.join(trained_model_dir, "nu0.npy"), nu0)
+    print(f"Initial distribution saved to: {os.path.join(trained_model_dir, 'nu0.npy')}")
+    np.save(os.path.join(trained_model_dir, "nu_target.npy"), nu_target)
+    print(f"Target distribution saved to: {os.path.join(trained_model_dir, 'nu_target.npy')}")
+    np.save(os.path.join(trained_model_dir, "nu_final.npy"), nu_final)
+    print(f"Final distribution saved to: {os.path.join(trained_model_dir, 'nu_final.npy')}")
     
     # Print summary statistics
     print("\n" + "="*60)
     print("SUMMARY STATISTICS")
     print("="*60)
-    print(f"Number of states: {env.n_states}")
-    print(f"Number of actions: {env.action_space.n}")
+    print(f"Number of states: {env.unwrapped.n_states}")
+    print(f"Number of actions: {env.unwrapped.action_space.n}")
     print(f"Discount factor γ: {matcher.gamma}")
     print(f"Learning rate η: {matcher.eta}")
     print(f"Gradient type: {matcher.gradient_type}")
@@ -1038,16 +1186,17 @@ def main():
     optimized_avg_unique = np.mean([len(set(r[0])) for r in optimized_rollouts])
     print(f"\nRollout Statistics (horizon={horizon}, n_rollouts={n_rollouts}):")
     print(f"  Uniform Policy:")
-    print(f"    Average unique states: {uniform_avg_unique:.1f}/{env.n_states}")
-    print(f"    Average coverage: {uniform_avg_unique/env.n_states*100:.1f}%")
+    print(f"    Average unique states: {uniform_avg_unique:.1f}/{env.unwrapped.n_states}")
+    print(f"    Average coverage: {uniform_avg_unique/env.unwrapped.n_states*100:.1f}%")
     print(f"  Optimized Policy:")
-    print(f"    Average unique states: {optimized_avg_unique:.1f}/{env.n_states}")
-    print(f"    Average coverage: {optimized_avg_unique/env.n_states*100:.1f}%")
+    print(f"    Average unique states: {optimized_avg_unique:.1f}/{env.unwrapped.n_states}")
+    print(f"    Average coverage: {optimized_avg_unique/env.unwrapped.n_states*100:.1f}%")
     print(f"    L2 policy distance improvement: {np.linalg.norm(matcher.uniform_policy_operator) - np.linalg.norm(matcher.policy_distance_history[-1]):.6f}")
     print("="*60)
     
     # Clean up all figures at the end
     plt.close('all')
+    env.close()
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ class BaseRoomEnv(gym.Env, ABC):
         self._goal_position_param = goal_position  # Store original parameter
         self._start_position_param = start_position  # Store original parameter
         self.goal_position = None
-        self.start_position = None
+        self.start_position = None  # This will be set during reset
         
         # Define spaces
         self.observation_space = spaces.Discrete(self.n_states)
@@ -178,18 +178,22 @@ class BaseRoomEnv(gym.Env, ABC):
             if start_idx < 0 or start_idx >= self.n_states:
                 raise ValueError(f"start_state must be in [0, {self.n_states-1}]")
             self._agent_location = self.idx_to_state[start_idx]
+            self.start_position = self._agent_location  # Update start_position
         elif options is not None and "start_position" in options:
             start_pos = options["start_position"]
             if isinstance(start_pos, int):
                 self._agent_location = self.idx_to_state[start_pos]
             else:
                 self._agent_location = start_pos
+            self.start_position = self._agent_location  # Update start_position
         elif self._start_position_param is not None:
             self._agent_location = self._set_start_position(self._start_position_param)
+            self.start_position = self._agent_location  # Update start_position
         else:
             # Random start position
             start_idx = self.np_random.integers(0, self.n_states)
             self._agent_location = self.idx_to_state[start_idx]
+            self.start_position = self._agent_location  # Update start_position
         
         observation = self._get_obs()
         info = self._get_info()
