@@ -25,12 +25,12 @@ class DistributionMatcher:
     """
     
     def __init__(self, env: TwoRoomsEnv, gamma: float = 0.9, 
-                 eta: float = 0.1, gradient_type: str = 'reverse'):
+                 eta: float = 0.1, alpha = 0.1,gradient_type: str = 'reverse'):
         self.env = env
         self.gamma = gamma
         self.eta = eta
         self.gradient_type = gradient_type
-        self.alpha =0 #5e-3
+        self.alpha = alpha
         
         self.n_states = env.n_states
         self.n_actions = env.action_space.n
@@ -82,8 +82,8 @@ class DistributionMatcher:
                 next_idx = self.env.state_to_idx[next_cell]
                 col = s_idx * n_actions + action
                 T[next_idx, col] = 1.0
-                if next_cell == (1, 1) or cell == (1, 1):  # Example of special handling for terminal state
-                    T[next_idx, col] = 1.0 # No transitions from terminal state
+                # if next_cell == (3, 3) or cell == (3, 3) or next_cell == (3, 2) or cell == (3, 2) or next_cell == (2, 3) or cell == (2, 3) or next_cell == (1, 3) or cell == (1, 3) or next_cell == (3, 1) or cell == (3, 1) or next_cell == (2, 2) or cell == (2, 2):  # Example of special handling for terminal state
+                #     T[next_idx, col] = 0.0 # No transitions from terminal state
         
         return T
     
@@ -157,6 +157,29 @@ class DistributionMatcher:
         
         return gradient
     
+    # def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
+    #     """
+    #     Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
+        
+    #     Args:
+    #         gradient: Policy gradient
+        
+    #     Returns:
+    #         Updated policy operator
+    #     """
+    #     policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
+    #     new_policy_3d = np.zeros_like(policy_3d)
+    #     gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
+        
+        
+    #     # Normalize the block-diagonal elements (policy probabilities per state)
+    #     for s in range(self.n_states):
+    #         new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(-self.eta * gradient_3d[s, :, s])
+    #         policy_s_actions = new_policy_3d[s, :, s]
+    #         new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
+        
+    #     return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+
     def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
         """
         Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
@@ -167,16 +190,16 @@ class DistributionMatcher:
         Returns:
             Updated policy operator
         """
+        # Reshape the policy and gradient to 3D
         policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
-        new_policy_3d = np.zeros_like(policy_3d)
         gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
         
+        # Apply the mirror descent update for all states at once
+        exp_grad = np.exp(-self.eta * gradient_3d)
+        new_policy_3d = policy_3d * exp_grad
         
-        # Normalize the block-diagonal elements (policy probabilities per state)
-        for s in range(self.n_states):
-            new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(-self.eta * gradient_3d[s, :, s])
-            policy_s_actions = new_policy_3d[s, :, s]
-            new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
+        # Normalize the new policies for each state (along actions dimension)
+        new_policy_3d /= np.sum(new_policy_3d, axis=1, keepdims=True) + 1e-10
         
         return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
     
@@ -875,19 +898,19 @@ def main():
     plt.close('all')
     
     # Create environment
-    # env = TwoRoomsEnv(room_size=4, corridor_length=1, corridor_y=0)
-    env = SingleRoomEnv(room_size=2)
+    # env = TwoRoomsEnv(room_size=2, corridor_length=1, corridor_y=0)
+    env = SingleRoomEnv(room_size=4)
     env.reset()
     print(f"Environment created with {env.n_states} states\n")
 
     # Parameters
     eta = 1e-3
     gradient_type = 'reverse'  # 'reverse' or 'forward'
-    n_updates = 1_000_000
+    n_updates = 100_000
     print_every = 20_000  # Save results every <print_every> iterations
     n_rollouts = 1
     horizon = 9
-    gamma = 0.9  # Discount factor close to 1 for long horizon
+    gamma = 0.95  # Discount factor close to 1 for long horizon
     initial_mode = 'top_left_cell'  # 'top_left_cell', 'corner', 'uniform', 'left_room', 'corridor'
 
     
