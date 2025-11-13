@@ -11,7 +11,7 @@ from PIL import Image
 import env  # Import to register environments
 
 
-@hydra.main(version_base=None, config_path=".", config_name="config")
+@hydra.main(version_base=None, config_path="configs", config_name="config_test")
 def test_environments(cfg: DictConfig):
     """Test the custom environments."""
     

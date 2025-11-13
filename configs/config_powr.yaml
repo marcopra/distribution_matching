@@ -1,0 +1,29 @@
+# Main configuration for distribution matching experiments
+defaults:
+  - env: two_rooms  # Options: single_room, two_rooms, four_rooms
+  - _self_
+
+# Experiment hyperparameters
+experiment:
+  # Optimization parameters
+  gamma: 0.99  # Discount factor for occupancy measure
+  eta: 0.1  # Learning rate for mirror descent
+  
+  # Training parameters
+  pmd_iter_updates: 10  # Number of optimization updates
+  eval_episodes: 10  # Number of evaluation episodes
+  timestep_interval: 20  # Timesteps between evaluations
+  timesteps: 400  # Total training timesteps
+  
+  # Random seed
+  seed: 42
+  n_runs: 3  # Number of experiment runs with different seeds
+
+# Output paths
+output:
+  save_dir: '/home/mprattico/distribution_matching'
+  results_uniform: '${output.save_dir}/distribution_matching_results_uniform.png'
+  results_optimized: '${output.save_dir}/distribution_matching_results.png'
+  trajectory_uniform: '${output.save_dir}/trajectory_uniform_policy.png'
+  trajectory_optimized: '${output.save_dir}/trajectory_optimized_policy.png'
+  results_prefix: '${output.save_dir}/distribution_matching_results'

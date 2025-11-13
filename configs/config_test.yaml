@@ -1,0 +1,13 @@
+# Test configuration for custom environments
+
+defaults:
+  - env: two_rooms  # Change this to use different env configs: single_room, two_rooms, four_rooms
+
+test:
+  num_episodes: 3
+  random_seed: 42
+  save_dir: '/home/mprattico/distribution_matching/test_outputs'
+
+hydra:
+  run:
+    dir: outputs/test/${now:%Y-%m-%d}/${now:%H-%M-%S}

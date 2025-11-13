@@ -122,7 +122,7 @@ class BaseRoomEnv(gym.Env, ABC):
         """Check if a cell is valid in the environment."""
         return cell in self.state_to_idx
     
-    def _step_from(self, cell: Tuple[int, int], action: int) -> Tuple[int, int]:
+    def step_from(self, cell: Tuple[int, int], action: int) -> Tuple[int, int]:
         """
         Compute next cell from current cell and action.
         If the move would go outside valid cells, stay in place.
@@ -146,6 +146,9 @@ class BaseRoomEnv(gym.Env, ABC):
             "state_index": self.state_to_idx[self._agent_location],
             "step_count": self._step_count
         }
+    
+    def __getattribute__(self, name):
+        return super().__getattribute__(name)
     
     def reset(
         self,
@@ -208,7 +211,7 @@ class BaseRoomEnv(gym.Env, ABC):
         self._step_count += 1
         
         # Move the agent
-        self._agent_location = self._step_from(self._agent_location, action)
+        self._agent_location = self.step_from(self._agent_location, action)
         
         # Check if goal is reached
         terminated = self._agent_location == self.goal_position
@@ -216,9 +219,9 @@ class BaseRoomEnv(gym.Env, ABC):
         
         # Reward: 1 - 0.9 * (step_count / max_steps) for success, 0 for failure
         if terminated:
-            reward = 1.0 - 0.9 * (self._step_count / self.max_steps)
+            reward = 0.0 #1.0 - 0.9 * (self._step_count / self.max_steps)
         else:
-            reward = 0.0
+            reward = - 1.0
         
         observation = self._get_obs()
         info = self._get_info()
