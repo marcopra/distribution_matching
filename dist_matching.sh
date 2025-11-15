@@ -1,0 +1,3 @@
+python distribution_matching.py env=four_rooms5_0
+
+python distribution_matching.py env=two_rooms10_0

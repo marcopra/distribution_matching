@@ -81,7 +81,7 @@ class DistributionMatcher:
         for s_idx in range(self.n_states):
             cell = self.env.idx_to_state[s_idx]
             for action in range(n_actions):
-                next_cell = self.env._step_from(cell, action)
+                next_cell = self.env.step_from(cell, action)
                 next_idx = self.env.state_to_idx[next_cell]
                 col = s_idx * n_actions + action
                 T[next_idx, col] = 1.0
@@ -248,6 +248,7 @@ class DistributionMatcher:
         
         # Save policy operator
         np.save(os.path.join(save_dir, "policy_operator.npy"), self.policy_operator)
+        print(f"operator: {self.policy_operator}")
         if verbose:
             print(f"Policy operator saved to: {os.path.join(save_dir, 'policy_operator.npy')}")
         
@@ -500,7 +501,7 @@ class DistributionMatcher:
             
             # Get next state from environment
             current_cell = self.env.idx_to_state[current_state]
-            next_cell = self.env._step_from(current_cell, action)
+            next_cell = self.env.step_from(current_cell, action)
             next_state = self.env.state_to_idx[next_cell]
             
             trajectory.append((current_state, action))
@@ -985,7 +986,7 @@ def compute_target_distribution(env: gym.Env , gamma: float) -> np.ndarray:
     return nu_target.reshape((-1, 1))
     
 
-@hydra.main(version_base=None, config_path="configs", config_name="config")
+@hydra.main(version_base=None, config_path="configs", config_name="config_distribution_matching.yaml")
 def main(cfg: DictConfig):
     """Main execution function."""
     # Set random seed

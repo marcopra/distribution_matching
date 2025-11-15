@@ -16,6 +16,7 @@ from omegaconf import DictConfig
 from PIL import Image
 import env
 import os
+import jax
 
 class NaivePowr:
     """
@@ -35,6 +36,7 @@ class NaivePowr:
         
         self.n_states = env.n_states
         self.n_actions = env.action_space.n
+        self.visited_states = set()
         
         self.dataset = {
             'states': np.array([]),
@@ -46,10 +48,15 @@ class NaivePowr:
         # Get transition matrix from environment
         self.T_operator = self._create_transition_matrix()
         self.R_vector = np.zeros((self.n_states * self.n_actions, 1))
+        self.R_tilde = np.zeros((self.n_states, 1))
         
         # Initialize uniform random policy
         self.uniform_policy_operator = self._create_uniform_policy() 
-        self.policy_operator = self._create_random_policy() 
+        self.initial_policy_operator = self._create_uniform_policy().copy() 
+        self.policy_operator = self.initial_policy_operator.copy()  
+
+        self.reference_R_vector = self._create_R_vector()
+        self.reference_R_tilde = self._create_R_tilde_vector()
         
         
     def _create_uniform_policy(self) -> np.ndarray:
@@ -59,6 +66,7 @@ class NaivePowr:
             for a in range(self.n_actions):
                 row = s * self.n_actions + a
                 P[row, s] = 1.0 / self.n_actions
+                
         return P
     
     def _create_random_policy(self) -> np.ndarray:
@@ -92,52 +100,47 @@ class NaivePowr:
         
         return T
 
-    
-    
-    def mirror_descent_update(self) -> np.ndarray:
-        """
-        Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(η Q(s,a))
-        
-        
-        Returns:
-            Updated policy operator
-        """
-        policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
-        new_policy_3d = np.zeros_like(policy_3d)
-        I = np.eye(self.n_states * self.n_actions)
-        Q_estimated = np.linalg.solve(I - self.gamma * self.policy_operator @ self.T_operator , self.R_vector)
-        
-        
-        # Normalize the block-diagonal elements (policy probabilities per state)
+    def _create_R_vector(self) -> np.ndarray:
+        """Create reward vector R for all state-action pairs."""
+        R = np.zeros((self.n_states*self.n_actions))
         for s in range(self.n_states):
-            new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(self.eta * Q_estimated[s, :])
-            policy_s_actions = new_policy_3d[s, :, s]
-            new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
-        
-        return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+            for a in range(self.n_actions):
+                next_cell = self.env.unwrapped.step_from(self.env.idx_to_state[s], a)
+                if next_cell == self.env.goal_position:
+                    R[s * self.n_actions + a] = 0.0  # Reward for reaching goal
+                else:
+                    R[s * self.n_actions + a] = -1.0  # Initialize rewards to -1
+        return R
 
-    # def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
-    #     """
-    #     Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
-        
-    #     Args:
-    #         gradient: Policy gradient
-        
-    #     Returns:
-    #         Updated policy operator
-    #     """
-    #     # Reshape the policy and gradient to 3D
-    #     policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
-    #     gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
-        
-    #     # Apply the mirror descent update for all states at once
-    #     exp_grad = np.exp(-self.eta * gradient_3d)
-    #     new_policy_3d = policy_3d * exp_grad
-        
-    #     # Normalize the new policies for each state (along actions dimension)
-    #     new_policy_3d /= np.sum(new_policy_3d, axis=1, keepdims=True) + 1e-10
-        
-    #     return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+    def _create_R_tilde_vector(self) -> np.ndarray:
+        """Create reward vector R for all state-action pairs."""
+        R = np.zeros((self.n_states))
+        for s in range(self.n_states):
+            cell = self.env.idx_to_state[s]
+            if cell == self.env.goal_position:
+                R[s] = 0.0  # Reward for reaching goal
+            else:
+                R[s] = -1.0  # Initialize rewards to -1
+        return R
+    
+
+    def mirror_descent_update_cumulative(self) -> np.ndarray:
+        initial_policy_3d = self.initial_policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
+        new_policy_3d = np.zeros_like(initial_policy_3d)
+        I = np.eye(self.n_states * self.n_actions)
+        Q_estimated = np.linalg.solve(I - self.gamma * self.T_operator.T @ self.policy_operator.T , self.T_operator.T@self.R_tilde)
+        Q_estimated = Q_estimated.reshape((self.n_states, self.n_actions))
+        self.comulative_Qs += Q_estimated
+       
+                
+        for s in range(self.n_states):
+            new_policy_3d[s, :, s] = np.log(initial_policy_3d[s, :, s]) + self.eta * self.comulative_Qs[s, :]
+            new_policy_3d[s, :, s] = jax.nn.softmax(new_policy_3d[s, :, s], axis = 0)
+            
+        new_policy_3d = new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+    
+        return new_policy_3d
+      
     
     def save_policy(self, filepath: str) -> None:
         """
@@ -157,8 +160,7 @@ class NaivePowr:
             filepath: Path to the saved policy file
         """
         self.policy_operator = np.load(filepath)
-        print(f"Policy operator loaded from: {filepath}")
-    
+
     def save_transition_matrix(self, filepath: str) -> None:
         """
         Save the transition matrix to a file.
@@ -262,18 +264,29 @@ class NaivePowr:
         goal_idx = self.env.state_to_idx[self.env.goal_position]
 
         for s,a,s_next in zip(self.dataset['states'], self.dataset['actions'], self.dataset['next_states']):
-
+            self.visited_states.add(int(s))
             if int(s_next) != goal_idx:
                 row = int(s) * self.n_actions + int(a)
                 self.R_vector[row] = -1.0
-            else:
-                print(f"Reached goal at state {s_next}, no penalty assigned.")
+                self.R_tilde[int(s)] = -1.0
+            
+        # if len(self.visited_states) > self.n_states - 5:
+        #     print(f"R: {self.R_vector}")
+        #     print(f"R_tilde: {self.R_tilde}")   
+        #     exit()
+            # else:
+            #     print(f"Reached goal at state {s_next}, no penalty assigned.")
+        
+        # print(f"reward vector error: {np.linalg.norm(self.R_vector - self.reference_R_vector)}")
 
+
+        self.comulative_Qs = np.zeros((self.n_states, self.n_actions))
         # PMD iterations
-        for iteration in range(n_pmd_iter):
+        for _ in range(n_pmd_iter):
             # Compute gradient and update policy
-            self.policy_operator = self.mirror_descent_update()
-
+            self.policy_operator = self.mirror_descent_update_cumulative()
+   
+    
     def eval(self, n_episodes):
         total_rewards = []
 
@@ -283,7 +296,7 @@ class NaivePowr:
             episode_reward = 0
 
             while not done:
-                action = self.sample_action(obs)
+                action = self.sample_action(obs, eval =True)
                 next_obs, reward, terminated, truncated, info = self.env.step(action)
                 done = terminated or truncated
                 episode_reward += reward
@@ -304,6 +317,7 @@ class NaivePowr:
         """
         if uniform_policy:
             policy_matrix = self.uniform_policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
+            raise NotImplementedError("Uniform policy per state extraction not implemented yet.")
         else:
             policy_matrix = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
         policy_per_state = np.zeros((self.n_states, self.n_actions))
@@ -313,7 +327,7 @@ class NaivePowr:
 
         return policy_per_state
 
-    def sample_action(self, state: int, uniform_policy: bool = False) -> int:
+    def sample_action(self, state: int, uniform_policy: bool = False, eval: bool = False) -> int:
         """
         Sample an action from the policy for a given state.
         
@@ -328,11 +342,14 @@ class NaivePowr:
         action_probs = policy_per_state[state]
 
         # Check stochasticity
-        # prob_sum = np.sum(action_probs)
-        # if not np.isclose(prob_sum, 1.0, atol=1e-8):
-        #     print(f"⚠️  State {state}: probabilities sum to {prob_sum:.10f} (deviation: {abs(prob_sum - 1.0):.2e})")
-        #     print(f"   Probabilities: {action_probs}")
-
+        prob_sum = np.sum(action_probs)
+        if not np.isclose(prob_sum, 1.0, atol=1e-8):
+            print(f"⚠️  State {state}: probabilities sum to {prob_sum:.10f} (deviation: {abs(prob_sum - 1.0):.2e})")
+            print(f"   Probabilities: {action_probs}")
+        # if eval:
+        #     # In evaluation mode, choose the action with highest probability
+        #     return np.argmax(action_probs)
+        
         action_probs = action_probs / np.sum(action_probs)  # Normalize probabilities, it could be slightly off due to numerical issues
         return np.random.choice(self.n_actions, p=action_probs)
     
@@ -373,9 +390,12 @@ class NaivePowr:
             print(f"\n✓ Policy is stochastic (within tolerance)")
         print(f"{'='*60}\n")
     
-    def reset_policy(self) -> None:
-        """Reset the policy to a random initialization."""
-        self.policy_operator = self._create_random_policy()
+    def reset_policy(self, p_path: str = None) -> None:
+        """Reset the policy to a random initialization or load a pretrained policy."""
+        if p_path:
+            self.load_policy(p_path)
+        else:
+            self.policy_operator = self.initial_policy_operator.copy()
     
     def rollout(self, start_state: int, horizon: int, uniform_policy: bool = False, seed: int = None) -> tuple:
         """
@@ -409,7 +429,7 @@ class NaivePowr:
             # Get next state from environment
             current_cell = self.env.idx_to_state[current_state]
             next_cell = self.env.unwrapped.step_from(current_cell, action)
-            next_state = self.env.state_to_idx[next_cell]
+            next_state = self.env.state_to_idx(next_cell)
             
             trajectory.append((current_state, action))
             states.append(next_state)
@@ -506,8 +526,14 @@ class NaivePowr:
             x, y = self.env.idx_to_state[s_idx]
             grid[y - min_y, x - min_x] = state_counts[s_idx]
         
+        # Mask zero values to show background color
+        masked_grid = np.ma.masked_where(grid == 0, grid)
+        
         fig, ax = plt.subplots(figsize=(8, 6))
-        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest')
+        # Set light gray background
+        ax.set_facecolor("#B2B2B2")
+        # Plot only non-zero values
+        im = ax.imshow(masked_grid, cmap='YlOrRd', interpolation='nearest')
         ax.set_title(f'Dataset State Visitation (n={len(self.dataset["states"])})')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
@@ -539,7 +565,7 @@ class NaivePowr:
         steps = 0
         
         while not done and steps < n_steps:
-            action = self.sample_action(obs)
+            action = self.sample_action(obs, eval =True)
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             trajectory_states.append(next_obs)
@@ -629,6 +655,7 @@ class NaivePowr:
 @hydra.main(version_base=None, config_path="configs", config_name="config_powr")
 def main(cfg: DictConfig):
     """Main execution function."""
+
     # Set random seed
     np.random.seed(cfg.experiment.seed)
     
@@ -682,6 +709,9 @@ def main(cfg: DictConfig):
     timestep_interval = cfg.experiment.timestep_interval
     timesteps = cfg.experiment.timesteps
     
+    p_path = cfg.experiment.p_path
+    
+
     # Storage for all runs
     all_runs_rewards = []  # List of lists: [run][checkpoint]
     all_runs_data_len = []  # List of lists: [run][checkpoint]
@@ -698,19 +728,25 @@ def main(cfg: DictConfig):
         
         # Initialize NaivePowr agent
         agent = NaivePowr(env, gamma=gamma, eta=eta)
-        
+            
+        if p_path:
+            agent.load_policy(p_path)
+        agent.visualize_policy_bars(os.path.join(output_dir, "policy_bars.png"))
         eval_rewards = []
         data_len = []
         checkpoint_idx = 0
         
         while True:
             agent.collect_dataset(n_timesteps=timestep_interval)
-            agent.train(n_pmd_iter=pmd_iter_updates)
-            eval_reward = agent.eval(n_episodes=eval_episodes)
-            
             # Create checkpoint directory
             checkpoint_dir = os.path.join(output_dir, f"run_{run_idx:02d}", f"checkpoint_{checkpoint_idx:04d}")
             os.makedirs(checkpoint_dir, exist_ok=True)
+            agent.visualize_policy_bars(os.path.join(checkpoint_dir, "starting_policy_bars.png"))
+
+            agent.train(n_pmd_iter=pmd_iter_updates)
+            eval_reward = agent.eval(n_episodes=eval_episodes)
+            
+            
             
             # Save visualizations for this checkpoint
             agent.visualize_policy_bars(os.path.join(checkpoint_dir, "policy_bars.png"))
@@ -721,7 +757,7 @@ def main(cfg: DictConfig):
                 seed=run_seed + checkpoint_idx
             )
             
-            agent.reset_policy()
+            agent.reset_policy(p_path)
             
             eval_rewards.append(np.mean(eval_reward))
             data_len.append(len(agent.dataset['states']))
@@ -772,6 +808,7 @@ def main(cfg: DictConfig):
     ax.legend(fontsize=10)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'eval_rewards_with_error.png'), dpi=150)
+    print(f"Saved evaluation rewards plot to: {os.path.join(output_dir, 'eval_rewards_with_error.png')}")
     plt.close(fig)
     
     # Save aggregated statistics

@@ -5,9 +5,10 @@ defaults:
 
 # Experiment hyperparameters
 experiment:
+  name: 'distribution_matching'  # Nome dell'esperimento
   # Optimization parameters
   gamma: 0.99  # Discount factor for occupancy measure
-  eta: 0.01  # Learning rate for mirror descent
+  eta: 0.05  # Learning rate for mirror descent
   alpha: 0.0  # Alpha parameter for KL divergence
   gradient_type: 'reverse'  # Type of KL gradient: 'reverse' or 'forward'
   
@@ -16,7 +17,7 @@ experiment:
   print_every: 20000  # Save results every N iterations
   
   # Rollout parameters
-  n_rollouts: 1  # Number of rollout episodes
+  n_rollouts: 10  # Number of rollout episodes
   horizon: 9  # Rollout horizon (number of steps)
   
   # Initial distribution
@@ -33,3 +34,11 @@ output:
   trajectory_uniform: '${output.save_dir}/trajectory_uniform_policy.png'
   trajectory_optimized: '${output.save_dir}/trajectory_optimized_policy.png'
   results_prefix: '${output.save_dir}/distribution_matching_results'
+
+hydra:
+  run:
+    dir: outputs/${experiment.name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/${experiment.name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
