@@ -4,7 +4,9 @@ Distribution Matching with Mirror Descent on Two Rooms Environment.
 This script demonstrates how to learn a policy that matches a target state 
 distribution using mirror descent optimization in a custom Gymnasium environment.
 """
-
+import agent
+import utils
+from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for saving figures
@@ -17,6 +19,10 @@ from PIL import Image
 import env
 import os
 import jax
+import torch
+import torch.nn.functional as F
+import wandb
+from omegaconf import OmegaConf
 
 class NaivePowr:
     """
@@ -30,11 +36,11 @@ class NaivePowr:
     """
     
     def __init__(self, env: gym.Env , gamma: float = 0.9, eta: float = 0.1):
-        self.env = env
+        self.env = env.unwrapped
         self.gamma = gamma
         self.eta = eta
         
-        self.n_states = env.n_states
+        self.n_states = env.unwrapped.n_states
         self.n_actions = env.action_space.n
         self.visited_states = set()
         
@@ -54,6 +60,8 @@ class NaivePowr:
         self.uniform_policy_operator = self._create_uniform_policy() 
         self.initial_policy_operator = self._create_uniform_policy().copy() 
         self.policy_operator = self.initial_policy_operator.copy()  
+
+        self.agent = None
 
         self.reference_R_vector = self._create_R_vector()
         self.reference_R_tilde = self._create_R_tilde_vector()
@@ -135,8 +143,11 @@ class NaivePowr:
                 
         for s in range(self.n_states):
             new_policy_3d[s, :, s] = np.log(initial_policy_3d[s, :, s]) + self.eta * self.comulative_Qs[s, :]
-            new_policy_3d[s, :, s] = jax.nn.softmax(new_policy_3d[s, :, s], axis = 0)
-            
+            # try:
+            #     new_policy_3d[s, :, s] = jax.nn.softmax(new_policy_3d[s, :, s], axis = 0) # Problems with jax and cuda and torch together, GPU 10800ti too old!!
+            # except:
+            new_policy_3d[s, :, s] = F.softmax(torch.tensor(new_policy_3d[s, :, s]), dim = 0).numpy()
+                
         new_policy_3d = new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
     
         return new_policy_3d
@@ -152,14 +163,23 @@ class NaivePowr:
         np.save(filepath, self.policy_operator)
         print(f"Policy operator saved to: {filepath}.npy")
     
-    def load_policy(self, filepath: str) -> None:
+    def load_policy(self, filepath: str, key: str = None) -> None:
         """
         Load a policy operator from a file.
         
         Args:
             filepath: Path to the saved policy file
         """
-        self.policy_operator = np.load(filepath)
+        if filepath.endswith('.pt'):
+            if self.agent is None:
+                with Path(filepath).open('rb') as f:
+                    payload = torch.load(f, weights_only=False)
+                print(f" Keys in loaded payload: {list(payload.keys())}")
+                self.agent = payload[key]
+            self.policy_operator = self.initial_policy_operator.copy()  
+        else:
+            self.policy_operator = np.load(filepath)
+        
 
     def save_transition_matrix(self, filepath: str) -> None:
         """
@@ -338,20 +358,28 @@ class NaivePowr:
         Returns:
             Sampled action index
         """
-        policy_per_state = self.get_policy_per_state(uniform_policy=uniform_policy) 
-        action_probs = policy_per_state[state]
-
-        # Check stochasticity
-        prob_sum = np.sum(action_probs)
-        if not np.isclose(prob_sum, 1.0, atol=1e-8):
-            print(f"⚠️  State {state}: probabilities sum to {prob_sum:.10f} (deviation: {abs(prob_sum - 1.0):.2e})")
-            print(f"   Probabilities: {action_probs}")
-        # if eval:
-        #     # In evaluation mode, choose the action with highest probability
-        #     return np.argmax(action_probs)
+        if self.agent is not None:
+            obs  = np.zeros(self.n_states, dtype=np.float32)
+            obs[state] = 1.0
+            action = self.agent.act(obs, {}, 1000000, False)
         
-        action_probs = action_probs / np.sum(action_probs)  # Normalize probabilities, it could be slightly off due to numerical issues
-        return np.random.choice(self.n_actions, p=action_probs)
+            # Return numpy action
+            return action
+        else:
+            policy_per_state = self.get_policy_per_state(uniform_policy=uniform_policy) 
+            action_probs = policy_per_state[state]
+
+            # Check stochasticity
+            prob_sum = np.sum(action_probs)
+            if not np.isclose(prob_sum, 1.0, atol=1e-8):
+                print(f"⚠️  State {state}: probabilities sum to {prob_sum:.10f} (deviation: {abs(prob_sum - 1.0):.2e})")
+                print(f"   Probabilities: {action_probs}")
+            # if eval:
+            #     # In evaluation mode, choose the action with highest probability
+            #     return np.argmax(action_probs)
+            
+            action_probs = action_probs / np.sum(action_probs)  # Normalize probabilities, it could be slightly off due to numerical issues
+            return np.random.choice(self.n_actions, p=action_probs)
     
     def stochasticity_check(self, operator = None) -> None:
         """Check and report policy stochasticity statistics."""
@@ -666,6 +694,27 @@ def main(cfg: DictConfig):
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     print(f"\nHydra output directory: {output_dir}\n")
     
+    # Initialize wandb
+    if cfg.wandb.use_wandb:
+        if cfg.wandb.wandb_id is not None and cfg.wandb.wandb_id != "none":
+            wandb.init(
+                id=cfg.wandb.wandb_id,
+                resume='must',
+                project=cfg.wandb.wandb_project,
+                name=cfg.wandb.wandb_run_name,
+                tags=cfg.wandb.wandb_tag.split('_') if cfg.wandb.wandb_tag and cfg.wandb.wandb_tag != "none" else None,
+                sync_tensorboard=True,
+                mode='online')
+        else:
+            wandb.init(
+                config=OmegaConf.to_container(cfg, resolve=True),
+                project=cfg.wandb.wandb_project,
+                name=cfg.wandb.wandb_run_name,
+                tags=cfg.wandb.wandb_tag.split('_') if cfg.wandb.wandb_tag and cfg.wandb.wandb_tag != "none" else None,
+                sync_tensorboard=True,
+                mode='online')
+
+    
     # Create environment using gym.make with config parameters
     env_kwargs = {
         'max_steps': cfg.env.max_steps,
@@ -692,6 +741,7 @@ def main(cfg: DictConfig):
     # Create environment using gym.make
     env = gym.make(cfg.env.name, **env_kwargs)
     env.reset(seed=cfg.experiment.seed)
+    print(f"Environment {cfg.env.name} created.")   
     frame = env.render()
     img = Image.fromarray(frame)
     img.save(os.path.join(output_dir, f"{cfg.env.name}.png"))
@@ -730,7 +780,7 @@ def main(cfg: DictConfig):
         agent = NaivePowr(env, gamma=gamma, eta=eta)
             
         if p_path:
-            agent.load_policy(p_path)
+            agent.load_policy(p_path, key = 'agent') # TODO from cfg
         agent.visualize_policy_bars(os.path.join(output_dir, "policy_bars.png"))
         eval_rewards = []
         data_len = []
@@ -762,6 +812,15 @@ def main(cfg: DictConfig):
             eval_rewards.append(np.mean(eval_reward))
             data_len.append(len(agent.dataset['states']))
             
+            # Log to wandb
+            if cfg.wandb.use_wandb:
+                wandb.log({
+                    f'eval_reward_mean': np.mean(eval_reward),
+                    f'eval_reward_std': np.std(eval_reward),
+                    f'dataset_length': len(agent.dataset['states']),
+                    f'checkpoint': checkpoint_idx
+                })
+            
             print(f"Dataset size: {len(agent.dataset['states'])}, "
                   f"Eval reward: {np.mean(eval_reward):.2f} ± {np.std(eval_reward):.2f}")
             
@@ -786,20 +845,21 @@ def main(cfg: DictConfig):
     rewards_array = np.array([rewards[:min_checkpoints] for rewards in all_runs_rewards])
     data_len_array = np.array([data_len[:min_checkpoints] for data_len in all_runs_data_len])
     
-    # Compute mean and std across runs
-    mean_rewards = np.mean(rewards_array, axis=0)
-    std_rewards = np.std(rewards_array, axis=0)
+    # Compute median and 95% confidence interval across runs
+    median_rewards = np.median(rewards_array, axis=0)
+    ci_lower = np.percentile(rewards_array, 2.5, axis=0)
+    ci_upper = np.percentile(rewards_array, 97.5, axis=0)
     mean_data_len = np.mean(data_len_array, axis=0)
     
-    # Plot evaluation rewards with error bounds
+    # Plot evaluation rewards with confidence interval
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(mean_data_len, mean_rewards, marker='o', linewidth=2, label='Mean')
+    ax.plot(mean_data_len, median_rewards, marker='o', linewidth=2, label='Median')
     ax.fill_between(
         mean_data_len,
-        mean_rewards - std_rewards,
-        mean_rewards + std_rewards,
+        ci_lower,
+        ci_upper,
         alpha=0.3,
-        label=f'±1 std (n={n_runs} runs)'
+        label=f'95% CI (n={n_runs} runs)'
     )
     ax.set_xlabel('Dataset Size (timesteps)', fontsize=12)
     ax.set_ylabel('Average Eval Reward', fontsize=12)
@@ -809,13 +869,25 @@ def main(cfg: DictConfig):
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'eval_rewards_with_error.png'), dpi=150)
     print(f"Saved evaluation rewards plot to: {os.path.join(output_dir, 'eval_rewards_with_error.png')}")
+    
+    # Log final plot to wandb
+    if cfg.wandb.use_wandb:
+        wandb.log({
+            'aggregated/eval_rewards_plot': wandb.Image(fig),
+            'aggregated/final_median_reward': median_rewards[-1],
+            'aggregated/final_ci_lower': ci_lower[-1],
+            'aggregated/final_ci_upper': ci_upper[-1],
+            'aggregated/final_dataset_size': mean_data_len[-1]
+        })
+    
     plt.close(fig)
     
     # Save aggregated statistics
     stats = {
         'n_runs': n_runs,
-        'mean_rewards': mean_rewards,
-        'std_rewards': std_rewards,
+        'median_rewards': median_rewards,
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper,
         'mean_data_len': mean_data_len,
         'all_runs_rewards': rewards_array,
         'all_runs_data_len': data_len_array
@@ -826,10 +898,13 @@ def main(cfg: DictConfig):
     print("FINAL STATISTICS")
     print(f"{'='*60}")
     print(f"Runs completed: {n_runs}")
-    print(f"Final mean reward: {mean_rewards[-1]:.2f} ± {std_rewards[-1]:.2f}")
+    print(f"Final median reward: {median_rewards[-1]:.2f} (95% CI: [{ci_lower[-1]:.2f}, {ci_upper[-1]:.2f}])")
     print(f"Final dataset size: {mean_data_len[-1]:.0f}")
     print(f"{'='*60}\n")
-
+    
+    # Finish wandb run
+    if cfg.wandb.use_wandb:
+        wandb.finish()
 
 if __name__ == "__main__":
     main()

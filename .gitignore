@@ -142,7 +142,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+wandb/
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -208,3 +208,4 @@ __marimo__/
 *png
 outputs
 models
+*.pt

@@ -22,6 +22,14 @@ experiment:
 
   p_path: null  # Path to pretrained policy (if any)
 
+# Weights & Biases configuration
+wandb:
+  use_wandb: false  # Set to false to disable wandb logging
+  wandb_project: 'distribution_matching'  # Nome del progetto wandb
+  wandb_run_name: null  # Nome del run (null per auto-generato)
+  wandb_id: null  # ID per riprendere un run esistente (null per nuovo run)
+  wandb_tag: null  # Tags separati da underscore (es: 'powr_four_rooms')
+
 # Output paths
 output:
   save_dir: '/home/mprattico/distribution_matching'
