@@ -1,0 +1,2 @@
+python train.py experiment=cql agent=cql experiment=baseline use_wandb=true seed=0 configs/env=four_rooms5_0
+python train.py experiment=ddqn agent=doubledqn experiment=baseline use_wandb=true seed=0 configs/env=four_rooms5_0

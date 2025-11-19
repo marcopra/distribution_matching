@@ -10,45 +10,31 @@ import utils
 
 
 class Encoder(nn.Module):
-    def __init__(self, obs_shape, obs_type='pixels'):
+    def __init__(self, obs_shape):
         super().__init__()
-        
-        self.obs_type = obs_type
-        
-        if obs_type == 'pixels':
-            assert len(obs_shape) == 3
-            self.repr_dim = 32 * 35 * 35
 
-            self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-                                         nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                         nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                         nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                         nn.ReLU())
-        elif obs_type in ['states', 'discrete_states']:
-            # For state-based observations, just pass through
-            self.repr_dim = obs_shape[0]
-            self.convnet = nn.Identity()
-        else:
-            raise ValueError(f"Unknown obs_type: {obs_type}")
+        assert len(obs_shape) == 3
+        self.repr_dim = 32 * 35 * 35
+
+        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU())
 
         self.apply(utils.weight_init)
 
     def forward(self, obs):
-        if self.obs_type == 'pixels':
-            obs = obs / 255.0 - 0.5
-            h = self.convnet(obs)
-            h = h.view(h.shape[0], -1)
-            return h
-        else:
-            # For states, observations are already processed
-            return obs
+        obs = obs / 255.0 - 0.5
+        h = self.convnet(obs)
+        h = h.view(h.shape[0], -1)
+        return h
 
 
 class Actor(nn.Module):
-    def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim, mode='continuous'):
+    def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim):
         super().__init__()
 
-        self.mode = mode
         feature_dim = feature_dim if obs_type == 'pixels' else hidden_dim
 
         self.trunk = nn.Sequential(nn.Linear(obs_dim, feature_dim),
@@ -73,37 +59,30 @@ class Actor(nn.Module):
 
     def forward(self, obs, std):
         h = self.trunk(obs)
-        logits = self.policy(h)
-        
-        if self.mode == 'discrete':
-            # For discrete actions, return categorical distribution
-            dist = torch.distributions.Categorical(logits=logits)
-            return dist
-        else:
-            # For continuous actions, use truncated normal
-            mu = torch.tanh(logits)
-            std = torch.ones_like(mu) * std
-            dist = utils.TruncatedNormal(mu, std)
-            return dist
+
+        mu = self.policy(h)
+        mu = torch.tanh(mu)
+        std = torch.ones_like(mu) * std
+
+        dist = utils.TruncatedNormal(mu, std)
+        return dist
 
 
 class Critic(nn.Module):
-    def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim, mode='continuous'):
+    def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim):
         super().__init__()
 
         self.obs_type = obs_type
-        self.mode = mode
 
         if obs_type == 'pixels':
             # for pixels actions will be added after trunk
             self.trunk = nn.Sequential(nn.Linear(obs_dim, feature_dim),
                                        nn.LayerNorm(feature_dim), nn.Tanh())
-            trunk_dim = feature_dim + (action_dim if mode == 'continuous' else action_dim)
+            trunk_dim = feature_dim + action_dim
         else:
             # for states actions come in the beginning
-            action_input_dim = action_dim if mode == 'continuous' else action_dim
             self.trunk = nn.Sequential(
-                nn.Linear(obs_dim + action_input_dim, hidden_dim),
+                nn.Linear(obs_dim + action_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim), nn.Tanh())
             trunk_dim = hidden_dim
 
@@ -127,11 +106,8 @@ class Critic(nn.Module):
         self.apply(utils.weight_init)
 
     def forward(self, obs, action):
-        # For discrete mode, convert action indices to one-hot
-        if self.mode == 'discrete' and action.dtype == torch.long:
-            action = F.one_hot(action.squeeze(-1), num_classes=action.shape[-1] if len(action.shape) > 1 else 4).float()
-        
-        inpt = obs if self.obs_type == 'pixels' else torch.cat([obs, action], dim=-1)
+        inpt = obs if self.obs_type == 'pixels' else torch.cat([obs, action],
+                                                               dim=-1)
         h = self.trunk(inpt)
         h = torch.cat([h, action], dim=-1) if self.obs_type == 'pixels' else h
 
@@ -162,8 +138,7 @@ class DDPGAgent:
                  init_critic,
                  use_tb,
                  use_wandb,
-                 meta_dim=0,
-                 mode='continuous'):
+                 meta_dim=0):
         self.reward_free = reward_free
         self.obs_type = obs_type
         self.obs_shape = obs_shape
@@ -181,32 +156,31 @@ class DDPGAgent:
         self.init_critic = init_critic
         self.feature_dim = feature_dim
         self.solved_meta = None
-        self.mode = mode
 
         # models
         if obs_type == 'pixels':
             self.aug = utils.RandomShiftsAug(pad=4)
-            self.encoder = Encoder(obs_shape, obs_type='pixels').to(device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
-        elif obs_type in ['states', 'discrete_states']:
-            self.aug = nn.Identity()
-            self.encoder = Encoder(obs_shape, obs_type=obs_type).to(device)
+            self.encoder = Encoder(obs_shape).to(device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
         else:
-            raise ValueError(f"Unknown obs_type: {obs_type}")
+            self.aug = nn.Identity()
+            self.encoder = nn.Identity()
+            self.obs_dim = obs_shape[0] + meta_dim
 
         self.actor = Actor(obs_type, self.obs_dim, self.action_dim,
-                           feature_dim, hidden_dim, mode=mode).to(device)
+                           feature_dim, hidden_dim).to(device)
 
         self.critic = Critic(obs_type, self.obs_dim, self.action_dim,
-                             feature_dim, hidden_dim, mode=mode).to(device)
+                             feature_dim, hidden_dim).to(device)
         self.critic_target = Critic(obs_type, self.obs_dim, self.action_dim,
-                                    feature_dim, hidden_dim, mode=mode).to(device)
+                                    feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         # optimizers
+
         if obs_type == 'pixels':
-            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
+            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(),
+                                                lr=lr)
         else:
             self.encoder_opt = None
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
@@ -245,43 +219,24 @@ class DDPGAgent:
             value = torch.as_tensor(value, device=self.device).unsqueeze(0)
             inputs.append(value)
         inpt = torch.cat(inputs, dim=-1)
-        
-        if self.mode == 'discrete':
-            # For discrete mode, use categorical distribution
-            dist = self.actor(inpt, std=0)  # std not used for discrete
-            if eval_mode:
-                action = dist.probs.argmax(dim=-1)
-            else:
-                if step < self.num_expl_steps:
-                    # Random exploration for discrete actions
-                    action = torch.randint(0, self.action_dim, (1,), device=self.device)
-                else:
-                    action = dist.sample()
-            return action.cpu().numpy()[0]
+        #assert obs.shape[-1] == self.obs_shape[-1]
+        stddev = utils.schedule(self.stddev_schedule, step)
+        dist = self.actor(inpt, stddev)
+        if eval_mode:
+            action = dist.mean
         else:
-            # Continuous mode (original behavior)
-            stddev = utils.schedule(self.stddev_schedule, step)
-            dist = self.actor(inpt, stddev)
-            if eval_mode:
-                action = dist.mean
-            else:
-                action = dist.sample(clip=None)
-                if step < self.num_expl_steps:
-                    action.uniform_(-1.0, 1.0)
-            return action.cpu().numpy()[0]
+            action = dist.sample(clip=None)
+            if step < self.num_expl_steps:
+                action.uniform_(-1.0, 1.0)
+        return action.cpu().numpy()[0]
 
     def update_critic(self, obs, action, reward, discount, next_obs, step):
         metrics = dict()
 
         with torch.no_grad():
-            if self.mode == 'discrete':
-                dist = self.actor(next_obs, std=0)
-                next_action = dist.sample()
-            else:
-                stddev = utils.schedule(self.stddev_schedule, step)
-                dist = self.actor(next_obs, stddev)
-                next_action = dist.sample(clip=self.stddev_clip)
-            
+            stddev = utils.schedule(self.stddev_schedule, step)
+            dist = self.actor(next_obs, stddev)
+            next_action = dist.sample(clip=self.stddev_clip)
             target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
@@ -308,16 +263,10 @@ class DDPGAgent:
     def update_actor(self, obs, step):
         metrics = dict()
 
-        if self.mode == 'discrete':
-            dist = self.actor(obs, std=0)
-            action = dist.sample()
-            log_prob = dist.log_prob(action).unsqueeze(-1)
-        else:
-            stddev = utils.schedule(self.stddev_schedule, step)
-            dist = self.actor(obs, stddev)
-            action = dist.sample(clip=self.stddev_clip)
-            log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        
+        stddev = utils.schedule(self.stddev_schedule, step)
+        dist = self.actor(obs, stddev)
+        action = dist.sample(clip=self.stddev_clip)
+        log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
 
@@ -331,16 +280,12 @@ class DDPGAgent:
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss.item()
             metrics['actor_logprob'] = log_prob.mean().item()
-            if self.mode == 'discrete':
-                metrics['actor_ent'] = dist.entropy().mean().item()
-            else:
-                metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
+            metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
 
         return metrics
 
     def aug_and_encode(self, obs):
-        if self.obs_type == 'pixels':
-            obs = self.aug(obs)
+        obs = self.aug(obs)
         return self.encoder(obs)
 
     def update(self, replay_iter, step):

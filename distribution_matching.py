@@ -13,7 +13,7 @@ from matplotlib.patches import Patch, Rectangle
 import gymnasium as gym
 import hydra
 from omegaconf import DictConfig
-from env import TwoRoomsEnv, SingleRoomEnv
+from env.rooms import TwoRoomsEnv, SingleRoomEnv
 import os
 
 class DistributionMatcher:

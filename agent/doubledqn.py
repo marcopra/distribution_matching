@@ -121,8 +121,7 @@ class DoubleDQNAgent:
                  init_critic,
                  use_tb,
                  use_wandb,
-                 meta_dim=0,
-                 mode='continuous'):
+                 meta_dim=0):
         self.reward_free = reward_free
         self.obs_type = obs_type
         self.obs_shape = obs_shape
@@ -139,7 +138,7 @@ class DoubleDQNAgent:
         self.init_critic = init_critic
         self.feature_dim = feature_dim
         self.solved_meta = None
-        self.mode = mode
+      
 
         # models
         if obs_type == 'pixels':
@@ -153,6 +152,7 @@ class DoubleDQNAgent:
         else:
             raise ValueError(f"Unknown obs_type: {obs_type}")
 
+        # TODO put an assert to check the action discrete space
 
         self.critic = QNetwork(obs_type, self.obs_dim, self.action_dim,
                                    feature_dim, hidden_dim).to(device)
@@ -289,7 +289,6 @@ class DoubleDQNAgent:
     def update(self, replay_iter, step):
         metrics = dict()
         #import ipdb; ipdb.set_trace()
-
         if step % self.update_every_steps != 0:
             return metrics
 

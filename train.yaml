@@ -1,0 +1,62 @@
+defaults:
+  - agent: doubledqn
+  - configs/env: four_rooms5_2
+  - override hydra/launcher: submitit_local
+
+# mode
+reward_free: false
+# task settings
+domain: gym
+task_name: FourRooms-v0
+obs_type: discrete_states # [discrete_states, states, pixels]
+frame_stack: 3 # only works if obs_type=pixels
+action_repeat: 1 # set to 2 for pixels
+discount: 0.99
+resolution: 224  
+random_init: true
+random_goal: true
+# train settings
+num_train_frames: 30000
+num_seed_frames: 4000
+# eval
+eval_every_frames: 4000
+num_eval_episodes: 10
+# pretrained
+snapshot_ts: 0 #100000
+snapshot_base_dir: ./pretrained_models
+# replay buffer
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 4
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: false # can be either true or false depending if we want to fine-tune encoder
+# misc
+seed: 1
+device: cuda
+save_video: true
+save_train_video: false
+use_tb: false
+use_wandb: false
+wandb_id: null
+wandb_project: "finetune_gym"
+wandb_entity: "urlb"
+wandb_tag: none
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}
+# experiment
+experiment: exp
+
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${experiment}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
+    subdir: ${hydra.job.num}
+  launcher:
+    timeout_min: 4300
+    cpus_per_task: 10
+    gpus_per_node: 1
+    tasks_per_node: 1
+    mem_gb: 160
+    nodes: 1
+    submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm

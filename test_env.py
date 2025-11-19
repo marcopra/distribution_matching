@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 import gymnasium as gym
 import numpy as np
 from PIL import Image
-import env  # Import to register environments
+import env.rooms as rooms  # Import to register environments
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config_test")

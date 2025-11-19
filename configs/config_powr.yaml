@@ -14,11 +14,11 @@ experiment:
   pmd_iter_updates: 10 # Number of optimization updates
   eval_episodes: 10  # Number of evaluation episodes
   timestep_interval: 500  # Timesteps between evaluations
-  timesteps: 10000  # Total training timesteps
+  timesteps: 8000  # Total training timesteps
   
   # Random seed
   seed: 42
-  n_runs: 15  # Number of experiment runs with different seeds
+  n_runs: 7  # Number of experiment runs with different seeds
 
   p_path: null  # Path to pretrained policy (if any)
 
@@ -26,7 +26,7 @@ experiment:
 wandb:
   use_wandb: false  # Set to false to disable wandb logging
   wandb_project: 'distribution_matching'  # Nome del progetto wandb
-  wandb_run_name: null  # Nome del run (null per auto-generato)
+  wandb_run_name: ${experiment.name}_${hydra:runtime.choices.env}_${now:%Y-%m-%d}_${now:%H-%M-%S}
   wandb_id: null  # ID per riprendere un run esistente (null per nuovo run)
   wandb_tag: null  # Tags separati da underscore (es: 'powr_four_rooms')
 

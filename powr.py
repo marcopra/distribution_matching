@@ -16,7 +16,7 @@ import gymnasium as gym
 import hydra
 from omegaconf import DictConfig
 from PIL import Image
-import env
+import env.rooms as rooms
 import os
 import jax
 import torch
@@ -273,7 +273,7 @@ class NaivePowr:
             self.dataset['next_states'] = np.append(self.dataset['next_states'], next_obs)
 
             obs = next_obs
-            if done:
+            if truncated: # for data collection, we reset on truncation
                 obs, info = self.env.reset()
                 done = False
 
@@ -287,17 +287,8 @@ class NaivePowr:
             self.visited_states.add(int(s))
             if int(s_next) != goal_idx:
                 row = int(s) * self.n_actions + int(a)
-                self.R_vector[row] = -1.0
-                self.R_tilde[int(s)] = -1.0
-            
-        # if len(self.visited_states) > self.n_states - 5:
-        #     print(f"R: {self.R_vector}")
-        #     print(f"R_tilde: {self.R_tilde}")   
-        #     exit()
-            # else:
-            #     print(f"Reached goal at state {s_next}, no penalty assigned.")
-        
-        # print(f"reward vector error: {np.linalg.norm(self.R_vector - self.reference_R_vector)}")
+                self.R_vector[row] = -1.0 if s != goal_idx else 0.0
+                self.R_tilde[int(s)] = -1.0 if s != goal_idx else 0.0
 
 
         self.comulative_Qs = np.zeros((self.n_states, self.n_actions))
@@ -354,11 +345,11 @@ class NaivePowr:
         Args:
             state: Current state index
             uniform_policy: Whether to use a uniform random policy instead of learned policy
-        
+            eval: Whether the action is being sampled for evaluation (disables agent usage)
         Returns:
             Sampled action index
         """
-        if self.agent is not None:
+        if self.agent is not None and eval == False:
             obs  = np.zeros(self.n_states, dtype=np.float32)
             obs[state] = 1.0
             action = self.agent.act(obs, {}, 1000000, False)
@@ -378,7 +369,7 @@ class NaivePowr:
             #     # In evaluation mode, choose the action with highest probability
             #     return np.argmax(action_probs)
             
-            action_probs = action_probs / np.sum(action_probs)  # Normalize probabilities, it could be slightly off due to numerical issues
+            action_probs = action_probs / prob_sum  # Normalize probabilities, it could be slightly off due to numerical issues
             return np.random.choice(self.n_actions, p=action_probs)
     
     def stochasticity_check(self, operator = None) -> None:
@@ -694,25 +685,7 @@ def main(cfg: DictConfig):
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     print(f"\nHydra output directory: {output_dir}\n")
     
-    # Initialize wandb
-    if cfg.wandb.use_wandb:
-        if cfg.wandb.wandb_id is not None and cfg.wandb.wandb_id != "none":
-            wandb.init(
-                id=cfg.wandb.wandb_id,
-                resume='must',
-                project=cfg.wandb.wandb_project,
-                name=cfg.wandb.wandb_run_name,
-                tags=cfg.wandb.wandb_tag.split('_') if cfg.wandb.wandb_tag and cfg.wandb.wandb_tag != "none" else None,
-                sync_tensorboard=True,
-                mode='online')
-        else:
-            wandb.init(
-                config=OmegaConf.to_container(cfg, resolve=True),
-                project=cfg.wandb.wandb_project,
-                name=cfg.wandb.wandb_run_name,
-                tags=cfg.wandb.wandb_tag.split('_') if cfg.wandb.wandb_tag and cfg.wandb.wandb_tag != "none" else None,
-                sync_tensorboard=True,
-                mode='online')
+    
 
     
     # Create environment using gym.make with config parameters
@@ -778,6 +751,26 @@ def main(cfg: DictConfig):
         
         # Initialize NaivePowr agent
         agent = NaivePowr(env, gamma=gamma, eta=eta)
+
+        # Initialize wandb
+        if cfg.wandb.use_wandb:
+            if cfg.wandb.wandb_id is not None and cfg.wandb.wandb_id != "none":
+                wandb.init(
+                    id=cfg.wandb.wandb_id,
+                    resume='must',
+                    project=cfg.wandb.wandb_project,
+                    name=cfg.wandb.wandb_run_name + "_" + str(run_idx),
+                    tags=cfg.wandb.wandb_tag.split('_') if cfg.wandb.wandb_tag and cfg.wandb.wandb_tag != "none" else None,
+                    sync_tensorboard=True,
+                    mode='online')
+            else:
+                wandb.init(
+                    config=OmegaConf.to_container(cfg, resolve=True),
+                    project=cfg.wandb.wandb_project,
+                    name=cfg.wandb.wandb_run_name + "_" + str(run_idx),
+                    tags=cfg.wandb.wandb_tag.split('_') if cfg.wandb.wandb_tag and cfg.wandb.wandb_tag != "none" else None,
+                    sync_tensorboard=True,
+                    mode='online')
             
         if p_path:
             agent.load_policy(p_path, key = 'agent') # TODO from cfg
@@ -836,6 +829,9 @@ def main(cfg: DictConfig):
         # Save final model for this run
         run_dir = os.path.join(output_dir, f"run_{run_idx:02d}", "final_model")
         agent.save_training_data(run_dir, verbose=False)
+        # Finish wandb run
+        if cfg.wandb.use_wandb:
+            wandb.finish()
     
     # Compute statistics across runs
     # Find minimum length (in case runs have different checkpoint counts)
@@ -870,16 +866,7 @@ def main(cfg: DictConfig):
     plt.savefig(os.path.join(output_dir, 'eval_rewards_with_error.png'), dpi=150)
     print(f"Saved evaluation rewards plot to: {os.path.join(output_dir, 'eval_rewards_with_error.png')}")
     
-    # Log final plot to wandb
-    if cfg.wandb.use_wandb:
-        wandb.log({
-            'aggregated/eval_rewards_plot': wandb.Image(fig),
-            'aggregated/final_median_reward': median_rewards[-1],
-            'aggregated/final_ci_lower': ci_lower[-1],
-            'aggregated/final_ci_upper': ci_upper[-1],
-            'aggregated/final_dataset_size': mean_data_len[-1]
-        })
-    
+
     plt.close(fig)
     
     # Save aggregated statistics
@@ -902,9 +889,7 @@ def main(cfg: DictConfig):
     print(f"Final dataset size: {mean_data_len[-1]:.0f}")
     print(f"{'='*60}\n")
     
-    # Finish wandb run
-    if cfg.wandb.use_wandb:
-        wandb.finish()
+    
 
 if __name__ == "__main__":
     main()

@@ -5,7 +5,6 @@ reward_free: ${reward_free}
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
-mode: ??? # to be specified later
 device: ${device}
 lr: 1e-4
 critic_target_tau: 0.01
