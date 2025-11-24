@@ -1,6 +1,6 @@
 defaults:
   - agent: sac_discrete
-  - configs/env: four_rooms5_2
+  - configs/env: four_rooms5_3
   - override hydra/launcher: submitit_local
 
 # mode
@@ -16,9 +16,10 @@ resolution: 224
 random_init: true
 random_goal: true
 
-linear_actor: true # whether to use a linear actor or not WARNING: only works with discrete_sac agent
+agent:
+  linear_actor: true # whether to use a linear actor or not WARNING: only works with discrete_sac agent
 # train settings
-num_train_frames: 30000
+num_train_frames: 90000
 num_seed_frames: 4000
 # eval
 eval_every_frames: 4000
@@ -26,6 +27,7 @@ num_eval_episodes: 10
 # pretrained
 snapshot_ts: 0 #100000
 snapshot_base_dir: ./pretrained_models
+p_path: "none" # path to policy weights .npy file for loading into linear actor
 # replay buffer
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 4
