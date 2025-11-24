@@ -335,3 +335,59 @@ class ColorPrint:
     @staticmethod
     def red(text):
         print(f"\033[91m{text}\033[0m")
+
+def load_policy_weights_into_agent(agent, npy_path, device='cuda'):
+    """
+    Carica i pesi della policy da un file .npy nel layer lineare dell'actor.
+    
+    Args:
+        agent: L'agente SAC con actor lineare
+        npy_path: Path al file .npy contenente la matrice dei pesi (policy_operator)
+        device: Device su cui caricare i pesi
+    
+    La matrice .npy deve avere shape (n_states * n_actions, n_states).
+    Il layer lineare dell'actor avrà shape (n_actions, n_states).
+    """
+    
+    # Carica la matrice dal file
+    policy_operator = np.load(npy_path)
+    print(f"Policy operator loaded from {npy_path}")
+    print(f"Policy operator shape: {policy_operator.shape}")
+    
+    # Estrai n_states e n_actions dalla shape
+    n_states_times_actions, n_states = policy_operator.shape
+    n_actions = agent.action_dim
+    
+    # Verifica la compatibilità
+    assert n_states_times_actions == n_states * n_actions, \
+        f"Shape mismatch: expected {n_states * n_actions}, got {n_states_times_actions}"
+    
+    # Reshape la matrice in (n_states, n_actions, n_states)
+    policy_3d = policy_operator.reshape((n_states, n_actions, n_states))
+    
+    # Estrai i pesi rilevanti per il layer lineare (elementi diagonali)
+    # Per ogni stato s, prendiamo policy_3d[s, :, s] -> (n_actions,)
+    policy_weights = np.zeros((n_actions, n_states))
+    for s in range(n_states):
+        policy_weights[:, s] = policy_3d[s, :, s]
+    
+    # Converti in tensor e carica nel layer lineare
+    policy_weights_tensor = torch.FloatTensor(policy_weights).to(device)
+    
+    # Carica i pesi nel layer lineare dell'actor
+    with torch.no_grad():
+        agent.actor.policy.weight.copy_(policy_weights_tensor)
+        # Opzionale: imposta il bias a zero se presente
+        if agent.actor.policy.bias is not None:
+            agent.actor.policy.bias.zero_()
+    
+    print(f"✓ Policy weights loaded successfully!")
+    print(f"  Linear layer shape: {agent.actor.policy.weight.shape}")
+    print(f"  Weights sum per state (should be ~1.0):")
+    
+    # Verifica che i pesi formino una distribuzione valida
+    weights_sum = policy_weights_tensor.sum(dim=0).cpu().numpy()
+    print(f"    Mean: {weights_sum.mean():.6f}, Std: {weights_sum.std():.6f}")
+    print(f"    Min: {weights_sum.min():.6f}, Max: {weights_sum.max():.6f}")
+    
+    return agent

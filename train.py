@@ -101,6 +101,9 @@ class Workspace:
         if cfg.snapshot_ts > 0:
             pretrained_agent = self.load_snapshot()['agent']
             self.agent.init_from(pretrained_agent)
+        
+        if cfg.p_path is not None and cfg.p_path != "none":
+            self.agent = utils.load_policy_weights_into_agent(self.agent, cfg.p_path, device=self.device)
 
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
