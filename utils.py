@@ -317,3 +317,21 @@ class PBE(object):
             reward = reward.mean(dim=1, keepdim=True)  # (b1, 1)
         reward = torch.log(reward + 1.0)
         return reward
+
+
+class ColorPrint:
+    @staticmethod
+    def blue(text):
+        print(f"\033[94m{text}\033[0m")
+    
+    @staticmethod
+    def green(text):
+        print(f"\033[92m{text}\033[0m")
+    
+    @staticmethod
+    def yellow(text):
+        print(f"\033[93m{text}\033[0m")
+    
+    @staticmethod
+    def red(text):
+        print(f"\033[91m{text}\033[0m")

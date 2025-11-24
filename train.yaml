@@ -1,5 +1,5 @@
 defaults:
-  - agent: doubledqn
+  - agent: sac_discrete
   - configs/env: four_rooms5_2
   - override hydra/launcher: submitit_local
 
@@ -15,6 +15,8 @@ discount: 0.99
 resolution: 224  
 random_init: true
 random_goal: true
+
+linear_actor: true # whether to use a linear actor or not WARNING: only works with discrete_sac agent
 # train settings
 num_train_frames: 30000
 num_seed_frames: 4000

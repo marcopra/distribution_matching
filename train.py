@@ -104,6 +104,7 @@ class Workspace:
 
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
+
         # create replay buffer
         data_specs = (obs_spec,
                       action_spec,
