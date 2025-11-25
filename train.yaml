@@ -19,7 +19,7 @@ random_goal: true
 agent:
   linear_actor: true # whether to use a linear actor or not WARNING: only works with discrete_sac agent
 # train settings
-num_train_frames: 90000
+num_train_frames: 50000
 num_seed_frames: 4000
 num_agent_updates_per_env_step: 1
 # eval
@@ -53,9 +53,9 @@ experiment: exp
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${experiment}_${get_filename:${p_path}}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
   sweep:
-    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}_${get_filename:${p_path}}
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
     subdir: ${hydra.job.num}
   launcher:
     timeout_min: 4300
