@@ -21,7 +21,7 @@ agent:
 # train settings
 num_train_frames: 90000
 num_seed_frames: 4000
-num_agent_updates_per_env_step: 10
+num_agent_updates_per_env_step: 1
 # eval
 eval_every_frames: 4000
 num_eval_episodes: 10
@@ -31,7 +31,7 @@ snapshot_base_dir: ./pretrained_models
 p_path: "none" # path to policy weights .npy file for loading into linear actor
 # replay buffer
 replay_buffer_size: 1000000
-replay_buffer_num_workers: 4
+replay_buffer_num_workers: 1
 batch_size: ${agent.batch_size}
 nstep: ${agent.nstep}
 update_encoder: false # can be either true or false depending if we want to fine-tune encoder
@@ -53,9 +53,9 @@ experiment: exp
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${experiment}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${experiment}_${get_filename:${p_path}}
   sweep:
-    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}_${get_filename:${p_path}}
     subdir: ${hydra.job.num}
   launcher:
     timeout_min: 4300

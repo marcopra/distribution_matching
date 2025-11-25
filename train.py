@@ -20,9 +20,16 @@ import utils
 from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
+import matplotlib.pyplot as plt
 
 torch.backends.cudnn.benchmark = True
 
+# Registra un resolver personalizzato solo se non esiste già
+if not OmegaConf.has_resolver("get_filename"):
+    OmegaConf.register_new_resolver(
+        "get_filename",
+        lambda path: os.path.splitext(os.path.basename(path))[0] if path != "none" else "none"
+    )
 
 def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
     cfg.obs_type = obs_type
@@ -96,6 +103,15 @@ class Workspace:
                                 action_spec,
                                 cfg.num_seed_frames // cfg.action_repeat,
                                 cfg.agent)
+        
+        self.INITIAL_HEATMAP = False
+
+        # TODO Remove
+        self.dataset = {
+            'states': np.array([]),
+            'actions': np.array([]),
+            'rewards': np.array([]),
+        }
 
         # initialize from pretrained
         if cfg.snapshot_ts > 0:
@@ -253,6 +269,9 @@ class Workspace:
 
             # try to update the agent
             if not seed_until_step(self.global_step):
+                if not self.INITIAL_HEATMAP:
+                    self.visualize_dataset_heatmap("dataset_heatmap.png")
+                    self.INITIAL_HEATMAP = True
                 for _ in range(self.cfg.num_agent_updates_per_env_step):
                     metrics = self.agent.update(self.replay_iter, self.global_step)
                     self.logger.log_metrics(metrics, self.global_frame, ty='train')
@@ -261,9 +280,59 @@ class Workspace:
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
             self.replay_storage.add(time_step, meta)
+            if not self.INITIAL_HEATMAP:
+                self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
+                self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
+                self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
             self.train_video_recorder.record(time_step.image_observation)
             episode_step += 1
             self._global_step += 1
+
+    def visualize_dataset_heatmap(self, save_path: str) -> None:
+        """
+        Visualize dataset state visitation as heatmap.
+        
+        Args:
+            save_path: Path to save the heatmap
+        """
+        # Get grid dimensions
+        max_x = max(cell[0] for cell in self.train_env.unwrapped.cells)
+        max_y = max(cell[1] for cell in self.train_env.unwrapped.cells)
+        min_x = min(cell[0] for cell in self.train_env.unwrapped.cells)
+        min_y = min(cell[1] for cell in self.train_env.unwrapped.cells)
+        grid_width = max_x - min_x + 1
+        grid_height = max_y - min_y + 1
+        
+        # Count state visitations
+        state_counts = np.zeros(self.train_env.unwrapped.n_states)
+        for state in self.dataset['states']:
+            state_counts[int(state)] += 1
+        
+        # Create grid
+        grid = np.zeros((grid_height, grid_width))
+        for s_idx in range( self.train_env.unwrapped.n_states):
+            x, y = self.train_env.unwrapped.idx_to_state[s_idx]
+            grid[y - min_y, x - min_x] = state_counts[s_idx]
+        
+        # Mask zero values to show background color
+        masked_grid = np.ma.masked_where(grid == 0, grid)
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        # Set light gray background
+        ax.set_facecolor("#B2B2B2")
+        # Plot only non-zero values
+        im = ax.imshow(masked_grid, cmap='YlOrRd', interpolation='nearest')
+        ax.set_title(f'Dataset State Visitation (n={len(self.dataset["states"])})')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+        ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+        plt.colorbar(im, ax=ax, label='Visit Count')
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
 
     def load_snapshot(self):
         snapshot_base_dir = Path(self.cfg.snapshot_base_dir)

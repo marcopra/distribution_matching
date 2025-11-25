@@ -236,9 +236,9 @@ class SACAgent(Agent):
                 action = probs.argmax(dim=-1).cpu().numpy()[0]
             else:
                 action = Categorical(probs).sample().item()
-                if step < self.num_expl_steps:
-                    # sample the discrete action uniformly during initial exploration
-                    action = np.random.randint(self.action_dim)
+                # if step < self.num_expl_steps:
+                #     # sample the discrete action uniformly during initial exploration
+                #     action = np.random.randint(self.action_dim)
         return action
     
 
