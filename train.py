@@ -253,8 +253,9 @@ class Workspace:
 
             # try to update the agent
             if not seed_until_step(self.global_step):
-                metrics = self.agent.update(self.replay_iter, self.global_step)
-                self.logger.log_metrics(metrics, self.global_frame, ty='train')
+                for _ in range(self.cfg.num_agent_updates_per_env_step):
+                    metrics = self.agent.update(self.replay_iter, self.global_step)
+                    self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
             # take env step
             time_step = self.train_env.step(action)

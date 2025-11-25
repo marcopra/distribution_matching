@@ -21,6 +21,7 @@ agent:
 # train settings
 num_train_frames: 90000
 num_seed_frames: 4000
+num_agent_updates_per_env_step: 10
 # eval
 eval_every_frames: 4000
 num_eval_episodes: 10
