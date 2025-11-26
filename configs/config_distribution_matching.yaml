@@ -4,27 +4,27 @@ defaults:
   - _self_
 
 # Experiment hyperparameters
-experiment:
-  name: 'distribution_matching'  # Nome dell'esperimento
-  # Optimization parameters
-  gamma: 0.99  # Discount factor for occupancy measure
-  eta: 0.05  # Learning rate for mirror descent
-  alpha: 0.0  # Alpha parameter for KL divergence
-  gradient_type: 'reverse'  # Type of KL gradient: 'reverse' or 'forward'
-  
-  # Training parameters
-  n_updates: 100000  # Number of optimization updates
-  print_every: 20000  # Save results every N iterations
-  
-  # Rollout parameters
-  n_rollouts: 10  # Number of rollout episodes
-  horizon: 9  # Rollout horizon (number of steps)
-  
-  # Initial distribution
-  initial_mode: 'dirac_delta' 
-  
-  # Random seed
-  seed: 42
+
+name: 'distribution_matching'  # Nome dell'esperimento
+# Optimization parameters
+gamma: 0.99  # Discount factor for occupancy measure
+eta: 0.05  # Learning rate for mirror descent
+alpha: 0.0  # Alpha parameter for KL divergence
+gradient_type: 'reverse'  # Type of KL gradient: 'reverse' or 'forward'
+
+# Training parameters
+n_updates: 100000  # Number of optimization updates
+print_every: 20000  # Save results every N iterations
+
+# Rollout parameters
+n_rollouts: 10  # Number of rollout episodes
+horizon: 300  # Rollout horizon (number of steps)
+
+# Initial distribution
+initial_mode: 'dirac_delta' 
+
+# Random seed
+seed: 42
 
 # Output paths
 output:
@@ -37,8 +37,8 @@ output:
 
 hydra:
   run:
-    dir: outputs/${experiment.name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/${name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: outputs/${experiment.name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/${name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
 

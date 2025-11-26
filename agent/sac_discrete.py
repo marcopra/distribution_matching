@@ -237,6 +237,7 @@ class SACAgent(Agent):
             else:
                 action = Categorical(probs).sample().item()
                 # if step < self.num_expl_steps:
+                #     ColorPrint.yellow("SAC Discrete: using random action for exploration")
                 #     # sample the discrete action uniformly during initial exploration
                 #     action = np.random.randint(self.action_dim)
         return action

@@ -4,29 +4,28 @@ defaults:
   - _self_
 
 # Experiment hyperparameters
-experiment:
-  name: 'powr'  # Nome dell'esperimento
-  # Optimization parameters
-  gamma: 0.999  # Discount factor for occupancy measure
-  eta: 1 # Learning rate for mirror descent
-  
-  # Training parameters
-  pmd_iter_updates: 10 # Number of optimization updates
-  eval_episodes: 10  # Number of evaluation episodes
-  timestep_interval: 500  # Timesteps between evaluations
-  timesteps: 8000  # Total training timesteps
-  
-  # Random seed
-  seed: 42
-  n_runs: 7  # Number of experiment runs with different seeds
+name: 'powr'  # Nome dell'esperimento
+# Optimization parameters
+gamma: 0.999  # Discount factor for occupancy measure
+eta: 1 # Learning rate for mirror descent
 
-  p_path: null  # Path to pretrained policy (if any)
+# Training parameters
+pmd_iter_updates: 10 # Number of optimization updates
+eval_episodes: 10  # Number of evaluation episodes
+timestep_interval: 500  # Timesteps between evaluations
+timesteps: 8000  # Total training timesteps
+
+# Random seed
+seed: 42
+n_runs: 7  # Number of experiment runs with different seeds
+
+p_path: null  # Path to pretrained policy (if any)
 
 # Weights & Biases configuration
 wandb:
   use_wandb: false  # Set to false to disable wandb logging
   wandb_project: 'distribution_matching'  # Nome del progetto wandb
-  wandb_run_name: ${experiment.name}_${hydra:runtime.choices.env}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+  wandb_run_name: ${name}_${hydra:runtime.choices.env}_${now:%Y-%m-%d}_${now:%H-%M-%S}
   wandb_id: null  # ID per riprendere un run esistente (null per nuovo run)
   wandb_tag: null  # Tags separati da underscore (es: 'powr_four_rooms')
 
@@ -42,7 +41,7 @@ output:
 # Hydra configuration for output directory structure
 hydra:
   run:
-    dir: outputs/${experiment.name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/${name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: outputs/${experiment.name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/${name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}

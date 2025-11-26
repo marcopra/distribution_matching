@@ -34,6 +34,7 @@ class DistributionMatcher:
         self.eta = eta
         self.gradient_type = gradient_type
         self.alpha = alpha
+        self.lava = getattr(env, 'lava', False)
         
         self.n_states = env.n_states
         self.n_actions = env.action_space.n
@@ -85,9 +86,9 @@ class DistributionMatcher:
                 next_idx = self.env.state_to_idx[next_cell]
                 col = s_idx * n_actions + action
                 T[next_idx, col] = 1.0
+                print(f"From state {cell} (idx {s_idx}) taking action {action} leads to {next_cell} (idx {next_idx})")
                 # if next_cell == (3, 3) or cell == (3, 3) or next_cell == (3, 2) or cell == (3, 2) or next_cell == (2, 3) or cell == (2, 3) or next_cell == (1, 3) or cell == (1, 3) or next_cell == (3, 1) or cell == (3, 1) or next_cell == (2, 2) or cell == (2, 2):  # Example of special handling for terminal state
                 #     T[next_idx, col] = 0.0 # No transitions from terminal state
-        
         return T
     
     def M_pi_operator(self, P: np.ndarray) -> np.ndarray:
@@ -183,28 +184,6 @@ class DistributionMatcher:
         
         return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
 
-    # def mirror_descent_update(self, gradient: np.ndarray) -> np.ndarray:
-    #     """
-    #     Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
-        
-    #     Args:
-    #         gradient: Policy gradient
-        
-    #     Returns:
-    #         Updated policy operator
-    #     """
-    #     # Reshape the policy and gradient to 3D
-    #     policy_3d = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
-    #     gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
-        
-    #     # Apply the mirror descent update for all states at once
-    #     exp_grad = np.exp(-self.eta * gradient_3d)
-    #     new_policy_3d = policy_3d * exp_grad
-        
-    #     # Normalize the new policies for each state (along actions dimension)
-    #     new_policy_3d /= np.sum(new_policy_3d, axis=1, keepdims=True) + 1e-10
-        
-    #     return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
     
     def save_policy(self, filepath: str) -> None:
         """
@@ -248,7 +227,6 @@ class DistributionMatcher:
         
         # Save policy operator
         np.save(os.path.join(save_dir, "policy_operator.npy"), self.policy_operator)
-        print(f"operator: {self.policy_operator}")
         if verbose:
             print(f"Policy operator saved to: {os.path.join(save_dir, 'policy_operator.npy')}")
         
@@ -519,8 +497,23 @@ class DistributionVisualizer:
         self.matcher = matcher
         
         # Grid dimensions for visualization
-        self.grid_width = max(cell[0] for cell in env.cells) + 1
-        self.grid_height = max(cell[1] for cell in env.cells) + 1
+        valid_cells = [cell for cell in env.cells if cell != env.DEAD_STATE]
+        
+        # Calculate the actual min/max coordinates
+        min_x = min(cell[0] for cell in valid_cells)
+        min_y = min(cell[1] for cell in valid_cells)
+        max_x = max(cell[0] for cell in valid_cells)
+        max_y = max(cell[1] for cell in valid_cells)
+        
+        # If lava is enabled, extend grid to include (-1, -1)
+        if matcher.lava:
+            min_x = min(min_x, -1)
+            min_y = min(min_y, -1)
+        
+        self.min_x = min_x
+        self.min_y = min_y
+        self.grid_width = max_x - min_x + 1
+        self.grid_height = max_y - min_y + 1
         
         # Action symbols and colors
         self.action_symbols = {0: '↑', 1: '↓', 2: '←', 3: '→'}
@@ -528,11 +521,22 @@ class DistributionVisualizer:
         self.action_names = ['up', 'down', 'left', 'right']
     
     def state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
-        """Convert state distribution vector to 2D grid."""
+        """
+        Convert state distribution vector to 2D grid.
+        Dead state (-1, -1) is placed at its actual coordinates in the grid.
+        
+        Returns:
+            grid: 2D array with state probabilities (including dead state if lava enabled)
+        """
         grid = np.zeros((self.grid_height, self.grid_width))
+        
         for s_idx in range(self.env.n_states):
-            x, y = self.env.idx_to_state[s_idx]
-            grid[y, x] = nu[s_idx]
+            cell = self.env.idx_to_state[s_idx]
+            # Map cell coordinates to grid indices
+            grid_x = cell[0] - self.min_x
+            grid_y = cell[1] - self.min_y
+            grid[grid_y, grid_x] = nu[s_idx]
+        
         return grid
     
     def plot_results(self, nu0: np.ndarray, nu_target: np.ndarray, 
@@ -615,15 +619,35 @@ class DistributionVisualizer:
         return axes
     
     def _plot_distribution(self, ax, nu, title):
-        """Plot state distribution heatmap."""
+        """Plot state distribution heatmap with dead state included in grid if lava enabled."""
         grid = self.state_dist_to_grid(nu)
-        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest', vmin=0)#, vmin=0.2, vmax=0.26)
+        
+        # Create main heatmap
+        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest', vmin=0)
         ax.set_title(title)
         ax.set_xlabel('x')
         ax.set_ylabel('y')
+        
+        # Customize grid lines
         ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
         ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
         ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+        
+        # If lava is enabled, highlight the dead state cell at (-1, -1)
+        if self.matcher.lava:
+            dead_grid_x = -1 - self.min_x
+            dead_grid_y = -1 - self.min_y
+            
+            # Draw red border around dead state cell
+            dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
+                                 fill=False, edgecolor='#CF1020', linewidth=3)
+            ax.add_patch(dead_rect)
+            
+            # Add label for dead state
+            ax.text(dead_grid_x, dead_grid_y - 0.6, 'DEAD', ha='center', va='top',
+                   fontsize=8, fontweight='bold', color='#CF1020')
+        
+        # Add colorbar
         plt.colorbar(im, ax=ax)
     
     def _plot_policy_arrows(self, ax, policy_per_state):
@@ -637,7 +661,11 @@ class DistributionVisualizer:
         ax.grid(True, alpha=0.3)
         
         for s_idx in range(self.env.n_states):
-            x, y = self.env.idx_to_state[s_idx]
+            cell = self.env.idx_to_state[s_idx]
+            
+            # Map cell coordinates to grid indices
+            x = cell[0] - self.min_x
+            y = cell[1] - self.min_y
             
             # Find most probable actions
             max_prob = np.max(policy_per_state[s_idx])
@@ -645,8 +673,12 @@ class DistributionVisualizer:
             arrow_text = ''.join([self.action_symbols[a] for a in max_actions])
             
             # Draw cell and arrow
-            rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
-                           facecolor='lightgray', edgecolor='black', linewidth=0.5)
+            if cell == self.env.DEAD_STATE:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='#CF1020', edgecolor='black', linewidth=0.5, alpha=0.3)
+            else:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='lightgray', edgecolor='black', linewidth=0.5)
             ax.add_patch(rect)
             ax.text(x, y, arrow_text, ha='center', va='center',
                    fontsize=12, fontweight='bold')
@@ -662,11 +694,19 @@ class DistributionVisualizer:
         ax.grid(True, alpha=0.3)
         
         for s_idx in range(self.env.n_states):
-            x, y = self.env.idx_to_state[s_idx]
+            cell = self.env.idx_to_state[s_idx]
+            
+            # Map cell coordinates to grid indices
+            x = cell[0] - self.min_x
+            y = cell[1] - self.min_y
             
             # Draw background
-            rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
-                           facecolor='lightgray', edgecolor='black', linewidth=0.5)
+            if cell == self.env.DEAD_STATE:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='#CF1020', edgecolor='black', linewidth=0.5, alpha=0.3)
+            else:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='lightgray', edgecolor='black', linewidth=0.5)
             ax.add_patch(rect)
             
             # Draw mini bar chart
@@ -705,9 +745,15 @@ class DistributionVisualizer:
         """Plot heatmaps for each action's probability distribution."""
         for a_idx, ax in enumerate(axes_list):
             grid_action = np.zeros((self.grid_height, self.grid_width))
+            
             for s_idx in range(self.env.n_states):
-                x, y = self.env.idx_to_state[s_idx]
-                grid_action[y, x] = policy_per_state[s_idx, a_idx]
+                cell = self.env.idx_to_state[s_idx]
+                
+                # Map cell coordinates to grid indices
+                grid_x = cell[0] - self.min_x
+                grid_y = cell[1] - self.min_y
+                
+                grid_action[grid_y, grid_x] = policy_per_state[s_idx, a_idx]
             
             im = ax.imshow(grid_action, cmap='YlOrRd', interpolation='nearest',
                           vmin=0, vmax=1)
@@ -718,6 +764,15 @@ class DistributionVisualizer:
             ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
             ax.grid(which='minor', color='white', linestyle='-',
                    linewidth=0.5, alpha=0.5)
+            
+            # Highlight dead state if lava enabled at (-1, -1)
+            if self.matcher.lava:
+                dead_grid_x = -1 - self.min_x
+                dead_grid_y = -1 - self.min_y
+                dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
+                                     fill=False, edgecolor='#CF1020', linewidth=2)
+                ax.add_patch(dead_rect)
+            
             plt.colorbar(im, ax=ax)
     
     def _plot_policy_distance(self, ax):
@@ -990,7 +1045,7 @@ def compute_target_distribution(env: gym.Env , gamma: float) -> np.ndarray:
 def main(cfg: DictConfig):
     """Main execution function."""
     # Set random seed
-    np.random.seed(cfg.experiment.seed)
+    np.random.seed(cfg.seed)
     
     # Close any existing figures from previous runs
     plt.close('all')
@@ -1006,6 +1061,7 @@ def main(cfg: DictConfig):
         'show_coordinates': cfg.env.show_coordinates,
         'goal_position': tuple(cfg.env.goal_position) if cfg.env.goal_position else None,
         'start_position': tuple(cfg.env.start_position) if cfg.env.start_position else None,
+        'lava': cfg.env.lava if hasattr(cfg.env, 'lava') else False
     }
     # Add environment-specific parameters
     if "SingleRoom" in cfg.env.name:
@@ -1024,27 +1080,31 @@ def main(cfg: DictConfig):
     
     # Create environment using gym.make
     env = gym.make(cfg.env.name, **env_kwargs)
-    env.reset(seed=cfg.experiment.seed)
+    env.reset(seed=cfg.seed)
     print(f"Environment: {cfg.env.name}")
     print(f"Start position: {env.unwrapped.start_position}")
     print(f"Environment created with {env.unwrapped.n_states} states\n")
 
     # Get parameters from config
-    eta = cfg.experiment.eta
-    gradient_type = cfg.experiment.gradient_type
-    n_updates = cfg.experiment.n_updates
-    print_every = cfg.experiment.print_every
-    n_rollouts = cfg.experiment.n_rollouts
-    horizon = cfg.experiment.horizon
-    gamma = cfg.experiment.gamma
-    initial_mode = cfg.experiment.initial_mode
-    alpha = cfg.experiment.alpha
+    eta = cfg.eta
+    gradient_type = cfg.gradient_type
+    n_updates = cfg.n_updates
+    print_every = cfg.print_every
+    n_rollouts = cfg.n_rollouts
+    horizon = cfg.horizon
+    gamma = cfg.gamma
+    initial_mode = cfg.initial_mode
+    alpha = cfg.alpha
+    lava = cfg.env.lava if hasattr(cfg.env, 'lava') else False
     
  
     # Create initial and target distributions
     # Call create_initial_distribution AFTER environment reset so start_position is set
     nu0 = create_initial_distribution(env.unwrapped, mode=initial_mode)
-    nu_target = np.ones(env.unwrapped.n_states) / env.unwrapped.n_states  # Uniform target
+    nu_target = np.ones(env.unwrapped.n_states) / (env.unwrapped.n_states - (1)*int(lava))   # Uniform target
+    # if lava:
+    #     dead_state_idx = env.unwrapped.state_to_idx[(-1, -1)] 
+    #     nu_target[dead_state_idx] = 1e-8
     nu_target = nu_target.reshape((-1, 1))
     # nu_target = compute_target_distribution(env.unwrapped, gamma)
     
@@ -1080,10 +1140,10 @@ def main(cfg: DictConfig):
     uniform_rollouts = []
     for i in range(n_rollouts):
         # Sample initial state from nu0 distribution
-        np.random.seed(cfg.experiment.seed + i)
+        np.random.seed(cfg.seed + i)
         start_state = np.random.choice(env.unwrapped.n_states, p=nu0_probs)
 
-        _, states_i, actions_i = matcher.rollout(start_state, horizon, uniform_policy=True, seed=cfg.experiment.seed+i)
+        _, states_i, actions_i = matcher.rollout(start_state, horizon, uniform_policy=True, seed=cfg.seed+i)
         unique_states = len(set(states_i))
         coverage = unique_states / env.unwrapped.n_states * 100
         uniform_rollouts.append((states_i, actions_i, start_state))
@@ -1131,10 +1191,10 @@ def main(cfg: DictConfig):
     optimized_rollouts = []
     for i in range(n_rollouts):
         # Sample initial state from nu0 distribution
-        np.random.seed(cfg.experiment.seed + i)
+        np.random.seed(cfg.seed + i)
         start_state = np.random.choice(env.unwrapped.n_states, p=nu0_probs)
         
-        _, states_i, actions_i = matcher.rollout(start_state, horizon, seed=cfg.experiment.seed+i)
+        _, states_i, actions_i = matcher.rollout(start_state, horizon, seed=cfg.seed+i)
         unique_states = len(set(states_i))
         coverage = unique_states / env.unwrapped.n_states * 100
         optimized_rollouts.append((states_i, actions_i, start_state))

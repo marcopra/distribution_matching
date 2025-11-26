@@ -28,19 +28,23 @@ class BaseRoomEnv(gym.Env, ABC):
     
     metadata = {"render_modes": ["human", "ansi", "rgb_array"], "render_fps": 4}
     
+    DEAD_STATE = (-1, -1)  # Special coordinate for dead state
+    
     def __init__(
         self,
         goal_position: Optional[Tuple[int, int]] = None,
         start_position: Optional[Tuple[int, int]] = None,
         max_steps: int = 300,
         render_mode: Optional[str] = None,
-        show_coordinates: bool = False
+        show_coordinates: bool = False,
+        lava: bool = False
     ):
         super().__init__()
         
         self.render_mode = render_mode
         self.max_steps = max_steps
         self.show_coordinates = show_coordinates
+        self.lava = lava
         self._step_count = 0
         
         # Build the environment layout (implemented by subclasses)
@@ -48,6 +52,10 @@ class BaseRoomEnv(gym.Env, ABC):
         self.state_to_idx = {}
         self.idx_to_state = {}
         self._build_cells()
+        
+        # Add dead state if lava is enabled
+        if self.lava:
+            self._add_cell(self.DEAD_STATE)
         
         self.n_states = len(self.cells)
         
@@ -125,15 +133,23 @@ class BaseRoomEnv(gym.Env, ABC):
     def step_from(self, cell: Tuple[int, int], action: int) -> Tuple[int, int]:
         """
         Compute next cell from current cell and action.
-        If the move would go outside valid cells, stay in place.
+        If the move would go outside valid cells, stay in place (or go to dead state if lava).
         """
+        # If already in dead state, stay there
+        if self.lava and cell == self.DEAD_STATE:
+            return self.DEAD_STATE
+        
         direction = self._action_to_direction[action]
         next_cell = (cell[0] + direction[0], cell[1] + direction[1])
         
-        if self._is_valid_cell(next_cell):
+        if self._is_valid_cell(next_cell) and next_cell != self.DEAD_STATE:
             return next_cell
         else:
-            return cell  # Stay in place if hitting a wall
+            # Hit a wall/lava
+            if self.lava:
+                return self.DEAD_STATE
+            else:
+                return cell  # Stay in place if hitting a wall
     
     def _get_obs(self) -> int:
         """Get current observation (state index)."""
@@ -170,8 +186,10 @@ class BaseRoomEnv(gym.Env, ABC):
         elif self._goal_position_param is not None:
             self.goal_position = self._set_goal_position(self._goal_position_param)
         else:
-            # Random goal position
-            goal_idx = self.np_random.integers(0, self.n_states)
+            # Random goal position (excluding dead state)
+            valid_states = [i for i in range(self.n_states) 
+                          if self.idx_to_state[i] != self.DEAD_STATE]
+            goal_idx = self.np_random.choice(valid_states)
             self.goal_position = self.idx_to_state[goal_idx]
         
         # Set start position (random if not specified, or from options, or from constructor)
@@ -193,8 +211,10 @@ class BaseRoomEnv(gym.Env, ABC):
             self._agent_location = self._set_start_position(self._start_position_param)
             self.start_position = self._agent_location  # Update start_position
         else:
-            # Random start position
-            start_idx = self.np_random.integers(0, self.n_states)
+            # Random start position (excluding dead state)
+            valid_states = [i for i in range(self.n_states) 
+                          if self.idx_to_state[i] != self.DEAD_STATE]
+            start_idx = self.np_random.choice(valid_states)
             self._agent_location = self.idx_to_state[start_idx]
             self.start_position = self._agent_location  # Update start_position
         
@@ -215,7 +235,10 @@ class BaseRoomEnv(gym.Env, ABC):
         
         # Check if goal is reached
         terminated = self._agent_location == self.goal_position
-        truncated = self._step_count >= self.max_steps
+        
+        # Truncate if in dead state (lava) or max steps reached
+        in_dead_state = self.lava and self._agent_location == self.DEAD_STATE
+        truncated = in_dead_state or self._step_count >= self.max_steps
         
         # Reward: 1 - 0.9 * (step_count / max_steps) for success, 0 for failure
         if terminated:
@@ -240,23 +263,29 @@ class BaseRoomEnv(gym.Env, ABC):
     
     def _render_ansi(self) -> Optional[str]:
         """Render the environment as ASCII art."""
-        max_x = max(cell[0] for cell in self.cells)
-        max_y = max(cell[1] for cell in self.cells)
-        min_x = min(cell[0] for cell in self.cells)
-        min_y = min(cell[1] for cell in self.cells)
+        # Don't include dead state in rendering bounds
+        valid_cells = [cell for cell in self.cells if cell != self.DEAD_STATE]
+        
+        max_x = max(cell[0] for cell in valid_cells)
+        max_y = max(cell[1] for cell in valid_cells)
+        min_x = min(cell[0] for cell in valid_cells)
+        min_y = min(cell[1] for cell in valid_cells)
         
         grid = []
         for y in range(min_y, max_y + 1):
             row = []
             for x in range(min_x, max_x + 1):
-                if (x, y) == self._agent_location:
+                if self.lava and self._agent_location == self.DEAD_STATE and (x, y) not in self.state_to_idx:
+                    # Show lava
+                    row.append('L')
+                elif (x, y) == self._agent_location and self._agent_location != self.DEAD_STATE:
                     row.append('A')
                 elif (x, y) == self.goal_position:
                     row.append('G')
                 elif (x, y) in self.state_to_idx:
                     row.append('.')
                 else:
-                    row.append('#')
+                    row.append('L' if self.lava else '#')
             grid.append(' '.join(row))
         
         output = '\n'.join(grid)
@@ -272,11 +301,13 @@ class BaseRoomEnv(gym.Env, ABC):
         cell_size = 64
         cell_padding = 2  # Padding to create gray lines between cells
         
-        # Calculate grid dimensions
-        max_x = max(cell[0] for cell in self.cells)
-        max_y = max(cell[1] for cell in self.cells)
-        min_x = min(cell[0] for cell in self.cells)
-        min_y = min(cell[1] for cell in self.cells)
+        # Calculate grid dimensions (excluding dead state)
+        valid_cells = [cell for cell in self.cells if cell != self.DEAD_STATE]
+        
+        max_x = max(cell[0] for cell in valid_cells)
+        max_y = max(cell[1] for cell in valid_cells)
+        min_x = min(cell[0] for cell in valid_cells)
+        min_y = min(cell[1] for cell in valid_cells)
         
         grid_width = max_x - min_x + 1
         grid_height = max_y - min_y + 1
@@ -289,8 +320,9 @@ class BaseRoomEnv(gym.Env, ABC):
         img_width = (grid_width + 2) * cell_size + coord_space * 2
         img_height = (grid_height + 2) * cell_size + coord_space * 2
         
-        # Create image with gray background
-        img = Image.new('RGB', (img_width, img_height), color=(128, 128, 128))
+        # Create image with background (gray for walls, lava color for lava)
+        bg_color = (207, 16, 32) if self.lava else (128, 128, 128)  # #CF1020 for lava
+        img = Image.new('RGB', (img_width, img_height), color=bg_color)
         draw = ImageDraw.Draw(img)
         
         # Draw white background for coordinate area
@@ -359,16 +391,16 @@ class BaseRoomEnv(gym.Env, ABC):
                 draw.text((px_right - text_width // 2, py - text_height // 2), text, 
                          fill=(0, 0, 0), font=coord_font)
         
-        # Draw border cells (gray, around the environment)
+        # Draw border cells (gray or lava, around the environment)
         for x in range(-1, grid_width + 1):
             for y in range(-1, grid_height + 1):
                 if x == -1 or x == grid_width or y == -1 or y == grid_height:
                     px = (x + 1) * cell_size + coord_space
                     py = (y + 1) * cell_size + coord_space
-                    # Border cells remain gray (background color)
+                    # Border cells remain background color (gray or lava)
                     draw.rectangle(
                         [px, py, px + cell_size, py + cell_size],
-                        fill=(128, 128, 128)
+                        fill=bg_color
                     )
         
         # Draw cells
@@ -378,7 +410,7 @@ class BaseRoomEnv(gym.Env, ABC):
                 px = (x - min_x + 1) * cell_size + coord_space
                 py = (y - min_y + 1) * cell_size + coord_space
                 
-                if (x, y) in self.state_to_idx:
+                if (x, y) in self.state_to_idx and (x, y) != self.DEAD_STATE:
                     # Valid cell - black background with padding
                     draw.rectangle(
                         [px + cell_padding, py + cell_padding, 
@@ -388,7 +420,7 @@ class BaseRoomEnv(gym.Env, ABC):
                     
                     # Check if this is the goal or agent position
                     is_goal = (x, y) == self.goal_position
-                    is_agent = (x, y) == self._agent_location
+                    is_agent = (x, y) == self._agent_location and self._agent_location != self.DEAD_STATE
                     
                     center_x = px + cell_size // 2
                     center_y = py + cell_size // 2
@@ -415,10 +447,10 @@ class BaseRoomEnv(gym.Env, ABC):
                             fill=(255, 0, 0)
                         )
                 else:
-                    # Wall - gray (same as background, creates seamless walls)
+                    # Wall/Lava - background color (creates seamless walls/lava)
                     draw.rectangle(
                         [px, py, px + cell_size, py + cell_size],
-                        fill=(128, 128, 128)
+                        fill=bg_color
                     )
         
         return np.array(img)
@@ -445,7 +477,8 @@ class SingleRoomEnv(BaseRoomEnv):
         start_position: Optional[Tuple[int, int]] = None,
         max_steps: int = 300,
         render_mode: Optional[str] = None,
-        show_coordinates: bool = False
+        show_coordinates: bool = False,
+        lava: bool = False
     ):
         self.room_size = room_size
         super().__init__(
@@ -453,7 +486,8 @@ class SingleRoomEnv(BaseRoomEnv):
             start_position=start_position,
             max_steps=max_steps,
             render_mode=render_mode,
-            show_coordinates=show_coordinates
+            show_coordinates=show_coordinates,
+            lava=lava
         )
     
     def _build_cells(self):
@@ -488,7 +522,8 @@ class TwoRoomsEnv(BaseRoomEnv):
         start_position: Optional[Tuple[int, int]] = None,
         max_steps: int = 300,
         render_mode: Optional[str] = None,
-        show_coordinates: bool = False
+        show_coordinates: bool = False,
+        lava: bool = False
     ):
         self.room_size = room_size
         self.corridor_length = corridor_length
@@ -502,7 +537,8 @@ class TwoRoomsEnv(BaseRoomEnv):
             start_position=start_position,
             max_steps=max_steps,
             render_mode=render_mode,
-            show_coordinates=show_coordinates
+            show_coordinates=show_coordinates,
+            lava=lava
         )
     
     def _build_cells(self):
@@ -561,7 +597,8 @@ class FourRoomsEnv(BaseRoomEnv):
         start_position: Optional[Tuple[int, int]] = None,
         max_steps: int = 300,
         render_mode: Optional[str] = None,
-        show_coordinates: bool = False
+        show_coordinates: bool = False,
+        lava: bool = False
     ):
         self.room_size = room_size
         self.corridor_length = corridor_length
@@ -579,7 +616,8 @@ class FourRoomsEnv(BaseRoomEnv):
             start_position=start_position,
             max_steps=max_steps,
             render_mode=render_mode,
-            show_coordinates=show_coordinates
+            show_coordinates=show_coordinates,
+            lava=lava
         )
     
     def _build_cells(self):

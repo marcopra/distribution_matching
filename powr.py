@@ -676,7 +676,7 @@ def main(cfg: DictConfig):
     """Main execution function."""
 
     # Set random seed
-    np.random.seed(cfg.experiment.seed)
+    np.random.seed(cfg.seed)
     
     # Close any existing figures from previous runs
     plt.close('all')
@@ -713,7 +713,7 @@ def main(cfg: DictConfig):
     
     # Create environment using gym.make
     env = gym.make(cfg.env.name, **env_kwargs)
-    env.reset(seed=cfg.experiment.seed)
+    env.reset(seed=cfg.seed)
     print(f"Environment {cfg.env.name} created.")   
     frame = env.render()
     img = Image.fromarray(frame)
@@ -724,15 +724,15 @@ def main(cfg: DictConfig):
     print(f"Environment created with {env.unwrapped.n_states} states\n")
 
     # Get parameters from config
-    n_runs = cfg.experiment.n_runs
-    eta = cfg.experiment.eta
-    pmd_iter_updates = cfg.experiment.pmd_iter_updates
-    gamma = cfg.experiment.gamma
-    eval_episodes = cfg.experiment.eval_episodes
-    timestep_interval = cfg.experiment.timestep_interval
-    timesteps = cfg.experiment.timesteps
+    n_runs = cfg.n_runs
+    eta = cfg.eta
+    pmd_iter_updates = cfg.pmd_iter_updates
+    gamma = cfg.gamma
+    eval_episodes = cfg.eval_episodes
+    timestep_interval = cfg.timestep_interval
+    timesteps = cfg.timesteps
     
-    p_path = cfg.experiment.p_path
+    p_path = cfg.p_path
     
 
     # Storage for all runs
@@ -745,7 +745,7 @@ def main(cfg: DictConfig):
         print(f"{'='*60}\n")
         
         # Set seed for this run
-        run_seed = cfg.experiment.seed + run_idx * 1000
+        run_seed = cfg.seed + run_idx * 1000
         np.random.seed(run_seed)
         env.reset(seed=run_seed)
         

@@ -3,11 +3,12 @@
 
 env:
   name: "FourRooms-v0"
-  room_size: 10
+  room_size: 5
   corridor_length: 1
   max_steps: 300
   render_mode: rgb_array
   show_coordinates: false
+  lava: true
   
   # Corridor positions for horizontal and vertical corridors
   corridor_positions:
@@ -15,7 +16,7 @@ env:
     vertical: 2
   
   # Goal position (optional, null for random at each episode)
-  goal_position: [6,5]  # Can be [x, y] or null for random
+  goal_position: [8,3]  # Can be [x, y] or null for random
   
   # Start position (optional, null for random at each episode)
   start_position:  [0, 0]  # Can be [x, y] or null for random

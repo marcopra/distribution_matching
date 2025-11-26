@@ -39,7 +39,7 @@ python distribution_matching.py env=four_rooms
 
 Override specific hyperparameters:
 ```bash
-python distribution_matching.py experiment.eta=0.01 experiment.gamma=0.99
+python distribution_matching.py eta=0.01 gamma=0.99
 ```
 
 Override environment size:
@@ -51,7 +51,7 @@ python distribution_matching.py env=two_rooms env.room_size=7
 
 Combine multiple overrides:
 ```bash
-python distribution_matching.py env=four_rooms experiment.n_updates=200000 experiment.eta=0.005
+python distribution_matching.py env=four_rooms n_updates=200000 eta=0.005
 ```
 
 ### Set Output Directory
@@ -99,7 +99,7 @@ Environment-specific parameters:
 
 ### Example 1: Quick test with smaller updates
 ```bash
-python distribution_matching.py experiment.n_updates=10000 experiment.print_every=2000
+python distribution_matching.py n_updates=10000 print_every=2000
 ```
 
 ### Example 2: Two rooms with different corridor
@@ -109,12 +109,12 @@ python distribution_matching.py env=two_rooms env.corridor_y=3 env.room_size=6
 
 ### Example 3: Four rooms with custom learning rate
 ```bash
-python distribution_matching.py env=four_rooms experiment.eta=0.002 experiment.gamma=0.98
+python distribution_matching.py env=four_rooms eta=0.002 gamma=0.98
 ```
 
 ### Example 4: Different initial distribution
 ```bash
-python distribution_matching.py experiment.initial_mode=uniform
+python distribution_matching.py initial_mode=uniform
 ```
 
 Available initial modes:
@@ -135,7 +135,7 @@ python distribution_matching.py -m env=single_room,two_rooms,four_rooms
 
 Run hyperparameter sweep:
 ```bash
-python distribution_matching.py -m experiment.eta=0.001,0.01,0.1 experiment.gamma=0.9,0.95,0.99
+python distribution_matching.py -m eta=0.001,0.01,0.1 gamma=0.9,0.95,0.99
 ```
 
 ### Hydra Working Directory
