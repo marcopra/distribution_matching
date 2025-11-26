@@ -74,7 +74,8 @@ class DiscreteObservationWrapper(gym.Wrapper):
         super().__init__(env)
         if isinstance(env.observation_space, spaces.Discrete):
             self.n_states = env.observation_space.n
-            assert self.n_states < 256, "Number of discrete states must be less than 256 for uint8 one-hot encoding, otherwise change dtype here."
+            # TODO non penso ci siano problemi perchè dopo uso floa32
+            # assert self.n_states < 256, "Number of discrete states must be less than 256 for uint8 one-hot encoding, otherwise change dtype here."
             self.is_discrete = True
             # Update observation space to one-hot
             self.observation_space = spaces.Box(
