@@ -178,9 +178,9 @@ dependencies:
       - tensorboard-data-server==0.7.2
       - tensorboardx==2.6.2.2
       - termcolor==3.2.0
-      - torch==2.6.0+cu124
-      - torchaudio==2.6.0+cu124
-      - torchvision==0.21.0+cu124
+      #- torch==2.6.0+cu124
+      #- torchaudio==2.6.0+cu124
+      #- torchvision==0.21.0+cu124
       - tqdm==4.67.1
       - triton==3.2.0
       - typing-inspection==0.4.2
