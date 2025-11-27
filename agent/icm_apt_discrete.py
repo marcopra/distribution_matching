@@ -14,6 +14,7 @@ class ICM(nn.Module):
     """
     def __init__(self, obs_dim, action_dim, hidden_dim, icm_rep_dim):
         super().__init__()
+        self.action_dim = action_dim
         self.trunk = nn.Sequential(nn.Linear(obs_dim, icm_rep_dim),
                                    nn.LayerNorm(icm_rep_dim), nn.Tanh())
 
@@ -30,7 +31,7 @@ class ICM(nn.Module):
     def forward(self, obs, action, next_obs):
         assert obs.shape[0] == next_obs.shape[0]
         assert obs.shape[0] == action.shape[0]
-
+        action = F.one_hot(action, num_classes=self.action_dim).float()
         obs = self.trunk(obs)
         next_obs = self.trunk(next_obs)
         next_obs_hat = self.forward_net(torch.cat([obs, action], dim=-1))
