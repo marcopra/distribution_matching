@@ -1,11 +1,13 @@
 #!/bin/bash
 
-seeds="0 1 2 3 4"
+seeds="0 1 2"
 model_paths=(
-    ""
-    ""
+    "/home/mprattico/distribution_matching/models/four_rooms10/rnd/rnd_500100.pt"
+    "/home/mprattico/distribution_matching/models/four_rooms10/icm_apt/icm_apt_500100.pt"
+    "/home/mprattico/distribution_matching/models/four_rooms10/dist_matching/policy_operator.npy"
+    "/home/mprattico/distribution_matching/models/four_rooms10/dist_matching/uniform_policy_operator.npy"
 )
-seed_frames="5000 10000 15000"
+seed_frames="10000 15000 20000"
 
 
 
