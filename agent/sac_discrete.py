@@ -33,6 +33,7 @@ class SACAgent(Agent):
                  critic_lr,
                  critic_target_tau, 
                  critic_target_update_frequency,
+                 init_critic,
                  batch_size, 
                  learnable_temperature,
                  linear_actor=False,
@@ -55,6 +56,7 @@ class SACAgent(Agent):
         self.use_wandb = use_wandb
         self.num_expl_steps = num_expl_steps
         self.update_every_steps = update_every_steps
+        self.init_critic = init_critic
 
         # models
         if obs_type == 'pixels':
@@ -98,6 +100,13 @@ class SACAgent(Agent):
         self.training = training
         self.actor.train(training)
         self.critic.train(training)
+
+    def init_from(self, other):
+        # copy parameters over
+        utils.hard_update_params(other.encoder, self.encoder)
+        utils.hard_update_params(other.actor, self.actor)
+        if self.init_critic:
+            utils.hard_update_params(other.critic.trunk, self.critic.trunk)
 
     def get_meta_specs(self):
         return tuple()

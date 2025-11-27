@@ -21,5 +21,6 @@
   critic_lr: 1e-5
   critic_target_tau: 0.01
   critic_target_update_frequency: 1
+  init_critic: false  
   learnable_temperature: true
     

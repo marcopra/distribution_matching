@@ -104,9 +104,9 @@ class Workspace:
                                 cfg.num_seed_frames // cfg.action_repeat,
                                 cfg.agent)
         
-        self.INITIAL_HEATMAP = False
 
         # TODO Remove
+        self.INITIAL_HEATMAP = False
         self.dataset = {
             'states': np.array([]),
             'actions': np.array([]),
@@ -119,7 +119,11 @@ class Workspace:
             self.agent.init_from(pretrained_agent)
         
         if cfg.p_path is not None and cfg.p_path != "none":
-            self.agent = utils.load_policy_weights_into_agent(self.agent, cfg.p_path, device=self.device)
+            if cfg.p_path.endswith(".npy"):
+                self.agent = utils.load_policy_weights_into_agent(self.agent, cfg.p_path, device=self.device)
+            else:
+                pretrained_agent = self.load_snapshot_from_path(cfg.p_path)['agent']
+                self.agent.init_from(pretrained_agent)
 
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
@@ -361,6 +365,15 @@ class Workspace:
         #     if payload is not None:
         #         return payload
         return None
+
+    def load_snapshot_from_path(self, path: str):
+        snapshot = Path(path)
+        print(f'loading snapshot from path: {os.path.abspath(snapshot)}')
+        if not snapshot.exists():
+            return None
+        with snapshot.open('rb') as f:
+            payload = torch.load(f, weights_only=False)
+        return payload
 
 
 @hydra.main(config_path='.', config_name='train')

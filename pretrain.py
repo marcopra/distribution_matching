@@ -159,6 +159,9 @@ class Workspace:
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         meta = self.agent.init_meta()
+        eval_mode = False
+        if eval_mode == False:
+            utils.ColorPrint.yellow("Evaluating with eval_mode=False")
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
@@ -167,7 +170,7 @@ class Workspace:
                     action = self.agent.act(time_step.observation,
                                             meta,
                                             self.global_step,
-                                            eval_mode=True) # I am not sure we should evaluate with eval_mode=True during pretrain... ORIGINAL CODE: True
+                                            eval_mode=eval_mode) # I am not sure we should evaluate with eval_mode=True during pretrain... ORIGINAL CODE: True
                 time_step = self.eval_env.step(action)
                 self.video_recorder.record(self.eval_env)
                 total_reward += time_step.reward
