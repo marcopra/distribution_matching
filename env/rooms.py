@@ -256,7 +256,9 @@ class BaseRoomEnv(gym.Env, ABC):
     
     def render(self):
         """Render the environment."""
-        if self.render_mode == "ansi" or self.render_mode == "human":
+        if self.render_mode is None:
+            return None
+        elif self.render_mode == "ansi" or self.render_mode == "human":
             return self._render_ansi()
         elif self.render_mode == "rgb_array":
             return self._render_rgb()

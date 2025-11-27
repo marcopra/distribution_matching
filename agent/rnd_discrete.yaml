@@ -1,6 +1,6 @@
 # @package agent
-_target_: agent.ddpg.DDPGAgent
-name: ddpg
+_target_: agent.rnd_discrete.RNDAgent
+name: rnd
 reward_free: ${reward_free}
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -14,9 +14,12 @@ use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
 hidden_dim: 1024
 feature_dim: 50
+rnd_rep_dim: 512
 stddev_schedule: 0.2
 stddev_clip: 0.3
-nstep: 3
-batch_size: 1024 # 256 for pixels
+rnd_scale: 1.0
+nstep: 1
+batch_size: 1024
 init_critic: true
-# update_encoder: ${update_encoder}
+linear_actor: false
+update_encoder: ${update_encoder}

@@ -510,7 +510,16 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         Wrapped environment
     """
     
-    env = gym.make(name, render_mode='rgb_array', **kwargs)
+    # Determine render_mode based on obs_type
+    if obs_type == 'pixels':
+        assert kwargs['render_mode'] == 'rgb_array', "For pixel observations, render_mode must be 'rgb_array'"
+    
+    env = gym.make(name, **kwargs)
+    
+    # Assert that render_mode is 'rgb_array' if pixels observation is requested
+    if obs_type == 'pixels':
+        assert env.render_mode == 'rgb_array', \
+            f"render_mode must be 'rgb_array' for pixel observations, got {env.render_mode}"
 
     if seed is not None:
         env.reset(seed=seed)
@@ -522,7 +531,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         env = IgnoreSuccessTerminationWrapper(env)
     
     # Add wrappers
-    env = ResizeRendering(env, resolution=resolution)   
+    if obs_type == 'pixels':
+        env = ResizeRendering(env, resolution=resolution)   
     env = ActionDTypeWrapper(env, np.float32)
     
     # Add relabelling wrappers if requested
@@ -547,7 +557,9 @@ def make_kwargs(cfg):
             'show_coordinates': cfg.env.show_coordinates,
             'goal_position': tuple(cfg.env.goal_position) if cfg.env.goal_position else None,
             'start_position': tuple(cfg.env.start_position) if cfg.env.start_position else None,
+            'render_mode': cfg.env.render_mode,
         }
+    
     # Add environment-specific parameters
     if "SingleRoom" in cfg.env.name:
         env_kwargs['room_size'] = cfg.env.room_size
