@@ -110,8 +110,13 @@ class DDPGAgent:
     def act(self, obs, meta, step, eval_mode):
         obs = torch.FloatTensor(obs).to(self.device)
         obs = self.encoder(obs.unsqueeze(0))
+        inputs = [obs]
+        for value in meta.values():
+            value = torch.as_tensor(value, device=self.device).unsqueeze(0)
+            inputs.append(value)
+        inpt = torch.cat(inputs, dim=-1)
         with torch.no_grad():
-            probs = self.actor(obs)
+            probs = self.actor(inpt)
 
             if eval_mode:
                 action = probs.argmax(dim=-1).cpu().numpy()[0]
