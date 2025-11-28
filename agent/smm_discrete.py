@@ -161,7 +161,6 @@ class SMMAgent(DDPGAgent):
 
         self.smm.train()
 
-        print("Actori input dim:", self.actor.policy.in_features)
         # fine tuning SMM agent
         self.ft_returns = np.zeros(z_dim, dtype=np.float32)
         self.ft_not_finished = [True for z in range(z_dim)]
