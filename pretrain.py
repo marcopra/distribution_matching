@@ -99,6 +99,10 @@ class Workspace:
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
         time_step = self.train_env.reset()
+
+    
+        if hasattr(self.agent, 'insert_env'):
+            self.agent.insert_env(self.train_env)
     
 
         # create replay buffer
