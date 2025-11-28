@@ -5,8 +5,8 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 import os
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-if 'MUJOCO_GL' not in os.environ:
-    os.environ['MUJOCO_GL'] = 'osmesa'  # or whatever default you want
+os.environ['MUJOCO_GL'] = 'egl'
+
 from pathlib import Path
 
 import hydra
