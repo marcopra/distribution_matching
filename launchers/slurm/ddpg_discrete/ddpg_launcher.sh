@@ -1,6 +1,6 @@
 #!/bin/bash
 
-seeds="0 1 2 3"
+seeds="0 1 2 3 4"
 model_paths=(
     # "/home/mprattico/distribution_matching/models/four_rooms10/rnd/rnd_500100.pt"
     # "/home/mprattico/distribution_matching/models/four_rooms10/icm_apt/icm_apt_500100.pt"
