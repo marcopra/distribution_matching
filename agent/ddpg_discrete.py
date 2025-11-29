@@ -122,7 +122,7 @@ class DDPGAgent:
                 action = probs.argmax(dim=-1).cpu().numpy()[0]
             else:
                 action = Categorical(probs).sample().item()
-                if step < self.num_expl_steps:
+                if step < self.num_expl_steps and self.reward_free:
                     if step % 1000 == 0 and step > 0:
                         ColorPrint.yellow("DDPG Discrete: using random action for exploration")
                     # sample the discrete action uniformly during initial exploration
