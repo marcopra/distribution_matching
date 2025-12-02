@@ -9,6 +9,26 @@ import torch.nn.functional as F
 import utils
 from distribution_matching import DistributionVisualizer
 
+
+class Encoder(nn.Module):
+    def __init__(self, obs_shape, hidden_dim, feature_dim):
+        super(Encoder, self).__init__()
+        self.obs_shape = obs_shape
+        self.feature_dim = feature_dim
+
+        self.fc = nn.Sequential(
+            nn.Linear(obs_shape[0], hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, feature_dim)
+        )
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs):
+        obs = obs.view(obs.shape[0], -1)
+        h = self.fc(obs)
+        return h
+
 class DistributionMatcher:
     """
     Policy optimizer for matching target state distributions using mirror descent.
@@ -24,13 +44,17 @@ class DistributionMatcher:
                  n_states: int,
                  n_actions: int, 
                  nu0: np.ndarray,
+                 nu_target: np.ndarray,
+                 batch_size: int,
                  gamma: float = 0.9, 
                  eta: float = 0.1, 
                  alpha = 0.1, 
-                 gradient_type: str = 'reverse'):
+                 gradient_type: str = 'reverse',
+                 device: str = "cpu"):
         self.gamma = gamma
         self.eta = eta
         self.nu0 = nu0
+        self.nu_target = nu_target
         self.gradient_type = gradient_type
         self.alpha = alpha
         self.uniform_policy_operator = np.ones((n_states * n_actions, n_states)) / n_actions
@@ -42,6 +66,14 @@ class DistributionMatcher:
         self.lava=False
         self.kl_history = []
 
+        # sample states from nu0
+        obs_from_nu0 = []
+        for _ in range(batch_size):
+            state = np.random.choice(self.n_states, p=nu_target.flatten())
+            obs_from_nu0.append(state)
+        obs_from_nu0 = np.array(obs_from_nu0).reshape(-1, 1)  # [batch_size, obs_dim]
+        self.obs_from_nu0 = torch.tensor(obs_from_nu0).float().to(device)
+
     
     
     @staticmethod
@@ -52,10 +84,10 @@ class DistributionMatcher:
         """
         return T @ P
 
-    def append_kl_history(self, kl_value: float):
-        self.kl_history.append(kl_value)
+    def append_loss_history(self, loss_value: float):
+        self.kl_history.append(loss_value) # TODO is a loss history, it is needed just for visualizer that it is in another file.
 
-    def compute_discounted_occupancy(self, nu0: np.ndarray, P: np.ndarray, T: np.ndarray) -> np.ndarray:
+    def compute_discounted_occupancy(self, nu0: np.ndarray, P: np.ndarray, T: nn.Module) -> np.ndarray:
         """
         Compute discounted occupancy measure: ν_π = (1-γ)(I - γM_π)^{-1} ν_0
         
@@ -66,7 +98,7 @@ class DistributionMatcher:
         Returns:
             Discounted occupancy measure
         """
-            
+        T = T.weight.detach().cpu().numpy()  # [n_states, n_states * n_actions] 
         I = np.eye(self.n_states)
         M = self.M_pi_operator(P, T)
         return (1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0)
@@ -89,7 +121,7 @@ class DistributionMatcher:
 
         return (1-self.alpha) * np.sum(np.nan_to_num(p * np.log(p / q), nan=0.0)) + self.alpha*second_term
 
-    def compute_gradient_kl(self, nu0: np.ndarray, nu_target: np.ndarray, P: np.ndarray, T: np.ndarray) -> np.ndarray:
+    def compute_gradient(self, nu0: np.ndarray, nu_target: np.ndarray, P: np.ndarray, T: np.ndarray) -> np.ndarray:
         """
         Compute gradient of KL divergence w.r.t. policy.
         
@@ -100,6 +132,7 @@ class DistributionMatcher:
         Returns:
             Gradient of shape (n_states * n_actions, n_states)
         """
+        raise NotImplementedError("This method is deprecated, use compute_new_gradient instead.")   
         I = np.eye(self.n_states)
         M = self.M_pi_operator(P, T)
         second_term = np.nan_to_num(1 + P/self.uniform_policy_operator, nan=0.0) if self.alpha > 0 else 0.0  
@@ -119,6 +152,44 @@ class DistributionMatcher:
             gradient = gradient @ (np.ones_like(log_nu_pi_over_nu_target) + log_nu_pi_over_nu_target)
             
             gradient = (1-self.alpha) *(1 - self.gamma) * gradient @ np.linalg.solve(I - self.gamma * M, nu0).T - self.alpha * second_term
+        elif self.gradient_type == 'MMD':
+            assert self.alpha == 0.0, "MMD gradient not compatible with policy regularization"
+            gradient = 2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, self.T_operator).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0) - nu_target)@np.ones_like(nu0.T) 
+        else:
+            raise ValueError(f"Unknown gradient type: {self.gradient_type}")
+        
+        return gradient
+
+    def compute_new_gradient(self, obs, P: np.ndarray, T_operator: nn.Module, encoder: nn.Module, batch_size: int, device) -> np.ndarray:
+        """
+        Compute gradient of KL divergence w.r.t. policy.
+        
+        Args:
+            nu0: Initial state distribution
+            nu_target: Target state distribution
+        
+        Returns:
+            Gradient of shape (n_states * n_actions, n_states)
+        """
+        
+        enc_obs_from_nu0 = encoder(self.obs_from_nu0)  # [batch_size, feature_dim]
+        nu0_lantent = enc_obs_from_nu0.sum(dim=0)/batch_size # [feature_dim]
+        nu0_lantent = (nu0_lantent.detach().cpu().numpy()).reshape(-1,1)
+        assert nu0_lantent.shape[0] == self.n_states, f"nu0_lantent.shape[0]: {nu0_lantent.shape[0]}, self.n_states: {self.n_states}"
+
+        obs = torch.argmax(obs, dim=1)[..., None]  # [batch_size, obs_dim]
+        nu_target_latent = encoder(obs.float().to(device)).sum(dim=0)/obs.shape[0]  # [feature_dim]
+        nu_target_latent = (nu_target_latent.detach().cpu().numpy()).reshape(-1,1)  
+        assert nu_target_latent.shape[0] == self.n_states, f"nu_target_latent.shape[0]: {nu_target_latent.shape[0]}, self.n_states: {self.n_states}"
+        # Bring everything to numpy
+        T = T_operator.weight.detach().cpu().numpy()  # [n_states, n_states * n_actions]
+        I = np.eye(self.n_states)
+        M = self.M_pi_operator(P, T)
+        # second_term = np.nan_to_num(1 + P/self.uniform_policy_operator, nan=0.0) if self.alpha > 0 else 0.0  
+        
+        if self.gradient_type == 'MMD':
+            assert self.alpha == 0.0, "MMD gradient not compatible with policy regularization"
+            gradient = 2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, T).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0_lantent) - nu_target_latent)@np.ones_like(nu0_lantent.T) 
         else:
             raise ValueError(f"Unknown gradient type: {self.gradient_type}")
         
@@ -158,6 +229,7 @@ class DistributionMatcher:
             new_policy_operator: New policy operator to set
         """
         self.policy_operator = new_policy_operator
+
     def get_policy_per_state(self, uniform_policy: bool = False) -> np.ndarray:
         """
         Extract policy probabilities π(a|s) for each state.
@@ -191,10 +263,12 @@ class DistMatchingAgent:
                  nstep,
                  use_tb,
                  use_wandb,
-                 learn_T,
                  lr_T,
+                 lr_encoder,
+                 T_learning_steps,
                  update_every_steps,
                  num_expl_steps,
+                 gradient_type,
                  starting_policy: str = "uniform",
                  device: str = "cpu",
                  linear_actor: bool = False, # TODO not used yet
@@ -209,15 +283,15 @@ class DistMatchingAgent:
         self.lr_actor = lr_actor
         self.discount = discount
         self.alpha = alpha
-        self.learn_T = learn_T
         self.lr_T = lr_T
+        self.batch_size = batch_size
+        self.T_learning_steps = T_learning_steps
         self.update_every_steps = update_every_steps
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.device = device
-        self.gradient_type = 'reverse'  # could be 'forward' but it is not working practically (it is a theorethical problem not a bug)
+        self.gradient_type = gradient_type  # could be 'forward' but it is not working practically (it is a theorethical problem not a bug)
         self.num_expl_steps = num_expl_steps
-        visited_states = set()
 
         self.initial_distribution = None
 
@@ -228,6 +302,8 @@ class DistMatchingAgent:
         else:
             raise ValueError(f"Unknown starting policy: {starting_policy}")
         
+        self.encoder = Encoder((1,), hidden_dim=128, feature_dim=self.n_states).to(self.device)
+        self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr=lr_encoder)
 
         self.nu_target = (np.ones(self.n_states) / self.n_states).reshape(-1,1) # Homogeneus target distribution
 
@@ -247,19 +323,20 @@ class DistMatchingAgent:
         # TODO future reminder: Remove this when using non-custom envs. we access some env methods that are not available in usual gym envs
         if self.initial_distribution is None:
             self.initial_distribution = self._create_initial_distribution()
-            if self.learn_T:
-                self.T_operator = np.zeros((self.n_states, self.n_states * self.n_actions))
-            else:
-                # ATTENTION: not all gym envs give free access to the simulator
-                self.T_operator = self._create_transition_matrix()
+          
+            self.T_operator = self._create_transition_matrix()
+            
             self.distribution_matcher = DistributionMatcher(
                 n_states=self.n_states,
                 n_actions=self.n_actions,
                 nu0=self.initial_distribution,
+                nu_target=self.nu_target,
+                batch_size=self.batch_size,
                 gamma=self.discount,
                 eta=self.lr_actor,
                 alpha=self.alpha,
-                gradient_type=self.gradient_type
+                gradient_type=self.gradient_type,
+                device=self.device,
             )
             self.visualizer = DistributionVisualizer(self.env, self.distribution_matcher)
         return OrderedDict()
@@ -299,16 +376,15 @@ class DistMatchingAgent:
                T[s', s*n_actions + a] = 1 if action a in state s leads to s'
         """
         
-        T = np.zeros((self.n_states, self.n_states * self.n_actions))
-        
-        for s_idx in range(self.n_states):
-            cell = self.env.idx_to_state[s_idx]
-            for action in range(self.n_actions):
-                next_cell = self.env.step_from(cell, action)
-                next_idx = self.env.state_to_idx[next_cell]
-                col = s_idx * self.n_actions + action
-                T[next_idx, col] = 1.0
+        T = nn.Linear(self.encoder.feature_dim * self.n_actions, self.encoder.feature_dim).to(self.device)
+        self.T_optimizer = torch.optim.Adam(T.parameters(), lr=self.lr_T)
         return T
+    
+    def _from_nn_to_operator(self, nn_model: nn.Module) -> np.ndarray:
+        """Convert neural network model to policy operator."""
+        weights = nn_model.weight.detach().cpu().numpy()
+        
+        return weights
     
     def _from_operator_to_policy(self, policy_operator: np.ndarray = None) -> np.ndarray:
         """Convert policy operator to policy matrix."""
@@ -386,39 +462,46 @@ class DistMatchingAgent:
        
     def update_transition_matrix(self, obs, action, next_obs):
         metrics = dict()
-        loss = 0.0
-        for s, a, s_next in zip(obs, action, next_obs):
-            # Convert tensors to integers
-            state = int(torch.argmax(s).item())
-            next_state = int(torch.argmax(s_next).item())
-
-            col = state * self.n_actions + a
-            loss += (1.0 - self.T_operator[next_state, col])**2
-            self.T_operator[next_state, col] = 1.0 # += self.lr_T * (1.0 - self.T_operator[next_state, col])
+        obs = torch.argmax(obs, dim=1)[..., None].float()  # [batch_size, obs_dim]
+        next_obs = torch.argmax(next_obs, dim=1)[..., None].float()
+        obs_enc = self.encoder(obs) # [batch_size, feature_dim]
+        next_obs_enc = self.encoder(next_obs) # [batch_size, feature_dim]
+        action_onehot = F.one_hot(action.long(), num_classes=self.n_actions).float() # [batch_size, n_actions]
+        # Input is outer tensor product between obs_enc and action_onehot
+        obs_enc_action = torch.einsum('be,ba->bea', obs_enc, action_onehot).reshape(obs_enc.shape[0], -1)
         
-        metrics['T_loss'] = loss / obs.shape[0]
+       
+        pred_next_obs_enc = self.T_operator(obs_enc_action)
+        T_loss = F.mse_loss(pred_next_obs_enc, next_obs_enc.detach())
+       
+        self.encoder_optimizer.zero_grad()
+        self.T_optimizer.zero_grad()
+        T_loss.backward()
+        self.encoder_optimizer.step()
+        self.T_optimizer.step()
+
+        metrics['T_loss'] = T_loss.detach().cpu().item()
             
         return metrics
-        # for s_idx in range(self.n_states):
-        #     cell = self.env.idx_to_state[s_idx]
-        #     for action in range(self.n_actions):
-        #         next_cell = self.env.step_from(cell, action)
-        #         next_idx = self.env.state_to_idx[next_cell]
-        #         col = s_idx * self.n_actions + action
-        #         T[next_idx, col] = 1.0
-        # return T
+        
 
-    def update_actor(self):
+    def update_actor(self, obs):
         metrics = dict()
-        if self.gradient_type == 'reverse':
-                nu_pi = self.distribution_matcher.compute_discounted_occupancy(self.initial_distribution, self.policy_operator, self.T_operator)
-                actor_loss = self.distribution_matcher.kl_divergence(nu_pi, self.nu_target, self.policy_operator)
-        else:  # forward
-            I = np.eye(self.n_states)
-            M = self.distribution_matcher.M_pi_operator(self.policy_operator, self.T_operator)
-            actor_loss = self.distribution_matcher.kl_divergence(self.initial_distribution, (I - self.discount * M)/(1-self.discount) @ self.nu_target, self.policy_operator)
-
-        gradient = self.distribution_matcher.compute_gradient_kl(self.initial_distribution, self.nu_target, self.policy_operator, self.T_operator)
+        # if self.gradient_type == 'reverse':
+        #         nu_pi = self.distribution_matcher.compute_discounted_occupancy(self.initial_distribution, self.policy_operator, self.T_operator)
+        #         actor_loss = self.distribution_matcher.kl_divergence(nu_pi, self.nu_target, self.policy_operator)
+        # elif self.gradient_type == 'forward':
+        #     I = np.eye(self.n_states)
+        #     M = self.distribution_matcher.M_pi_operator(self.policy_operator, self.T_operator)
+        #     actor_loss = self.distribution_matcher.kl_divergence(self.initial_distribution, (I - self.discount * M)/(1-self.discount) @ self.nu_target, self.policy_operator)
+        # el
+        if self.gradient_type == 'MMD':
+            nu_pi = self.distribution_matcher.compute_discounted_occupancy(self.initial_distribution, self.policy_operator, self.T_operator)
+            actor_loss = np.sum((nu_pi - self.nu_target)**2)
+        else:
+            raise ValueError(f"Unknown gradient type: {self.gradient_type}")
+        
+        gradient = self.distribution_matcher.compute_new_gradient(obs, self.policy_operator, self.T_operator, self.encoder, self.batch_size, self.device)
         self.policy_operator = self.distribution_matcher.mirror_descent_update(self.policy_operator, gradient)
         
         self.policy_matrix = self._from_operator_to_policy(self.policy_operator)
@@ -426,7 +509,7 @@ class DistMatchingAgent:
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss
         
-        self.distribution_matcher.append_kl_history(actor_loss)
+        self.distribution_matcher.append_loss_history(actor_loss)
 
         return metrics
 
@@ -453,12 +536,14 @@ class DistMatchingAgent:
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
 
-        if self.learn_T:
+        if step < self.num_expl_steps + self.T_learning_steps:
             # update transition matrix
             metrics.update(self.update_transition_matrix( obs, action, next_obs))
+            print(f"Step {step}: Updated Transition Matrix with loss {metrics['T_loss']}")
+            return metrics
 
         # update actor
-        metrics.update(self.update_actor())
+        metrics.update(self.update_actor(obs))
         self.distribution_matcher.update_internal_policy(self.policy_operator)
         
         if step%4000 == 0:

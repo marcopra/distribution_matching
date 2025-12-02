@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.dist_matching.DistMatchingAgent
+_target_: agent.dist_matching_embedding.DistMatchingAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -7,10 +7,12 @@ action_shape: ??? # to be specified later
 lr_actor: 0.05 # eta
 discount: ${discount} # gamma
 alpha: 0.0
-learn_T: true # whether to learn the T operator
 lr_T: 1e-4
 batch_size: 1024
 nstep: 1
+T_learning_steps: 1000
+lr_encoder: 1e-4
+gradient_type: MMD # [reverse, MMD] # Don't use forward it makes no sense
 update_every_steps: 1
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
