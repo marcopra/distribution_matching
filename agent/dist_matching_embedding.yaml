@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.dist_matching_embedding.DistMatchingAgent
+_target_: agent.dist_matching_embedding.DistMatchingEmbeddingAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -10,10 +10,11 @@ alpha: 0.0
 lr_T: 1e-4
 batch_size: 1024
 nstep: 1
-T_learning_steps: 1000
 lr_encoder: 1e-4
 gradient_type: MMD # [reverse, MMD] # Don't use forward it makes no sense
+T_learning_steps: 1000
 update_every_steps: 1
+internal_dataset_type: unique # [unique, all]
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later

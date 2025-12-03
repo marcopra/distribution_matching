@@ -223,6 +223,8 @@ class Workspace:
                         log('buffer_size', len(self.replay_storage))
                         log('step', self.global_step)
 
+                if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
+                    meta = self.agent.update_meta(meta, self.global_step, time_step)
                 # reset env
                 time_step = self.train_env.reset()
                 meta = self.agent.init_meta()

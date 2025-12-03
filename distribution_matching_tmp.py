@@ -1111,7 +1111,7 @@ def main(cfg: DictConfig):
     # Create initial and target distributions
     # Call create_initial_distribution AFTER environment reset so start_position is set
     nu0 = create_initial_distribution(env.unwrapped, mode=initial_mode)
-    nu_target = np.ones(env.unwrapped.n_states) / (env.unwrapped.n_states - (1)*int(lava))   # Uniform target
+    nu_target = np.zeros(env.unwrapped.n_states) #np.ones(env.unwrapped.n_states) / (env.unwrapped.n_states - (1)*int(lava))   # Uniform target
     # if lava:
     #     dead_state_idx = env.unwrapped.state_to_idx[(-1, -1)] 
     #     nu_target[dead_state_idx] = 1e-8

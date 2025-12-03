@@ -158,6 +158,7 @@ class DistributionMatcher:
             new_policy_operator: New policy operator to set
         """
         self.policy_operator = new_policy_operator
+        
     def get_policy_per_state(self, uniform_policy: bool = False) -> np.ndarray:
         """
         Extract policy probabilities π(a|s) for each state.
