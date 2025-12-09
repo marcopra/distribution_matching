@@ -14,7 +14,7 @@ gradient_type: 'reverse'  # Type of KL gradient: 'reverse' or 'forward'
 
 # Training parameters
 n_updates: 100000  # Number of optimization updates
-print_every: 20000  # Save results every N iterations
+print_every: 10000  # Save results every N iterations
 
 # Rollout parameters
 n_rollouts: 10  # Number of rollout episodes

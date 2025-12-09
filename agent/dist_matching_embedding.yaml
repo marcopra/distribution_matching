@@ -6,18 +6,18 @@ obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 lr_actor: 0.05 # eta
 discount: ${discount} # gamma
-alpha: 0.0
+lambda_reg: 0
 lr_T: 1e-4
 batch_size: 1024
 nstep: 1
-lr_encoder: 1e-4
-gradient_type: MMD # [reverse, MMD] # Don't use forward it makes no sense
+lr_encoder: 1e-3
+hidden_dim: 256
 T_learning_steps: 1000
 update_every_steps: 1
+pmd_steps: 100
 internal_dataset_type: unique # [unique, all]
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
-starting_policy: random # [uniform, random]
 device: ${device}
 linear_actor: false

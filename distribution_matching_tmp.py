@@ -45,7 +45,7 @@ class DistributionMatcher:
         
         # Initialize uniform random policy
         self.uniform_policy_operator = self._create_uniform_policy() 
-        self.policy_operator = self._create_random_policy() 
+        self.policy_operator = self._create_uniform_policy() #self._create_random_policy() 
         
         # History tracking
         self.kl_history = []
@@ -157,6 +157,12 @@ class DistributionMatcher:
             gradient = (1-self.alpha) *(1 - self.gamma) * gradient @ np.ones_like(log_nu_pi_over_nu_target.T) - self.alpha * second_term
         elif self.gradient_type == 'MMD':
             gradient = 2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, self.T_operator).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0) - nu_target)@np.ones_like(nu0.T) 
+            print(f"M", M)
+            print("T", self.T_operator)
+            print("1", np.linalg.solve(I - self.gamma * M, self.T_operator).T)
+            print("2", ( np.linalg.solve(I - self.gamma * M, nu0)))
+            print("3", 2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, self.T_operator).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0) ))
+            # print(2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, self.T_operator).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0)))
         else:
             raise ValueError(f"Unknown gradient type: {self.gradient_type}")
         
@@ -182,6 +188,7 @@ class DistributionMatcher:
             new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(-self.eta * gradient_3d[s, :, s])
             policy_s_actions = new_policy_3d[s, :, s]
             new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
+            print("s", s, new_policy_3d[s, :, s])
         
         return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
 
@@ -334,7 +341,6 @@ class DistributionMatcher:
             # Compute gradient and update policy
             gradient = self.compute_gradient(nu0, nu_target)
             self.policy_operator = self.mirror_descent_update(gradient)
-            
             # Print progress
             if verbose and iteration % 100 == 0:
                 print(f"Iter {iteration:5d}: KL = {kl:.10f}, Policy L2 = {policy_distance:.6f}")

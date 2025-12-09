@@ -462,7 +462,7 @@ class DistMatchingAgent:
         metrics.update(self.update_actor())
         self.distribution_matcher.update_internal_policy(self.policy_operator)
         
-        if step%4000 == 0:
+        if (step%4300 == 0 or step%4600 == 0):
             print(f"Last KL divergence: {self.distribution_matcher.kl_history[-1]}")
             self.visualizer.plot_results(
                 self.initial_distribution, 

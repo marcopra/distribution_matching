@@ -6,261 +6,667 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import defaultdict
+from typing import Tuple, Optional, Dict
 from dm_env import StepType, specs
-
+from scipy.special import softmax
+from scipy.linalg import cho_factor, cho_solve
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch, Rectangle
 import utils
 from distribution_matching import DistributionVisualizer
+torch.set_default_dtype(torch.double)
 
 
+# ============================================================================
+# Neural Network Components
+# ============================================================================
 class Encoder(nn.Module):
     def __init__(self, obs_shape, hidden_dim, feature_dim):
         super(Encoder, self).__init__()
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
 
-        self.fc = nn.Sequential(
-            nn.Linear(obs_shape[0], hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, feature_dim)
-        )
+        self.fc = nn.Identity()
+        # nn.Sequential(
+        #     nn.Linear(obs_shape[0], feature_dim),
+        #     # nn.ReLU(),
+        #     # nn.Linear(hidden_dim, feature_dim),
+        #     nn.LayerNorm(feature_dim),
+        # )
 
-        self.apply(utils.weight_init)
+        # self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
         return h
 
-class DistributionMatcher:
-    """
-    Policy optimizer for matching target state distributions using mirror descent.
+class TransitionModel(nn.Module):
+    """Learnable transition dynamics T: (s,a) -> s'."""
     
-    Args:
-        env: gym.Env instance
-        gamma: Discount factor for occupancy measure
-        eta: Learning rate for mirror descent
-        gradient_type: Type of KL gradient ('reverse' or 'forward')
-    """
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.T = nn.Linear(input_dim, output_dim, bias=False)
     
-    def __init__(self, 
-                 n_states: int,
-                 n_actions: int, 
-                 nu0: np.ndarray,
-                 nu_target: np.ndarray,
-                 batch_size: int,
-                 gamma: float = 0.9, 
-                 eta: float = 0.1, 
-                 alpha = 0.1, 
-                 gradient_type: str = 'reverse',
-                 device: str = "cpu"):
-        self.gamma = gamma
-        self.eta = eta
-        self.nu0 = nu0
-        self.nu_target = nu_target
-        self.gradient_type = gradient_type
-        self.alpha = alpha
-        self.uniform_policy_operator = np.ones((n_states * n_actions, n_states)) / n_actions
-        self.policy_operator = self.uniform_policy_operator.copy()
+    def forward(self, encoded_state_action: torch.Tensor) -> torch.Tensor:
+        return self.T(encoded_state_action)
+    
+    def compute_closed_form(
+        self, 
+        psi: torch.Tensor,  # [N, d*|A|] state-action features
+        phi_next: torch.Tensor,  # [N, d] next state features
+        lambda_reg: float
+    ) -> torch.Tensor:
+        """Compute closed-form solution: T = φ'ᵀ(ψψᵀ + λI)⁻¹ψ."""
+        N = psi.shape[0]
+        identity = torch.eye(N, device=psi.device)
+        gram_matrix = psi @ psi.T + lambda_reg * identity
         
+        T_optimal = phi_next.T @ torch.linalg.solve(gram_matrix, psi)
+        return T_optimal
+
+# ============================================================================
+# Internal Dataset Management
+# ============================================================================
+class InternalDataset:
+    """Manages the agent's internal experience buffer."""
+    
+    def __init__(self, dataset_type: str, n_states: int, n_actions: int):
+        self.dataset_type = dataset_type
         self.n_states = n_states
         self.n_actions = n_actions
-
-        self.lava=False
-        self.kl_history = []
-
-        # sample states from nu0
-        obs_from_nu0 = []
-        for _ in range(batch_size):
-            state = np.random.choice(self.n_states, p=nu_target.flatten())
-            obs_from_nu0.append(state)
-        obs_from_nu0 = np.array(obs_from_nu0).reshape(-1, 1)  # [batch_size, obs_dim]
-        self.obs_from_nu0 = torch.tensor(obs_from_nu0).float().to(device)
-
+        self.expected_size = n_states * n_actions
+        assert dataset_type in ("unique", "all"), "dataset_type must be 'unique' or 'all'"
+        
+        # Initialize as empty tensors
+        self.data = {
+            'observation': torch.empty((0, )), # save just the int
+            'action': torch.empty((0,), dtype=torch.long), # save just the int
+            'next_observation': torch.empty((0, )), # save just the int
+            'alpha': torch.empty((0, )) # save just the int
+        }
+        self._unique_pairs: set = set()
+        self._prev_obs: Optional[np.ndarray] = None
     
+    @property
+    def observation(self) -> Dict[str, torch.Tensor]:
+        return self.data['observation']
     
-    @staticmethod
-    def M_pi_operator(P: np.ndarray, T: np.ndarray) -> np.ndarray:
-        """
-        Compute M_π = T ∘ Π_π operator.
-        Maps state distribution to next state distribution under policy.
-        """
-        return T @ P
-
-    def append_loss_history(self, loss_value: float):
-        self.kl_history.append(loss_value) # TODO is a loss history, it is needed just for visualizer that it is in another file.
-
-    def compute_discounted_occupancy(self, nu0: np.ndarray, P: np.ndarray, T: np.ndarray) -> np.ndarray:
-        """
-        Compute discounted occupancy measure: ν_π = (1-γ)(I - γM_π)^{-1} ν_0
-        
-        Args:
-            nu0: Initial state distribution
-            P: Policy operator (uses self.policy_operator if None)
-        
-        Returns:
-            Discounted occupancy measure
-        """
-        # T = T.weight.detach().cpu().numpy()  # [n_states, n_states * n_actions] 
-        I = np.eye(self.n_states)
-        M = self.M_pi_operator(P, T)
-        return (1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0)
-
-    def kl_divergence(self, p: np.ndarray, q: np.ndarray, P: np.ndarray) -> float:
-        """
-        Compute KL(p||q) with numerical stability.
-        Args:
-            p: Target distribution
-            q: Current distribution
-            P: Current policy operator
-        Returns:
-            KL divergence value
-        """
-
-        if self.alpha > 0:
-            second_term = -np.sum(P * np.nan_to_num(np.log(P/self.uniform_policy_operator), nan=0.0))
+    @property
+    def action(self) -> Dict[str, torch.Tensor]:
+        return self.data['action']
+    
+    @property
+    def next_observation(self) -> Dict[str, torch.Tensor]:
+        return self.data['next_observation']
+    
+    @property
+    def alpha(self) -> Dict[str, torch.Tensor]:
+        return self.data['alpha']
+    
+    @property
+    def size(self) -> int:
+        return len(self.data['observation'])
+    
+    @property
+    def is_complete(self) -> bool:
+        """Check if we have all unique state-action pairs."""
+        return self.dataset_type == "unique" and len(self._unique_pairs) == self.expected_size
+    
+    def add_transition(
+        self, 
+        time_step
+    ):
+        """Add a transition to the dataset."""
+        if self.dataset_type == "unique":
+            self._add_unique(time_step)
         else:
-            second_term = 0.0
-
-        return (1-self.alpha) * np.sum(np.nan_to_num(p * np.log(p / q), nan=0.0)) + self.alpha*second_term
-
-    def compute_gradient(self, nu0: np.ndarray, nu_target: np.ndarray, P: np.ndarray, T: np.ndarray) -> np.ndarray:
-        """
-        Compute gradient of KL divergence w.r.t. policy.
+            self._add_all(time_step)
         
-        Args:
-            nu0: Initial state distribution
-            nu_target: Target state distribution
         
-        Returns:
-            Gradient of shape (n_states * n_actions, n_states)
-        """
-        raise NotImplementedError("This method is deprecated, use compute_new_gradient instead.")   
-        I = np.eye(self.n_states)
-        M = self.M_pi_operator(P, T)
-        second_term = np.nan_to_num(1 + P/self.uniform_policy_operator, nan=0.0) if self.alpha > 0 else 0.0  
+    def _add_unique(self, time_step):
+        """Add only unique (s,a) pairs."""
+   
+        if time_step.step_type == StepType.FIRST:
+            self._prev_obs = time_step.observation
+            return
         
-        if self.gradient_type == 'forward':
-            r = nu0 / ((I - self.gamma * M) @ nu_target)
-            gradient =(1-self.alpha) * (self.gamma * T.T @ r @ nu_target.T)/(1-self.gamma)- self.alpha * second_term
+        elif time_step.step_type in  (StepType.MID, StepType.LAST):
+            pair = (np.argmax(self._prev_obs), time_step.action)
             
-        elif self.gradient_type == 'reverse':
-            nu_pi_over_nu_target = np.clip(
-                (1-self.gamma)*np.linalg.solve((I - self.gamma * M), nu0) / nu_target, 
-                a_min=1e-10, a_max=None
-            )
-            log_nu_pi_over_nu_target = np.log(nu_pi_over_nu_target)
-            
-            gradient = self.gamma * np.linalg.solve(I - self.gamma * M, T).T
-            gradient = gradient @ (np.ones_like(log_nu_pi_over_nu_target) + log_nu_pi_over_nu_target)
-            
-            gradient = (1-self.alpha) *(1 - self.gamma) * gradient @ np.linalg.solve(I - self.gamma * M, nu0).T - self.alpha * second_term
-        elif self.gradient_type == 'MMD':
-            assert self.alpha == 0.0, "MMD gradient not compatible with policy regularization"
-            gradient = 2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, self.T_operator).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0) - nu_target)@np.ones_like(nu0.T) 
+            if pair not in self._unique_pairs:
+                self._unique_pairs.add(pair)
+                # Convert to tensors and concatenate
+                self.data['observation'] = torch.cat([
+                    self.data['observation'],
+                    torch.tensor(self._prev_obs).unsqueeze(0)
+                ], dim=0)
+                self.data['action'] = torch.cat([
+                    self.data['action'],
+                    torch.tensor([time_step.action], dtype=torch.long).unsqueeze(0)
+                ], dim=0)
+                self.data['next_observation'] = torch.cat([
+                    self.data['next_observation'],
+                    torch.tensor(time_step.observation).unsqueeze(0)
+                ], dim=0)
+                # first time we have a unique pair, alpha is 1.0 else is 0
+                if len(self._unique_pairs) == 1:
+                    self.data['alpha'] = torch.cat([
+                        self.data['alpha'],
+                        torch.tensor([1.0]).unsqueeze(0)
+                    ], dim=0)
+                else:
+                    self.data['alpha'] = torch.cat([ # TODO alpha is one when next obs is the upper right cell
+                        self.data['alpha'],
+                        torch.tensor([0.0]).unsqueeze(0)
+                    ], dim=0)
+            self._prev_obs = time_step.observation
         else:
-            raise ValueError(f"Unknown gradient type: {self.gradient_type}")
+                raise ValueError("Unknown step type")
         
+    
+    def _add_all(self, time_step):
+        """Add all transitions."""
+        # Implementation for storing all transitions
+        # *** Store all dataset ***
+        if time_step.step_type == StepType.FIRST:  # first step
+            self.internal_dataset['observation'] = torch.cat([
+                self.data['observation'],
+                torch.tensor(time_step.observation).unsqueeze(0)
+            ], dim=0)
+
+            # first time we have a unique pair, alpha is 1.0 else is 0
+            if self.data['observation'].shape[0] == 1:
+                self.data['alpha'] = torch.cat([
+                    self.data['alpha'],
+                    torch.tensor([1.0]).unsqueeze(0)
+                ], dim=0)
+            else:
+                self.data['alpha'] = torch.cat([
+                    self.data['alpha'],
+                    torch.tensor([0.0]).unsqueeze(0)
+                ], dim=0)
+
+        elif time_step.step_type == StepType.MID:  # mid step
+            self.data['observation'] = torch.cat([
+                self.data['observation'],
+                torch.tensor(time_step.observation).unsqueeze(0)
+            ], dim=0)
+            self.data['action'] = torch.cat([
+                self.data['action'],
+                torch.tensor([time_step.action], dtype=torch.long)
+            ], dim=0)
+            self.data['next_observation'] = torch.cat([
+                self.data['next_observation'],
+                torch.tensor(time_step.observation).unsqueeze(0)
+            ], dim=0)
+            self.data['alpha'] = torch.cat([
+                    self.data['alpha'],
+                    torch.tensor([0.0]).unsqueeze(0)
+                ], dim=0)
+        elif time_step.step_type == StepType.LAST:  # last step
+            self.data['action'] = torch.cat([
+                self.data['action'],
+                torch.tensor([time_step.action], dtype=torch.long)
+            ], dim=0)
+            self.data['next_observation'] = torch.cat([
+                self.data['next_observation'],
+                torch.tensor(time_step.observation).unsqueeze(0)
+            ], dim=0)
+            assert self.data['observation'].shape[0] == self.data['action'].shape[0] == self.data['next_observation'].shape[0], f"len(obs): {self.data['observation'].shape[0]}, len(action): {self.data['action'].shape[0]}, len(next_obs): {self.data['next_observation'].shape[0]}"
+        else:
+            raise ValueError("Unknown step type")
+        
+    def get_data(self) -> Dict[str, torch.Tensor]:
+        """Retrieve the internal dataset."""
+        return self.data
+    
+    # def to_tensors(self, device: str = "cpu") -> Dict[str, torch.Tensor]:
+    #     """Convert internal data to torch tensors."""
+    #     return {
+    #         'observations': torch.tensor(np.array(self.data['observations']), device=device),
+    #         'actions': torch.tensor(self.data['actions'], dtype=torch.long, device=device),
+    #         'next_observations': torch.tensor(np.array(self.data['next_observations']), device=device),
+    #         'alpha': torch.tensor(self.data['alpha'], device=device)
+    #     }
+
+# ============================================================================
+# Distribution Matching Mathematics
+# ============================================================================
+class DistributionMatcher:
+    """Handles mathematical operations for distribution matching via PMD."""
+
+    def __init__(self, 
+                 lambda_reg: float,
+                 gamma: float = 0.9, 
+                 eta: float = 0.1, 
+                 device: str = "cpu"):
+        
+        self.gamma = gamma
+        self.eta = eta
+        self.lambda_reg = lambda_reg
+        self.device = device    
+            
+    def compute_discounted_occupancy(
+            self, 
+            phi_curr_states:torch.Tensor, 
+            phi_all_next_obs:torch.Tensor, 
+            BM: torch.Tensor,
+            alpha: torch.Tensor
+        ) -> torch.Tensor:
+        """Compute discounted occupancy: ν = (1-γ)(I - γBM)⁻¹α."""
+        raise NotImplementedError("Use compute_nu_pi")
+        N = BM.shape[0]
+        identity = torch.eye(N, device=self.device)
+        
+        kernel = phi_curr_states @ phi_all_next_obs.T  # [B, N]
+        inv_term = torch.linalg.solve(identity - self.gamma * BM, alpha)
+        
+        occupancy = (1 - self.gamma) * kernel @ inv_term
+        return occupancy
+
+    def compute_nu_pi(
+            self, 
+            phi_all_next_obs:torch.Tensor, 
+            BM: torch.Tensor,
+            alpha: torch.Tensor
+        ) -> torch.Tensor:
+        """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
+        N = BM.shape[0]
+        identity = torch.eye(N, device=self.device)
+        
+
+        inv_term = torch.linalg.solve(identity - self.gamma * BM, alpha)
+        
+        occupancy = (1 - self.gamma) *  phi_all_next_obs.T @ inv_term
+        return occupancy
+
+    def compute_BM(
+            self,
+            M: torch.Tensor,  # [N, N] forward operator
+            psi: torch.Tensor  # [N, d*|A|] state-action features
+        ) -> torch.Tensor:
+        """Compute BM = (ψψᵀ + λI)⁻¹M."""
+        N = psi.shape[0]
+        identity = torch.eye(N, device=self.device)
+        gram_matrix = psi @ psi.T + self.lambda_reg * identity
+
+        # s,v,d= torch.linalg.svd(gram_matrix)
+        # print(f"SVD of gram matrix:  {v}, V shape {v.shape}, D shape {d.shape}")
+        
+        L = torch.linalg.cholesky(gram_matrix)
+        BM = torch.cholesky_solve(M, L)
+        return BM
+    
+    def compute_gradient_coefficient(
+            self, 
+            M: torch.Tensor, 
+            K: torch.Tensor,
+            phi_all_next_obs:torch.Tensor, 
+            psi_all_obs_action:torch.Tensor, 
+            alpha:torch.Tensor
+        ) -> torch.Tensor:
+        """Compute gradient coefficient for policy update."""
+
+        # I_n = np.eye(psi_all_obs_action.shape[0])
+        # BM = np.linalg.solve(psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg* I_n, M) # [num_unique, num_unique]
+        # MB = np.linalg.solve((psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg* I_n).T, M).T # [num_unique, num_unique]
+
+        # Identity matrix
+        I_n = torch.eye(psi_all_obs_action.shape[0], device=self.device)
+
+        # Symmetric positive definite matrix A = ψψᵀ + λI
+        A = psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg * I_n
+
+        # Compute Cholesky decomposition and solve: BM = A⁻¹M
+        L = torch.linalg.cholesky(A)
+        BM = torch.cholesky_solve(M, L)
+
+        # gradient = 2 γ (1 - γ)² A⁻ᵀ (I - γ A⁻¹M)⁻ᵀΦΦᵀ(I - γ A⁻¹M)⁻¹ α
+        # Using the precomputed terms and solves:
+        # (I - γ A⁻¹M)⁻ᵀΦ = [Φᵀ(I - γ A⁻¹M)⁻¹]ᵀ
+        symmetric_term = torch.linalg.solve((I_n - self.gamma * BM).T, phi_all_next_obs)
+
+        # Left term: A⁻ᵀ(I - γBM)⁻ᵀΦ
+        # Solve A^T x = left_term_without_b using Cholesky
+        L_T = torch.linalg.cholesky(A.T)
+        left_term = torch.cholesky_solve(symmetric_term, L_T)
+        # TODO usare simmetria (I - γBM)⁻ᵀΦ 
+
+        # Right term: Φᵀ(I - γBM)⁻¹α
+        right_term = symmetric_term.T @ alpha
+
+        gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
+
+        print("Gradient coeff:", psi_all_obs_action.T@gradient)
         return gradient
 
-    def compute_new_gradient(self, P: np.ndarray, T: np.ndarray, nu0: np.ndarray) -> np.ndarray:
-        """
-        Compute gradient of KL divergence w.r.t. policy.
-        
-        Args:
-            nu0: Initial state distribution
-            nu_target: Target state distribution
-        
-        Returns:
-            Gradient of shape (n_states * n_actions, n_states)
-        """
-
-        M = self.M_pi_operator(P, T)
-        
-        I = np.eye(self.n_states)
-        gradient = 2*self.gamma * (1- self.gamma)* np.linalg.solve(I - self.gamma * M, T).T @ ((1 - self.gamma) * np.linalg.solve(I - self.gamma * M, nu0))@np.ones_like(nu0.T) 
-        
-        return gradient
-
     
-    def mirror_descent_update(self, P: np.ndarray, gradient: np.ndarray) -> np.ndarray:
+# ============================================================================
+# Distribution Visualizer
+# ============================================================================
+class EmbeddingDistributionVisualizer:
+    """Visualizer for embedding-based distribution matching results."""
+    
+    def __init__(self, agent):
         """
-        Apply mirror descent update: π_{t+1}(a|s) ∝ π_t(a|s) * exp(-η ∇_{a,s} f)
+        Initialize visualizer with agent reference.
         
         Args:
-            P: Current policy operator
-            gradient: Policy gradient
-        
-        Returns:
-            Updated policy operator
+            agent: DistMatchingEmbeddingAgent instance
         """
-        policy_3d = P.reshape((self.n_states, self.n_actions, self.n_states))
-        new_policy_3d = np.zeros_like(policy_3d)
-        gradient_3d = gradient.reshape((self.n_states, self.n_actions, self.n_states))
-        
-        
-        # Normalize the block-diagonal elements (policy probabilities per state)
-        for s in range(self.n_states):
-            new_policy_3d[s, :, s] = policy_3d[s, :, s] * np.exp(-self.eta * gradient_3d[s, :, s])
-            policy_s_actions = new_policy_3d[s, :, s]
-            new_policy_3d[s, :, s] = policy_s_actions / (policy_s_actions.sum() + 1e-10)
-        
-        return new_policy_3d.reshape((self.n_states * self.n_actions, self.n_states))
+        self.agent = agent
+        self.env = agent.env
+        self.n_states = agent.n_states
+        self.n_actions = agent.n_actions
 
-    # TODO: remove this in the future, are now useful for debugging and visualizing plot in an already existing visualizer class
-    def update_internal_policy(self, new_policy_operator: np.ndarray):
-        """
-        Update internal policy operator.
-        
-        Args:
-            new_policy_operator: New policy operator to set
-        """
-        self.policy_operator = new_policy_operator
 
-    def get_policy_per_state(self, uniform_policy: bool = False) -> np.ndarray:
-        """
-        Extract policy probabilities π(a|s) for each state.
-        Args:
-            uniform_policy: Whether to return uniform random policy instead of learned policy
         
-        Returns:
-            Array of shape (n_states, n_actions) with policy probabilities
-        """
-        if uniform_policy:
-            policy_matrix = self.uniform_policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
-        else:
-            policy_matrix = self.policy_operator.reshape((self.n_states, self.n_actions, self.n_states))
+        # Get grid dimensions
+        valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+        min_x = min(cell[0] for cell in valid_cells)
+        min_y = min(cell[1] for cell in valid_cells)
+        max_x = max(cell[0] for cell in valid_cells)
+        max_y = max(cell[1] for cell in valid_cells)
+
+        valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
+        self.all_state_ids_one_hot = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
+
+        
+        if hasattr(self.env, 'lava') and self.env.lava:
+            min_x = min(min_x, -1)
+            min_y = min(min_y, -1)
+        
+        self.min_x = min_x
+        self.min_y = min_y
+        self.grid_width = max_x - min_x + 1
+        self.grid_height = max_y - min_y + 1
+        
+        # Action symbols and colors
+        self.action_symbols = {0: '↑', 1: '↓', 2: '←', 3: '→'}
+        self.action_colors = ['red', 'blue', 'green', 'orange']
+        self.action_names = ['up', 'down', 'left', 'right']
+    
+    def _state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
+        """Convert state distribution vector to 2D grid."""
+        grid = np.zeros((self.grid_height, self.grid_width))
+        
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            grid_x = cell[0] - self.min_x
+            grid_y = cell[1] - self.min_y
+            grid[grid_y, grid_x] = nu[s_idx]
+        
+        return grid
+    
+    def _compute_initial_distribution(self) -> np.ndarray:
+        """Compute initial distribution using φ(unique_states) @ alpha."""
+        with torch.no_grad():
+            # One hot encoding of all states
+            one_hot_unique_states = torch.eye(self.n_states).to(self.agent.device)
+            
+            phi_states = self.agent.encoder(one_hot_unique_states).cpu()
+            
+
+            # Compute distribution: φᵀ @ alpha
+            H = phi_states @ self.agent._phi_all_obs.cpu().T
+            alpha = self.agent.dataset.alpha
+            nu_init = H @ alpha
+        return nu_init.flatten().numpy()
+    
+    def _compute_current_distribution(self) -> np.ndarray:
+        """Compute current occupancy distribution for all states."""
+        if self.agent.gradient_coeff is None:
+            return np.ones(self.n_states) / self.n_states
+        
+        nu_current = torch.zeros(self.n_states)
+        all_states = self.all_state_ids_one_hot.to(self.agent.device)
+        enc_all_states = self.agent.encoder(all_states).detach().cpu()  # [n_states, feature_dim]
+        
+        with torch.no_grad():
+            for s_idx in range(self.n_states):
+                
+                enc_curr_obs = enc_all_states[s_idx].unsqueeze(0)  # [1, feature_dim]
+                
+                
+                BM = self.agent.distribution_matcher.compute_BM(
+                    self.agent._phi_all_obs @ self.agent._phi_all_obs.T * (self.agent.pi @ self.agent.E.T),
+                    self.agent._psi_all
+                )
+                
+                occupancy = self.agent.distribution_matcher.compute_discounted_occupancy(
+                    phi_curr_states=enc_curr_obs,
+                    phi_all_next_obs=self.agent._phi_all_next,
+                    BM=BM,
+                    alpha=self.agent.dataset.alpha
+                )
+                
+                nu_current[s_idx] = occupancy.cpu().numpy().item()
+        
+        # Normalize
+        nu_current = nu_current / (nu_current.sum() + 1e-10)
+        return nu_current
+    
+    def _get_policy_per_state(self) -> np.ndarray:
+        """Extract policy probabilities for each state."""
         policy_per_state = np.zeros((self.n_states, self.n_actions))
         
-        for s in range(self.n_states):
-            policy_per_state[s, :] = policy_matrix[s, :, s]
-
+        all_states = self.all_state_ids_one_hot.to(self.agent.device)
+        
+        for s_idx in range(self.n_states):
+            policy_per_state[s_idx] = self.agent.compute_action_probs(all_states[s_idx].unsqueeze(0))
+            print(all_states[s_idx], s_idx, "->", policy_per_state[s_idx])
+        
         return policy_per_state
+    
+    def plot_results(self, step: int, save_path: str = None):
+        """
+        Create comprehensive visualization of learning progress.
+        
+        Args:
+            step: Current training step
+            save_path: Path to save figure (optional)
+        """
+        fig = plt.figure(figsize=(20, 12))
+        
+        # Add parameter text
+        param_text = (
+            f"Step: {step}\n"
+            f"γ = {self.agent.discount}\n"
+            f"η = {self.agent.lr_actor}\n"
+            f"λ = {self.agent.lambda_reg}\n"
+            f"PMD steps = {self.agent.pmd_steps}"
+        )
+        fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create subplot grid
+        ax_init = plt.subplot2grid((2, 4), (0, 0), colspan=1)
+        ax_current = plt.subplot2grid((2, 4), (0, 1), colspan=1)
+        ax_arrows = plt.subplot2grid((2, 4), (0, 2), colspan=1)
+        ax_bars = plt.subplot2grid((2, 4), (0, 3), colspan=1)
+        
+        # Second row: action heatmaps
+        ax_actions = [plt.subplot2grid((2, 4), (1, i), colspan=1) for i in range(4)]
+        
+        # Compute distributions
+        nu_init = self._compute_initial_distribution()
+        nu_current = np.zeros(self.n_states) # self._compute_current_distribution()
+        
+        # Plot distributions
+        self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
+        self._plot_distribution(ax_current, nu_current, 'Current Occupancy')
+        
+        # Plot policy
+        policy_per_state = self._get_policy_per_state()
+        self._plot_policy_arrows(ax_arrows, policy_per_state)
+        self._plot_policy_bars(ax_bars, policy_per_state)
+        
+        # Plot action heatmaps
+        self._plot_action_heatmaps(ax_actions, policy_per_state)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"\nVisualization saved to: {save_path}")
+            plt.close(fig)
+    
+    def _plot_distribution(self, ax, nu, title):
+        """Plot state distribution heatmap."""
+        grid = self._state_dist_to_grid(nu)
+        
+        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest', vmin=0)
+        ax.set_title(title)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        
+        ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
+        ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+        
+        # Highlight dead state if lava enabled
+        if hasattr(self.env, 'lava') and self.env.lava:
+            dead_grid_x = -1 - self.min_x
+            dead_grid_y = -1 - self.min_y
+            dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
+                                 fill=False, edgecolor='#CF1020', linewidth=3)
+            ax.add_patch(dead_rect)
+        
+        plt.colorbar(im, ax=ax)
+    
+    def _plot_policy_arrows(self, ax, policy_per_state):
+        """Plot policy as arrows showing most probable actions."""
+        ax.set_xlim(-0.5, self.grid_width - 0.5)
+        ax.set_ylim(self.grid_height - 0.5, -0.5)
+        ax.set_aspect('equal')
+        ax.set_title('Policy Actions')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.grid(True, alpha=0.3)
+        
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            x = cell[0] - self.min_x
+            y = cell[1] - self.min_y
+            
+            max_prob = np.max(policy_per_state[s_idx])
+            max_actions = np.where(np.isclose(policy_per_state[s_idx], max_prob, atol=1e-6))[0]
+            arrow_text = ''.join([self.action_symbols[a] for a in max_actions])
+            
+            if cell == self.env.DEAD_STATE:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='#CF1020', edgecolor='black', linewidth=0.5, alpha=0.3)
+            else:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='lightgray', edgecolor='black', linewidth=0.5)
+            ax.add_patch(rect)
+            ax.text(x, y, arrow_text, ha='center', va='center',
+                   fontsize=12, fontweight='bold')
+    
+    def _plot_policy_bars(self, ax, policy_per_state):
+        """Plot policy as mini bar charts."""
+        ax.set_xlim(-0.5, self.grid_width - 0.5)
+        ax.set_ylim(self.grid_height - 0.5, -0.5)
+        ax.set_aspect('equal')
+        ax.set_title('Policy Probabilities')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.grid(True, alpha=0.3)
+        
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            x = cell[0] - self.min_x
+            y = cell[1] - self.min_y
+            
+            if cell == self.env.DEAD_STATE:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='#CF1020', edgecolor='black', linewidth=0.5, alpha=0.3)
+            else:
+                rect = Rectangle((x - 0.4, y - 0.4), 0.8, 0.8,
+                               facecolor='lightgray', edgecolor='black', linewidth=0.5)
+            ax.add_patch(rect)
+            
+            probs = policy_per_state[s_idx]
+            bar_width = 0.15
+            bar_spacing = 0.2
+            start_x = x - 1.5 * bar_spacing
+            max_bar_height = 0.7
+            
+            for a_idx in range(self.n_actions):
+                bar_x = start_x + a_idx * bar_spacing
+                bar_height = probs[a_idx] * max_bar_height
+                
+                bar_rect = Rectangle((bar_x - bar_width/2, y + 0.35 - bar_height),
+                                    bar_width, bar_height,
+                                    facecolor=self.action_colors[a_idx],
+                                    edgecolor='black', linewidth=0.3)
+                ax.add_patch(bar_rect)
+        
+        legend_elements = [Patch(facecolor=self.action_colors[i], 
+                                label=self.action_names[i])
+                          for i in range(self.n_actions)]
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+    
+    def _plot_action_heatmaps(self, axes_list, policy_per_state):
+        """Plot heatmaps for each action's probability distribution."""
+        for a_idx, ax in enumerate(axes_list):
+            grid_action = np.zeros((self.grid_height, self.grid_width))
+            
+            for s_idx in range(self.n_states):
+                cell = self.env.idx_to_state[s_idx]
+                grid_x = cell[0] - self.min_x
+                grid_y = cell[1] - self.min_y
+                grid_action[grid_y, grid_x] = policy_per_state[s_idx, a_idx]
+            
+            im = ax.imshow(grid_action, cmap='YlOrRd', interpolation='nearest',
+                          vmin=0, vmax=1)
+            ax.set_title(f'π({self.action_names[a_idx]}|s)')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
+            ax.grid(which='minor', color='white', linestyle='-',
+                   linewidth=0.5, alpha=0.5)
+            
+            if hasattr(self.env, 'lava') and self.env.lava:
+                dead_grid_x = -1 - self.min_x
+                dead_grid_y = -1 - self.min_y
+                dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
+                                     fill=False, edgecolor='#CF1020', linewidth=2)
+                ax.add_patch(dead_rect)
+            
+            plt.colorbar(im, ax=ax)
 
+# ============================================================================
+# Main Agent
+# ============================================================================
 class DistMatchingEmbeddingAgent:
     def __init__(self,
                  name,
                  obs_type,
                  obs_shape,
                  action_shape,
-                 lr_actor, #eta
-                 discount, # gamma
-                 alpha, # second term regularization in the loss
+                 lr_actor,
+                 discount,
+                 lambda_reg,
                  batch_size,
                  nstep,
                  use_tb,
                  use_wandb,
                  lr_T,
                  lr_encoder,
+                 hidden_dim,
                  update_every_steps,
+                 pmd_steps,
                  num_expl_steps,
                  T_learning_steps,
-                 gradient_type,
-                 internal_dataset_type: str = "unique", 
-                 starting_policy: str = "uniform",
+                 internal_dataset_type: str = "unique",
                  device: str = "cpu",
-                 linear_actor: bool = False, # TODO not used yet
+                 linear_actor: bool = False
                  ):
-
 
         self.n_states = obs_shape[0]
         self.n_actions = action_shape[0]
@@ -269,7 +675,6 @@ class DistMatchingEmbeddingAgent:
         self.action_dim = action_shape[0]
         self.lr_actor = lr_actor
         self.discount = discount
-        self.alpha = alpha
         self.lr_T = lr_T
         self.T_learning_steps = T_learning_steps
         self.batch_size = batch_size
@@ -277,377 +682,260 @@ class DistMatchingEmbeddingAgent:
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.device = device
-        self.gradient_type = gradient_type  # could be 'forward' but it is not working practically (it is a theorethical problem not a bug)
         self.internal_dataset_type = internal_dataset_type
-        if self.gradient_type != 'MMD':
-            raise ValueError(f"Only MMD gradient is supported currently, got: {self.gradient_type}")
+        self.pmd_steps = pmd_steps
+
+        self.gradient_coeff = None
+
         self.num_expl_steps = num_expl_steps
+        self.lambda_reg = lambda_reg
 
-        self.initial_distribution = None
-        self.T_operator = None
-        self.internal_dataset = None
-
-        if starting_policy == "uniform":
-            self.policy_operator = self._create_uniform_policy()
-        elif starting_policy == "random":
-            self.policy_operator = self._create_random_policy()
-        else:
-            raise ValueError(f"Unknown starting policy: {starting_policy}")
+        # Components
+        self.encoder = Encoder(
+            obs_shape, 
+            hidden_dim, 
+            self.n_states
+        ).to(self.device)
         
-        self.encoder = Encoder((1,), hidden_dim=128, feature_dim=self.n_states).to(self.device)
-        self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr=lr_encoder)
+        self.transition_model = TransitionModel(
+            self.n_states * self.n_actions,
+            self.n_states
+        ).to(self.device)
+        
+        self.distribution_matcher = DistributionMatcher(
+            gamma=self.discount,
+            eta=self.lr_actor,
+            lambda_reg=self.lambda_reg,
+            device='cpu' #self.device At the moment forcing computatiosn on cpu, to save gpu memory
+        )
+        
+        self.dataset = InternalDataset(self.internal_dataset_type, self.n_states, self.n_actions)
+        
+        # Optimizers
+        # self.encoder_optimizer = torch.optim.Adam(
+        #     self.encoder.parameters(), 
+        #     lr=lr_encoder
+        # )
+        self.transition_optimizer = torch.optim.Adam(
+            self.transition_model.parameters(),
+            lr=lr_T
+        )
+        
 
-        self.nu_target = (np.ones(self.n_states) / self.n_states).reshape(-1,1) # Homogeneus target distribution
-
-
-        self.policy_matrix = self._from_operator_to_policy(self.policy_operator)
         self.training = False
-
-        
+        # Initialize visualizer (will be properly set after env is inserted)
+        self.visualizer = None
     
     def train(self, training=True):
         self.training = training
+        self.encoder.train(training)
+        self.transition_model.train(training)
     
     def insert_env(self, env):
-        self.env = env.unwrapped
+        self.env = env.unwrapped # This is needed just for visualization. # TODO remove when using non-custom envs
+        # Initialize visualizer now that we have the environment
+        self.visualizer = EmbeddingDistributionVisualizer(self)
 
     def init_meta(self):
-        # TODO future reminder: Remove this when using non-custom envs. we access some env methods that are not available in usual gym envs
-        if self.internal_dataset is None:
-          
-            self.T_operator = self._create_transition_matrix()
-            
-            self.distribution_matcher = DistributionMatcher(
-                n_states=self.n_states,
-                n_actions=self.n_actions,
-                nu0=self.initial_distribution,
-                nu_target=self.nu_target,
-                batch_size=self.batch_size,
-                gamma=self.discount,
-                eta=self.lr_actor,
-                alpha=self.alpha,
-                gradient_type=self.gradient_type,
-                device=self.device,
-            )
-            self.visualizer = DistributionVisualizer(self.env, self.distribution_matcher)
-
-            # Initialize as empty tensors
-            self.internal_dataset = {
-                'observation': torch.empty((0, ), device=self.device), # save just the int
-                'action': torch.empty((0,), dtype=torch.long, device=self.device), # save just the int
-                'next_observation': torch.empty((0, ), device=self.device), # save just the int
-                'alpha': torch.empty((0, ), device=self.device) # save just the int
-            }
-            self._unique_obs_action = set()
         return OrderedDict()
 
     def get_meta_specs(self):
         return tuple()
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
-        
-        # Store transition in internal dataset
-        if self.internal_dataset_type == "unique":
-            # ** Store only unique states-action pairs ** # OK obnly for discrete envs
-            if time_step.step_type == StepType.FIRST:
-                self._prev_obs = time_step.observation
-            elif time_step.step_type == StepType.MID:
-                obs_action_pair = (np.argmax(self._prev_obs), int(time_step.action))
-                if obs_action_pair not in self._unique_obs_action:
-                    self._unique_obs_action.add(obs_action_pair)
-                    # Convert to tensors and concatenate
-                    obs_idx = np.argmax(self._prev_obs)
-                    self.internal_dataset['observation'] = torch.cat([
-                        self.internal_dataset['observation'],
-                        torch.tensor([obs_idx], device=self.device).unsqueeze(0)
-                    ], dim=0)
-                    self.internal_dataset['action'] = torch.cat([
-                        self.internal_dataset['action'],
-                        torch.tensor([time_step.action], dtype=torch.long, device=self.device)
-                    ], dim=0)
-                    next_obs_idx = np.argmax(time_step.observation)
-                    self.internal_dataset['next_observation'] = torch.cat([
-                        self.internal_dataset['next_observation'],
-                        torch.tensor([next_obs_idx], device=self.device).unsqueeze(0)
-                    ], dim=0)
-                    # first time we have a unique pair, alpha is 1.0 else is 0
-                    if len(self._unique_obs_action) == 1:
-                        self.internal_dataset['alpha'] = torch.cat([
-                            self.internal_dataset['alpha'],
-                            torch.tensor([1.0], device=self.device).unsqueeze(0)
-                        ], dim=0)
-                    else:
-                        self.internal_dataset['alpha'] = torch.cat([
-                            self.internal_dataset['alpha'],
-                            torch.tensor([0.0], device=self.device).unsqueeze(0)
-                        ], dim=0)
-                self._prev_obs = time_step.observation
-
-            elif time_step.step_type == StepType.LAST:
-                obs_action_pair = (np.argmax(self._prev_obs), int(time_step.action))
-                if obs_action_pair not in self._unique_obs_action:
-                    self._unique_obs_action.add(obs_action_pair)
-                    # Convert to tensors and concatenate
-                    obs_idx = np.argmax(self._prev_obs)
-                    self.internal_dataset['observation'] = torch.cat([
-                        self.internal_dataset['observation'],
-                        torch.tensor([obs_idx], device=self.device).unsqueeze(0)
-                    ], dim=0)
-                    self.internal_dataset['action'] = torch.cat([
-                        self.internal_dataset['action'],
-                        torch.tensor([time_step.action], dtype=torch.long, device=self.device)
-                    ], dim=0)
-                    next_obs_idx = np.argmax(time_step.observation)
-                    self.internal_dataset['next_observation'] = torch.cat([
-                        self.internal_dataset['next_observation'],
-                        torch.tensor([next_obs_idx], device=self.device).unsqueeze(0)
-                    ], dim=0)
-            else:
-                raise ValueError("Unknown step type")
-            
-            if len(self._unique_obs_action) == self.n_states * self.n_actions and "enc_obs_action" not in self.internal_dataset:
-                # Precompute encoded state-action pairs for faster training
-                obs_tensor = self.internal_dataset['observation'].unsqueeze(-1).float()  # [num_unique, 1]
-                action_tensor = self.internal_dataset['action'].unsqueeze(-1).float()  # [num_unique, 1]
-                self.internal_dataset['enc_obs_action'] = self._enc_obs_action(obs_tensor.to(self.device), action_tensor.to(self.device))  # Store for faster access
-                self.internal_dataset['enc_next_obs'] = self.encoder(self.internal_dataset['next_observation'].unsqueeze(-1).float().to(self.device))  # [num_unique, feature_dim]
-                self.internal_dataset['enc_obs'] = self.encoder(self.internal_dataset['observation'].unsqueeze(-1).float().to(self.device))  # [num_unique, feature_dim]
-
-            assert self.internal_dataset['observation'].shape[0] == self.internal_dataset['action'].shape[0] == self.internal_dataset['next_observation'].shape[0], \
-                f"len(obs): {self.internal_dataset['observation'].shape[0]}, len(action): {self.internal_dataset['action'].shape[0]}, len(next_obs): {self.internal_dataset['next_observation'].shape[0]}"
-            assert len(self._unique_obs_action) <= self.n_states * self.n_actions, \
-                f"len unique obs-action pairs: {len(self._unique_obs_action)}, n_states * n_actions: {self.n_states * self.n_actions}" 
-
-        elif self.internal_dataset_type == "all":
-            
-            # *** Store all dataset ***
-            if time_step.step_type == StepType.FIRST:  # first step
-                obs_idx = np.argmax(time_step.observation)
-                self.internal_dataset['observation'] = torch.cat([
-                    self.internal_dataset['observation'],
-                    torch.tensor([obs_idx], device=self.device).unsqueeze(0)
-                ], dim=0)
-
-                # first time we have a unique pair, alpha is 1.0 else is 0
-                if self.internal_dataset['observation'].shape[0] == 1:
-                    self.internal_dataset['alpha'] = torch.cat([
-                        self.internal_dataset['alpha'],
-                        torch.tensor([1.0], device=self.device).unsqueeze(0)
-                    ], dim=0)
-                else:
-                    self.internal_dataset['alpha'] = torch.cat([
-                        self.internal_dataset['alpha'],
-                        torch.tensor([0.0], device=self.device).unsqueeze(0)
-                    ], dim=0)
-            elif time_step.step_type == StepType.MID:  # mid step
-                obs_idx = np.argmax(self._prev_obs)
-                self.internal_dataset['observation'] = torch.cat([
-                    self.internal_dataset['observation'],
-                    torch.tensor([obs_idx], device=self.device).unsqueeze(0)
-                ], dim=0)
-                self.internal_dataset['action'] = torch.cat([
-                    self.internal_dataset['action'],
-                    torch.tensor([time_step.action], dtype=torch.long, device=self.device)
-                ], dim=0)
-                next_obs_idx = np.argmax(time_step.observation)
-                self.internal_dataset['next_observation'] = torch.cat([
-                    self.internal_dataset['next_observation'],
-                    torch.tensor([next_obs_idx], device=self.device).unsqueeze(0)
-                ], dim=0)
-                self.internal_dataset['alpha'] = torch.cat([
-                        self.internal_dataset['alpha'],
-                        torch.tensor([0.0], device=self.device).unsqueeze(0)
-                    ], dim=0)
-            elif time_step.step_type == StepType.LAST:  # last step
-                self.internal_dataset['action'] = torch.cat([
-                    self.internal_dataset['action'],
-                    torch.tensor([time_step.action], dtype=torch.long, device=self.device)
-                ], dim=0)
-                next_obs_idx = np.argmax(time_step.observation)
-                self.internal_dataset['next_observation'] = torch.cat([
-                    self.internal_dataset['next_observation'],
-                    torch.tensor([next_obs_idx], device=self.device).unsqueeze(0)
-                ], dim=0)
-                assert self.internal_dataset['observation'].shape[0] == self.internal_dataset['action'].shape[0] == self.internal_dataset['next_observation'].shape[0], f"len(obs): {self.internal_dataset['observation'].shape[0]}, len(action): {self.internal_dataset['action'].shape[0]}, len(next_obs): {self.internal_dataset['next_observation'].shape[0]}"
-            else:
-                raise ValueError("Unknown step type")
-        
-        else:
-            raise ValueError(f"Unknown internal_dataset_type: {self.internal_dataset_type}")
-
-        
+        self.dataset.add_transition(time_step)
         return meta
     
-    def _enc_obs_action(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        obs_enc = self.encoder(obs) # [batch_size, feature_dim]
-        action_onehot = F.one_hot(action.long(), num_classes=self.n_actions).float().reshape(-1, self.n_actions) # [batch_size, n_actions]
-
-        obs_enc_action = torch.einsum('be,ba->bea', obs_enc, action_onehot).reshape(obs_enc.shape[0], -1)
-
-        return obs_enc_action
-
-    def _create_uniform_policy(self) -> np.ndarray:
-        """Create uniform random policy operator."""
-        P = np.zeros((self.n_states * self.n_actions, self.n_states))
-        for s in range(self.n_states):
-            for a in range(self.n_actions):
-                row = s * self.n_actions + a
-                P[row, s] = 1.0 / self.n_actions
-                
-        return P
-    
-    def _create_random_policy(self) -> np.ndarray:
-        """Create random random policy operator."""
-        P = np.zeros((self.n_states * self.n_actions, self.n_states))
-        for s in range(self.n_states):
-            for a in range(self.n_actions):
-                row = s * self.n_actions + a
-                P[row, s] = np.random.rand()
-            P[:, s] /= P[:, s].sum()
-        return P
-
-    def _create_transition_matrix(self) -> np.ndarray:
-        """
-        Get the transition matrix T for all state-action pairs.
+    def _encode_state_action(
+        self, 
+        encoded_obs: torch.Tensor, 
+        actions: torch.Tensor
+    ) -> torch.Tensor:
+        """Encode (s,a) pairs as ψ(s,a) = φ(s) ⊗ e_a."""
+        action_onehot = F.one_hot(actions.long(), self.n_actions).double().reshape(-1, self.n_actions)  # [B, |A|]
         
-        Returns:
-            T: Transition matrix of shape (n_states, n_states * n_actions)
-               T[s', s*n_actions + a] = 1 if action a in state s leads to s'
-        """
-        self.best_T_learnt = False
-        T = nn.Linear(self.n_states * self.n_actions, self.n_states, bias=False).to(self.device)
-        self.T_optimizer = torch.optim.Adam(T.parameters(), lr=self.lr_T)
-        # T = np.zeros((self.n_states, self.n_states * self.n_actions))
-        return T
+        # Outer product: [B, d] ⊗ [B, |A|] -> [B, d*|A|]
+        encoded_sa = torch.einsum('bd,ba->bda', encoded_obs, action_onehot)
+        return encoded_sa.reshape(encoded_obs.shape[0], -1)
     
-
-    def _from_operator_to_policy(self, policy_operator: np.ndarray = None) -> np.ndarray:
-        """Convert policy operator to policy matrix."""
-        if policy_operator is None:
-            policy_operator = self.policy_operator
-        policy_matrix = np.zeros((self.n_states, self.n_actions))
-        for s in range(self.n_states):
-            for a in range(self.n_actions):
-                row = s * self.n_actions + a
-                policy_matrix[s, a] = policy_operator[row, s]
-        return policy_matrix
+    
+    def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
+        """Compute π(·|s) for given observation."""
+        with torch.no_grad():
+            obs_tensor = torch.tensor(obs).unsqueeze(0).double().to(self.device)  # [1, obs_dim]
+            enc_obs = self.encoder(obs_tensor).cpu()  # [1, feature_dim]
+    
+            if self.gradient_coeff is None:
+                return np.ones(self.n_actions) / self.n_actions
             
+            H = enc_obs @ self._phi_all_obs.T  # [1, num_unique]
+            logits = -self.lr_actor * H @ self.gradient_coeff  # [1, n_actions]
+            probs = torch.softmax(logits, dim=1) # [1, n_actions]
+            if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
+                raise ValueError("action_probs sum to zero or NaN")
+            return probs.numpy().flatten()
 
-    def load_policy_operator(self, path: str):
-        """Load policy operator from file."""
-        self.policy_operator = np.load(path)
-        self.policy_matrix = self._from_operator_to_policy(self.policy_operator)
-        print(f"Loaded policy operator from: {path}")
-    
     
     def act(self, obs, meta, step, eval_mode):
         if step < self.num_expl_steps:
             return np.random.randint(self.n_actions)
         
-        if "enc_obs" not in self.internal_dataset:
-            phi_all_next_obs = self.encoder(self.internal_dataset['next_observation'].unsqueeze(-1).float().to(self.device)).detach().cpu().numpy()  # [num_unique, feature_dim]
-            psi_all_obs_action = self._enc_obs_action(
-                self.internal_dataset['observation'].unsqueeze(-1).float().to(self.device), 
-                self.internal_dataset['action'].unsqueeze(-1).float().to(self.device)
-            ).detach().cpu().numpy()  # [num_unique, feature_dim * n_actions]
-            phi_all_obs = self.encoder(self.internal_dataset['observation'].unsqueeze(-1).float().to(self.device)).detach().cpu().numpy()  # [num_unique, feature_dim]
-        else:
-            phi_all_next_obs = self.internal_dataset['enc_next_obs'].detach().cpu().numpy()  # [num_unique, feature_dim]
-            psi_all_obs_action = self.internal_dataset['enc_obs_action'].detach().cpu().numpy()  # [num_unique, feature_dim * n_actions]
-            phi_all_obs = self.internal_dataset['enc_obs'].detach().cpu().numpy()  # [num_unique, feature_dim]
-
-        # if type(self.T_operator) is nn.Linear:
-        #     if self.best_T_learnt is False:
-        #         self.update_closed_form_transition_matrix()
-        #         self.update_initial_distribution()
-
-        I_n = np.eye(phi_all_next_obs.shape[0])
-        E = F.one_hot(self.internal_dataset['action'].long(), num_classes=self.n_actions).float().detach().cpu().numpy()  # [num_unique, n_actions]
-        M = psi_all_obs_action @ self.policy_operator @ phi_all_next_obs.T  # [num_unique, num_unique]
-        BM = np.linalg.solve(psi_all_obs_action @ psi_all_obs_action.T + 1e-6 * I_n, M)  # [num_unique, num_unique]
-
-        coeff = np.diag(np.linalg.solve(I_n - self.discount * BM, self.internal_dataset['alpha'].detach().cpu().numpy()).flatten())@E  # [num_unique, n_actions]
-
-        phi_current_obs = self.encoder(torch.tensor([np.argmax(obs)], dtype=torch.float32).unsqueeze(-1).to(self.device)).detach().cpu().numpy()  # [1, feature_dim]
-        kernel_values = phi_current_obs @ phi_all_obs.T  # [1, num_unique]
-        action_scores = kernel_values @ coeff  # [1, n_actions]
-        action_probs = F.softmax(torch.tensor(action_scores).float(), dim=-1).numpy()
-        if np.sum(action_probs) == 0.0 or np.isnan(np.sum(action_probs)):
-            raise ValueError("action_probs sum to zero or NaN")
-        return np.random.choice(self.n_actions, p=action_probs.flatten())
-
-       
-    def update_closed_form_transition_matrix(self):
-        if "enc_obs_action" not in self.internal_dataset:
-            psi_obs_action = self._enc_obs_action(
-                self.internal_dataset['observation'].unsqueeze(-1).float().to(self.device), 
-                self.internal_dataset['action'].unsqueeze(-1).float().to(self.device)
-            )  # [num_unique, feature_dim * n_actions]
-            phi_next_s = self.encoder(self.internal_dataset['next_observation'].unsqueeze(-1).float().to(self.device))  # [num_unique, feature_dim]
-        else:
-            self.best_T_learnt = True*(self.internal_dataset_type == "unique") # this is just because of the unique dataset not being filled yet
-            
-            psi_obs_action = self.internal_dataset['enc_obs_action']  # [num_unique, feature_dim * n_actions]
-            phi_next_obs = self.internal_dataset['enc_next_obs']  # [num_unique, feature_dim]
+        # Compute action probabilities
+        action_probs = self.compute_action_probs(obs)
         
-        self.T_operator = phi_next_obs.T @ torch.linalg.solve(
-            psi_obs_action @ psi_obs_action.T + 1e-6 * torch.eye(psi_obs_action.shape[0], device=self.device),
-            psi_obs_action
-        )  # [feature_dim, feature_dim * n_actions]
-       
-        # Transion matrix to np.ndarray
-        self.T_operator = self.T_operator.detach().cpu().numpy()
+        # Sample action
+        return np.random.choice(self.n_actions, p=action_probs)
+    
 
-        return 
+
+
+       
+    # def update_closed_form_transition_matrix(self):
+    #     # TODO da rimuovere ma da tenere solo perchè mi salvo le encodings
+    #     if "enc_obs_action" not in self.internal_dataset:
+    #         self.psi_all_obs_action = self._enc_obs_action(
+    #             self.internal_dataset['observation'].unsqueeze(-1).double().to(self.device), 
+    #             self.internal_dataset['action'].unsqueeze(-1).double().to(self.device)
+    #         )  # [num_unique, feature_dim * n_actions]
+    #         self.phi_all_next_obs = self.encoder(self.internal_dataset['next_observation'].unsqueeze(-1).double().to(self.device))  # [num_unique, feature_dim]
+    #     else:
+    #         self.best_T_learnt = True            
+    #         self.psi_all_obs_action = self.internal_dataset['enc_obs_action']  # [num_unique, feature_dim * n_actions]
+    #         self.phi_all_next_obs = self.internal_dataset['enc_next_obs']  # [num_unique, feature_dim]
+        
+    #     T_operator = self.phi_all_next_obs.T @ torch.linalg.solve(
+    #         self.psi_all_obs_action @ self.psi_all_obs_action.T + self.lambda_reg * torch.eye(self.psi_all_obs_action.shape[0], device=self.device),
+    #         self.psi_all_obs_action
+    #     )  # [feature_dim, feature_dim * n_actions]
+       
+    #     loss = F.mse_loss(T_operator @ self.psi_all_obs_action.T, self.phi_all_next_obs.T) + self.lambda_reg * torch.norm(T_operator)**2
+        
+    #     print(f"Closed-form T loss: {loss.item()}")
+
+    #     # Birnging all to cpu to save memory on gpu
+    #     self.psi_all_obs_action = self.psi_all_obs_action.detach().cpu()
+    #     self.phi_all_next_obs = self.phi_all_next_obs.detach().cpu()
+
+        # return 
+    
+    def _is_transition_converged(self, step: int) -> bool:
+        """Check if transition learning phase is complete."""
+        # Could add convergence criteria here
+        return step >= self.num_expl_steps + self.T_learning_steps  # Example threshold
     
     def update_transition_matrix(self, obs, action, next_obs):
-        metris = dict()
-
-        T_loss = F.mse_loss(
-            self.T_operator(
-                self._enc_obs_action(torch.argmax(obs, dim=-1).unsqueeze(-1).float().to(self.device), action.unsqueeze(-1).float().to(self.device))
-            ),
-            self.encoder(torch.argmax(next_obs, dim=-1).unsqueeze(-1).float().to(self.device))
-            )
-        self.encoder_optimizer.zero_grad()
-        self.T_optimizer.zero_grad()
-        T_loss.backward()
-        self.encoder_optimizer.step()
-        self.T_optimizer.step()
-        print(f"T_loss: {T_loss.item()}")
-        if self.use_tb or self.use_wandb:
-            metris['T_loss'] = T_loss.item()
-        return metris
-
-    def update_initial_distribution(self):
-        phi_obs = self.encoder(self.internal_dataset['next_observation'].unsqueeze(-1).float().to(self.device)).detach().cpu().numpy()  # [num_unique, feature_dim]
-        self.initial_distribution = phi_obs.T@self.internal_dataset['alpha'].to(self.device).detach().cpu().numpy()
-
-
-    def update_actor(self):
         metrics = dict()
-        if self.best_T_learnt is False:
-            self.update_closed_form_transition_matrix()
-            self.update_initial_distribution()
 
-        if self.gradient_type == 'MMD':
-            nu_pi = self.distribution_matcher.compute_discounted_occupancy(self.initial_distribution, self.policy_operator, self.T_operator)
-            # actor loss is the norm of nu_pi with the target = 0
-            actor_loss = np.linalg.norm(nu_pi) 
-        else:
-            raise ValueError(f"Unknown gradient type: {self.gradient_type}")
+        # Encode
+        encoded_obs = self.encoder(obs.double())
+        encoded_next = self.encoder(next_obs.double())
+        encoded_state_action = self._encode_state_action(encoded_obs, action)
         
-        gradient = self.distribution_matcher.compute_new_gradient(self.policy_operator, self.T_operator, self.initial_distribution)
-        self.policy_operator = self.distribution_matcher.mirror_descent_update(self.policy_operator, gradient)
+        # Predict next state
+        predicted_next = self.transition_model(encoded_state_action)
         
-        self.policy_matrix = self._from_operator_to_policy(self.policy_operator)
+        # Compute loss
+        loss = F.mse_loss(predicted_next, encoded_next)
+        
+        # Optimize
+        # self.encoder_optimizer.zero_grad()
+        self.transition_optimizer.zero_grad()
+        loss.backward()
+        # self.encoder_optimizer.step()
+        self.transition_optimizer.step()
+
+        print(f"transition_loss: {loss.item()}")
+        if self.use_tb or self.use_wandb:
+            metrics['transition_loss'] = loss.item()
+        return metrics
+
+
+
+    def update_actor(self, obs):
+        """Update policy using Projected Mirror Descent."""
+        metrics = dict()
+        # Compute features for internal dataset
+        if not hasattr(self, '_features_cached'):
+            self._cache_features()
+            self.gradient_coeff = torch.zeros((self.dataset.observation.shape[0], self.n_actions))
+            self.H = self._phi_all_obs @ self._phi_all_next.T  # [num_unique, num_unique]
+            self.K = self._phi_all_next @ self._phi_all_next.T  # [num_unique, num_unique]
+            self.unique_states = torch.eye(self.n_states).double()
+
+        self.pi = torch.softmax(-self.lr_actor * self.H.T@self.gradient_coeff, dim=1, dtype=torch.double)  # [num_unique, n_actions]
+
+        M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
+
+        nu_pi = self.distribution_matcher.compute_nu_pi(
+                phi_all_next_obs = self._phi_all_next,
+                BM = self.distribution_matcher.compute_BM(M, self._psi_all),
+                alpha=self._alpha
+        )
+        actor_loss = torch.linalg.norm(nu_pi)**2
+        print(f"nu_pi: {nu_pi}")
+        print(f"nu_pi sum: {torch.sum(nu_pi)}")
+        print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
+        print("Gradient coeff norm:", torch.linalg.norm(self.gradient_coeff))
+        print("Policy matrix sample (first 5 states):", self.pi[:5, :])
+
+        for _ in range(self.pmd_steps):
+            self.gradient_coeff += self.distribution_matcher.compute_gradient_coefficient(
+                M, 
+                self.K,
+                phi_all_next_obs = self._phi_all_next, 
+                psi_all_obs_action = self._psi_all, 
+                alpha = self._alpha) * self.E
+            
+            # print(self.lr_actor * self.H.T@self.gradient_coeff)
+            self.pi = torch.softmax(-self.lr_actor * self.H.T@self.gradient_coeff, dim=1, dtype=torch.double)
+            self.pi_unique = torch.softmax(-self.lr_actor * (self.unique_states@self._phi_all_obs.T)@self.gradient_coeff, dim=1, dtype=torch.double)
+            print("pi unique: ", self.pi_unique)
+            
+            # print(self.pi)
+            M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]ù
+            
 
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss
-        
-        self.distribution_matcher.append_loss_history(actor_loss)
-
+   
         return metrics
+    
+    def _cache_features(self):
+        """Pre-compute and cache dataset features."""
+        tensors = self.dataset.get_data()
+
+        with torch.no_grad():
+            obs = tensors['observation'].double().unsqueeze(-1)
+            actions = tensors['action']
+            next_obs = tensors['next_observation'].double().unsqueeze(-1)
+            
+            self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
+            self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
+            first_state = self._phi_all_obs[0]
+            # find first row in self._phi_all_next that is equal to first_state
+            indices = torch.where(torch.all(self._phi_all_next == first_state, dim=1))[0]
+
+            
+            self._psi_all = self._encode_state_action(self._phi_all_obs, actions).cpu()
+           
+            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1)).double()
+            self._alpha[indices[0]] = 1.0  # set alpha to 1.0 for the first state
+            self.E = F.one_hot(
+                actions, 
+                self.n_actions
+            ).double().reshape(-1, self.n_actions)
+
+            optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
+            print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
+        # print(optimal_T)
+        # print(torch.sum(optimal_T, dim=0))
+        if not self.dataset.is_complete:
+            return
+        print("=================================Features cached=================================")
+        print("cells")
+
+        self._features_cached = True
+    
 
     def aug_and_encode(self, obs):
         pass
@@ -672,22 +960,20 @@ class DistMatchingEmbeddingAgent:
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         
-        if step < self.num_expl_steps + self.T_learning_steps:
+        if self._is_transition_converged(step) is False:
             # update transition matrix
             metrics.update(self.update_transition_matrix(obs, action, next_obs))
+            metrics['actor_loss'] = 100.0  # dummy value
             return metrics
-        # update actor
-        metrics.update(self.update_actor())
-        self.distribution_matcher.update_internal_policy(self.policy_operator)
         
-        if step%6000 == 0:
-            print(f"Last KL divergence: {self.distribution_matcher.kl_history[-1]}")
-            self.visualizer.plot_results(
-                self.initial_distribution, 
-                self.nu_target, 
-                self.distribution_matcher.compute_discounted_occupancy(self.initial_distribution, self.policy_operator, self.T_operator), 
-                False,
-                os.getcwd()+f"/plot_{step}")
-            print(f"os.getcwd(): {os.getcwd()}")
+        # update actor
+        metrics.update(self.update_actor(obs))
+        
+        # Restore visualization
+        if (step % 4000 == 0 or step % 4001 == 0 or step % 5100 == 0) and self.visualizer is not None:
+            save_path = os.path.join(os.getcwd(), f"plot_step_{step}.png")
+            self.visualizer.plot_results(step, save_path=save_path)
+            print(f"Visualization saved to: {save_path}")
+            exit()
         return metrics
 
