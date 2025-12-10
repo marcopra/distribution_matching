@@ -86,6 +86,86 @@ class ActorDiscrete(nn.Module):
         log_p = log_probs.gather(dim=1, index=actions)     # (T, 1)
         return log_p.squeeze(-1)                           # (T,)
 
+class KernelActorDiscrete(nn.Module):
+    def __init__(self, obs_type, dataset_dim, action_dim, feature_dim, eta):
+        """
+        Args:
+            phi_dataset (Tensor): Matrix of dataset features phi(x_i), shape (n, d).
+            C (Tensor): Transformation matrix, shape (n, n).
+            eta (float): Scalar scaling factor.
+            trainable (bool): If True, allows phi_dataset and C to be updated during training.
+        """
+        super().__init__()
+
+        
+        # Get dimensions: n = number of dataset elements, d = feature dimension
+    
+        
+        # Layer 1: Computes H(x, x_i) = <phi(x), phi(x_i)>
+        # A Linear layer computes y = x @ W.T
+        # We want y = phi(x) @ phi_dataset.T
+        # Therefore, we set W = phi_dataset
+        self.kernel_layer = nn.Linear(feature_dim, dataset_dim, bias=False)
+
+        
+        # Layer 2: Computes z = H @ C
+        # A Linear layer computes z = H @ W.T
+        # We want z = H @ C
+        # Therefore, we set W = C.T (transpose of C)
+        self.grad_coefficient = nn.Linear(dataset_dim, action_dim, bias=False)
+        
+            
+        self.eta = eta
+        self.softmax = nn.Softmax(dim=1) # Apply row-wise (dim=1 for batch)
+
+        self.apply(utils.weight_init)
+
+    def initialize_weights(self, phi_dataset, C):
+        # Initialize kernel layer weights with phi_dataset
+        with torch.no_grad():
+            self.kernel_layer.weight.copy_(phi_dataset)
+        
+        # Initialize transform layer weights with C
+        with torch.no_grad():
+            ColorPrint.yellow("Check transpose of C ad phi for the intialization!")
+            ColorPrint.red("Check transpose of C ad phi for the intialization!???????????????")
+            ColorPrint.blue("Check transpose of C ad phi for the intialization!")
+            self.grad_coefficient.weight.copy_(C.T)
+
+    def forward(self, phi_x):
+        # 1. Compute Kernel Vector H: Shape (batch_size, n)
+        h = self.kernel_layer(phi_x)
+        
+        # 2. Apply Matrix C: Shape (batch_size, n)
+        logits = self.grad_coefficient(h)
+        
+        # 3. Scale by eta and apply Softmax
+        # Formula: softmax(H C * eta)
+        return self.softmax(logits * self.eta)
+
+    def _logits(self, phi_x):
+        # 1. Compute Kernel Vector H: Shape (batch_size, n)
+        h = self.kernel_layer(phi_x)
+        
+        # 2. Apply Matrix C: Shape (batch_size, n)
+        logits = self.grad_coefficient(h)
+        
+        return logits* self.eta
+
+    def get_log_p(self, phi_x, actions):
+        """
+        states:  (T, obs_dim) or (batch, obs_dim)
+        actions: (T,) or (batch,) float with action indices
+        returns: (T,) log-probabilities log pi(a_t | s_t)
+        """
+        logits = self._logits(phi_x)                      # (T, K)
+        log_probs = F.log_softmax(logits, dim=-1)          # (T, K)
+        # convert actions to int64 for gather
+        actions = actions.long()             # (T, 1)
+        # Gather the log-prob of the taken action at each step
+        log_p = log_probs.gather(dim=1, index=actions)     # (T, 1)
+        return log_p.squeeze(-1)                           # (T,)
+    
 class CriticDiscrete(nn.Module):
     def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim):
         super().__init__()

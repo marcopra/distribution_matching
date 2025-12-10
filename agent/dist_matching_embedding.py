@@ -27,16 +27,17 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
+        self.repr_dim = feature_dim
 
-        self.fc = nn.Identity()
-        # nn.Sequential(
-        #     nn.Linear(obs_shape[0], feature_dim),
-        #     # nn.ReLU(),
-        #     # nn.Linear(hidden_dim, feature_dim),
-        #     nn.LayerNorm(feature_dim),
-        # )
+        # self.fc = nn.Identity()
+        self.fc =  nn.Sequential(
+            nn.Linear(obs_shape[0], hidden_dim),
+            # nn.ReLU(),
+            # nn.Linear(hidden_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+        )
 
-        # self.apply(utils.weight_init)
+        self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
@@ -223,14 +224,6 @@ class InternalDataset:
         """Retrieve the internal dataset."""
         return self.data
     
-    # def to_tensors(self, device: str = "cpu") -> Dict[str, torch.Tensor]:
-    #     """Convert internal data to torch tensors."""
-    #     return {
-    #         'observations': torch.tensor(np.array(self.data['observations']), device=device),
-    #         'actions': torch.tensor(self.data['actions'], dtype=torch.long, device=device),
-    #         'next_observations': torch.tensor(np.array(self.data['next_observations']), device=device),
-    #         'alpha': torch.tensor(self.data['alpha'], device=device)
-    #     }
 
 # ============================================================================
 # Distribution Matching Mathematics
@@ -309,11 +302,6 @@ class DistributionMatcher:
             alpha:torch.Tensor
         ) -> torch.Tensor:
         """Compute gradient coefficient for policy update."""
-
-        # I_n = np.eye(psi_all_obs_action.shape[0])
-        # BM = np.linalg.solve(psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg* I_n, M) # [num_unique, num_unique]
-        # MB = np.linalg.solve((psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg* I_n).T, M).T # [num_unique, num_unique]
-
         # Identity matrix
         I_n = torch.eye(psi_all_obs_action.shape[0], device=self.device)
 
@@ -333,14 +321,12 @@ class DistributionMatcher:
         # Solve A^T x = left_term_without_b using Cholesky
         L_T = torch.linalg.cholesky(A.T)
         left_term = torch.cholesky_solve(symmetric_term, L_T)
-        # TODO usare simmetria (I - γBM)⁻ᵀΦ 
 
         # Right term: Φᵀ(I - γBM)⁻¹α
         right_term = symmetric_term.T @ alpha
 
         gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
 
-        print("Gradient coeff:", psi_all_obs_action.T@gradient)
         return gradient
 
     
@@ -457,7 +443,6 @@ class EmbeddingDistributionVisualizer:
         
         for s_idx in range(self.n_states):
             policy_per_state[s_idx] = self.agent.compute_action_probs(all_states[s_idx].unsqueeze(0))
-            print(all_states[s_idx], s_idx, "->", policy_per_state[s_idx])
         
         return policy_per_state
     
@@ -659,7 +644,9 @@ class DistMatchingEmbeddingAgent:
                  lr_T,
                  lr_encoder,
                  hidden_dim,
+                 feature_dim,
                  update_every_steps,
+                 update_actor_every_steps,
                  pmd_steps,
                  num_expl_steps,
                  T_learning_steps,
@@ -672,6 +659,7 @@ class DistMatchingEmbeddingAgent:
         self.n_actions = action_shape[0]
         self.obs_type = obs_type
         self.obs_shape = obs_shape
+        self.feature_dim = feature_dim if feature_dim is not None else self.n_states
         self.action_dim = action_shape[0]
         self.lr_actor = lr_actor
         self.discount = discount
@@ -679,6 +667,7 @@ class DistMatchingEmbeddingAgent:
         self.T_learning_steps = T_learning_steps
         self.batch_size = batch_size
         self.update_every_steps = update_every_steps
+        self.update_actor_every_steps = update_actor_every_steps
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.device = device
@@ -689,17 +678,16 @@ class DistMatchingEmbeddingAgent:
 
         self.num_expl_steps = num_expl_steps
         self.lambda_reg = lambda_reg
-
         # Components
         self.encoder = Encoder(
             obs_shape, 
             hidden_dim, 
-            self.n_states
+            self.feature_dim
         ).to(self.device)
         
         self.transition_model = TransitionModel(
-            self.n_states * self.n_actions,
-            self.n_states
+            self.feature_dim * self.n_actions,
+            self.feature_dim
         ).to(self.device)
         
         self.distribution_matcher = DistributionMatcher(
@@ -712,10 +700,10 @@ class DistMatchingEmbeddingAgent:
         self.dataset = InternalDataset(self.internal_dataset_type, self.n_states, self.n_actions)
         
         # Optimizers
-        # self.encoder_optimizer = torch.optim.Adam(
-        #     self.encoder.parameters(), 
-        #     lr=lr_encoder
-        # )
+        self.encoder_optimizer = torch.optim.Adam(
+            self.encoder.parameters(), 
+            lr=lr_encoder
+        )
         self.transition_optimizer = torch.optim.Adam(
             self.transition_model.parameters(),
             lr=lr_T
@@ -787,38 +775,8 @@ class DistMatchingEmbeddingAgent:
         return np.random.choice(self.n_actions, p=action_probs)
     
 
-
-
-       
-    # def update_closed_form_transition_matrix(self):
-    #     # TODO da rimuovere ma da tenere solo perchè mi salvo le encodings
-    #     if "enc_obs_action" not in self.internal_dataset:
-    #         self.psi_all_obs_action = self._enc_obs_action(
-    #             self.internal_dataset['observation'].unsqueeze(-1).double().to(self.device), 
-    #             self.internal_dataset['action'].unsqueeze(-1).double().to(self.device)
-    #         )  # [num_unique, feature_dim * n_actions]
-    #         self.phi_all_next_obs = self.encoder(self.internal_dataset['next_observation'].unsqueeze(-1).double().to(self.device))  # [num_unique, feature_dim]
-    #     else:
-    #         self.best_T_learnt = True            
-    #         self.psi_all_obs_action = self.internal_dataset['enc_obs_action']  # [num_unique, feature_dim * n_actions]
-    #         self.phi_all_next_obs = self.internal_dataset['enc_next_obs']  # [num_unique, feature_dim]
-        
-    #     T_operator = self.phi_all_next_obs.T @ torch.linalg.solve(
-    #         self.psi_all_obs_action @ self.psi_all_obs_action.T + self.lambda_reg * torch.eye(self.psi_all_obs_action.shape[0], device=self.device),
-    #         self.psi_all_obs_action
-    #     )  # [feature_dim, feature_dim * n_actions]
-       
-    #     loss = F.mse_loss(T_operator @ self.psi_all_obs_action.T, self.phi_all_next_obs.T) + self.lambda_reg * torch.norm(T_operator)**2
-        
-    #     print(f"Closed-form T loss: {loss.item()}")
-
-    #     # Birnging all to cpu to save memory on gpu
-    #     self.psi_all_obs_action = self.psi_all_obs_action.detach().cpu()
-    #     self.phi_all_next_obs = self.phi_all_next_obs.detach().cpu()
-
-        # return 
     
-    def _is_transition_converged(self, step: int) -> bool:
+    def _is_T_sufficiently_initialized(self, step: int) -> bool:
         """Check if transition learning phase is complete."""
         # Could add convergence criteria here
         return step >= self.num_expl_steps + self.T_learning_steps  # Example threshold
@@ -838,10 +796,10 @@ class DistMatchingEmbeddingAgent:
         loss = F.mse_loss(predicted_next, encoded_next)
         
         # Optimize
-        # self.encoder_optimizer.zero_grad()
+        self.encoder_optimizer.zero_grad()
         self.transition_optimizer.zero_grad()
         loss.backward()
-        # self.encoder_optimizer.step()
+        self.encoder_optimizer.step()
         self.transition_optimizer.step()
 
         print(f"transition_loss: {loss.item()}")
@@ -872,13 +830,11 @@ class DistMatchingEmbeddingAgent:
                 alpha=self._alpha
         )
         actor_loss = torch.linalg.norm(nu_pi)**2
-        print(f"nu_pi: {nu_pi}")
-        print(f"nu_pi sum: {torch.sum(nu_pi)}")
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
-        print("Gradient coeff norm:", torch.linalg.norm(self.gradient_coeff))
-        print("Policy matrix sample (first 5 states):", self.pi[:5, :])
+        # print("Gradient coeff norm:", torch.linalg.norm(self.gradient_coeff))
+        # print("Policy matrix sample (first 5 states):", self.pi[:5, :])
 
-        for _ in range(self.pmd_steps):
+        for iteration in range(self.pmd_steps):
             self.gradient_coeff += self.distribution_matcher.compute_gradient_coefficient(
                 M, 
                 self.K,
@@ -888,11 +844,17 @@ class DistMatchingEmbeddingAgent:
             
             # print(self.lr_actor * self.H.T@self.gradient_coeff)
             self.pi = torch.softmax(-self.lr_actor * self.H.T@self.gradient_coeff, dim=1, dtype=torch.double)
-            self.pi_unique = torch.softmax(-self.lr_actor * (self.unique_states@self._phi_all_obs.T)@self.gradient_coeff, dim=1, dtype=torch.double)
-            print("pi unique: ", self.pi_unique)
-            
-            # print(self.pi)
-            M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]ù
+
+            M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
+
+            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
+                nu_pi = self.distribution_matcher.compute_nu_pi(
+                        phi_all_next_obs = self._phi_all_next,
+                        BM = self.distribution_matcher.compute_BM(M, self._psi_all),
+                        alpha=self._alpha
+                )
+                actor_loss = torch.linalg.norm(nu_pi)**2
+                print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}")
             
 
         if self.use_tb or self.use_wandb:
@@ -925,14 +887,13 @@ class DistMatchingEmbeddingAgent:
                 self.n_actions
             ).double().reshape(-1, self.n_actions)
 
-            optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
-            print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
+            # optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
+            # print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
         # print(optimal_T)
         # print(torch.sum(optimal_T, dim=0))
         if not self.dataset.is_complete:
             return
         print("=================================Features cached=================================")
-        print("cells")
 
         self._features_cached = True
     
@@ -960,20 +921,25 @@ class DistMatchingEmbeddingAgent:
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         
-        if self._is_transition_converged(step) is False:
-            # update transition matrix
+        # update transition matrix
+        # if dataset is not yet complete, we always update T
+        # if dataset is complete, we update T only during the initial learning phase
+        if not self.dataset.is_complete or not self._is_T_sufficiently_initialized(step):
             metrics.update(self.update_transition_matrix(obs, action, next_obs))
+
+        print(self.dataset.is_complete, "dataset complete")
+        # If T is not sufficiently initialized, skip actor update
+        if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
         
-        # update actor
-        metrics.update(self.update_actor(obs))
+        if step % self.update_actor_every_steps == 0:     
+            # update actor
+            metrics.update(self.update_actor(obs))
         
-        # Restore visualization
-        if (step % 4000 == 0 or step % 4001 == 0 or step % 5100 == 0) and self.visualizer is not None:
-            save_path = os.path.join(os.getcwd(), f"plot_step_{step}.png")
-            self.visualizer.plot_results(step, save_path=save_path)
-            print(f"Visualization saved to: {save_path}")
-            exit()
+            if self.visualizer is not None:
+                save_path = os.path.join(os.getcwd(), f"plot_step_{step}.png")
+                self.visualizer.plot_results(step, save_path=save_path)
+                print(f"Visualization saved to: {save_path}")
         return metrics
 
