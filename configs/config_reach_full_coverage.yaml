@@ -1,0 +1,31 @@
+# Configuration for state coverage testing
+
+defaults:
+  - env: four_rooms
+  - _self_
+
+# Experiment name
+name: 'reach_full_coverage'
+
+# Testing parameters
+max_steps: 10000  # Maximum steps per run
+n_runs: 20  # Number of runs to aggregate statistics
+evaluate_every: 100  # Evaluate coverage every N timesteps
+
+# Policy configuration
+policy_path: null  # Path to pretrained policy (.pt file), use null for uniform random policy
+
+# Random seed
+seed: 42
+
+# Weights & Biases configuration
+wandb:
+  use_wandb: false
+  wandb_project: 'distribution_matching'
+  wandb_run_name: ${name}_${hydra:runtime.choices.env}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+  wandb_tag: null
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${name}/${hydra:runtime.choices.env}/${now:%Y-%m-%d}/${now:%H-%M-%S}

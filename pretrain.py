@@ -224,13 +224,12 @@ class Workspace:
                         log('step', self.global_step)
 
                 if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
+                    print("Updating metabefore reset")
                     meta = self.agent.update_meta(meta, self.global_step, time_step)
                     
                 # reset env
                 time_step = self.train_env.reset()
 
-                if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
-                    meta = self.agent.update_meta(meta, self.global_step, time_step)
                 meta = self.agent.init_meta()
                 self.replay_storage.add(time_step, meta)
                 self.train_video_recorder.init(time_step.image_observation)
