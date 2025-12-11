@@ -4,7 +4,7 @@ name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
-lr_actor: 1e-4 # eta
+lr_actor: 0.05 # eta
 discount: ${discount} # gamma
 lambda_reg: 1e-8
 lr_T: 1e-3
@@ -16,10 +16,11 @@ feature_dim: null
 T_learning_steps: 1000
 update_every_steps: 1
 update_actor_every_steps: 600
-pmd_steps: 50000
+pmd_steps: 10000
 internal_dataset_type: unique # [unique, all]
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
 device: ${device}
 linear_actor: false
+ideal: false

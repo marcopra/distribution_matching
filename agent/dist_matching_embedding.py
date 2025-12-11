@@ -10,6 +10,8 @@ from typing import Tuple, Optional, Dict
 from dm_env import StepType, specs
 from scipy.special import softmax
 from scipy.linalg import cho_factor, cho_solve
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -29,12 +31,13 @@ class Encoder(nn.Module):
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
 
-        # self.fc = nn.Identity()
+        self.fc = nn.Identity()
+        # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
         self.fc =  nn.Sequential(
-            nn.Linear(obs_shape[0], hidden_dim),
+            nn.Linear(obs_shape[0], hidden_dim, bias=False),
             # nn.ReLU(),
-            # nn.Linear(hidden_dim, feature_dim),
-            nn.LayerNorm(feature_dim),
+            nn.Linear(hidden_dim, feature_dim, bias=False),
+            # nn.LayerNorm(feature_dim),
         )
 
         self.apply(utils.weight_init)
@@ -42,6 +45,7 @@ class Encoder(nn.Module):
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
+  
         return h
 
 class TransitionModel(nn.Module):
@@ -110,6 +114,12 @@ class InternalDataset:
     @property
     def size(self) -> int:
         return len(self.data['observation'])
+    
+    
+    def add_pairs(self, state, action):
+        pair = (np.argmax(state), action)
+        self._unique_pairs.add(pair)
+        return
     
     @property
     def is_complete(self) -> bool:
@@ -286,8 +296,9 @@ class DistributionMatcher:
         identity = torch.eye(N, device=self.device)
         gram_matrix = psi @ psi.T + self.lambda_reg * identity
 
-        # s,v,d= torch.linalg.svd(gram_matrix)
+        s,v,d= torch.linalg.svd(gram_matrix)
         # print(f"SVD of gram matrix:  {v}, V shape {v.shape}, D shape {d.shape}")
+        # exit()
         
         L = torch.linalg.cholesky(gram_matrix)
         BM = torch.cholesky_solve(M, L)
@@ -445,6 +456,54 @@ class EmbeddingDistributionVisualizer:
             policy_per_state[s_idx] = self.agent.compute_action_probs(all_states[s_idx].unsqueeze(0))
         
         return policy_per_state
+    
+    def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False):
+        """
+        Plot 2D projection of state embeddings using PCA or t-SNE.
+        
+        Args:
+            save_path: Path to save the figure
+            use_tsne: If True, use t-SNE; otherwise use PCA
+        """
+        with torch.no_grad():
+            # Get embeddings for all valid states
+            valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+            valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
+            
+            one_hot_states = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
+            embeddings = self.agent.encoder(one_hot_states).cpu().numpy()
+        
+        # Dimensionality reduction
+        if use_tsne:
+            reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, len(valid_ids)-1))
+            method_name = "t-SNE"
+        else:
+            reducer = PCA(n_components=2)
+            method_name = "PCA"
+        
+        embeddings_2d = reducer.fit_transform(embeddings)
+        
+        # Create visualization
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Color code by state ID or grid position
+        colors = plt.cm.viridis(np.linspace(0, 1, len(valid_ids)))
+        
+        for idx, (cell, embedding_2d) in enumerate(zip(valid_cells, embeddings_2d)):
+            ax.scatter(embedding_2d[0], embedding_2d[1], 
+                      c=[colors[idx]], s=100, edgecolors='black', linewidth=1.5)
+            ax.annotate(f"{cell}", (embedding_2d[0], embedding_2d[1]), 
+                       fontsize=8, ha='center', va='center', color='green', fontweight='bold')
+        
+        ax.set_xlabel(f'{method_name} Component 1')
+        ax.set_ylabel(f'{method_name} Component 2')
+        ax.set_title(f'State Embeddings Visualization ({method_name})')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Embeddings visualization saved to: {save_path}")
+        plt.close(fig)
     
     def plot_results(self, step: int, save_path: str = None):
         """
@@ -652,7 +711,8 @@ class DistMatchingEmbeddingAgent:
                  T_learning_steps,
                  internal_dataset_type: str = "unique",
                  device: str = "cpu",
-                 linear_actor: bool = False
+                 linear_actor: bool = False,
+                 ideal: bool = False
                  ):
 
         self.n_states = obs_shape[0]
@@ -673,6 +733,7 @@ class DistMatchingEmbeddingAgent:
         self.device = device
         self.internal_dataset_type = internal_dataset_type
         self.pmd_steps = pmd_steps
+        self.ideal = ideal
 
         self.gradient_coeff = None
 
@@ -713,6 +774,7 @@ class DistMatchingEmbeddingAgent:
         self.training = False
         # Initialize visualizer (will be properly set after env is inserted)
         self.visualizer = None
+        self._ideal_dataset_filled = False
     
     def train(self, training=True):
         self.training = training
@@ -723,6 +785,69 @@ class DistMatchingEmbeddingAgent:
         self.env = env.unwrapped # This is needed just for visualization. # TODO remove when using non-custom envs
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self)
+        
+        # If ideal mode, pre-populate the dataset
+        if self.ideal and not self._ideal_dataset_filled:
+            self._populate_ideal_dataset()
+    
+    def _populate_ideal_dataset(self):
+        """Pre-populate the dataset with all state-action pairs in ideal mode."""
+        print("=== Populating ideal dataset with all state-action pairs ===")
+        
+        # Create all state-action combinations
+        for state_idx in range(self.n_states):
+            state = self.env.idx_to_state[state_idx]
+            
+            # Skip dead state if it exists
+            if self.env.lava and state == self.env.DEAD_STATE:
+                continue
+            
+            for action in range(self.n_actions):
+                self.dataset.add_pairs(
+                    torch.eye(self.n_states)[state_idx].numpy(),
+                    action
+                )
+                # Get next state from environment dynamics
+                next_state = self.env.step_from(state, action)
+                next_state_idx = self.env.state_to_idx[next_state]
+                
+                # Create one-hot encodings
+                obs_onehot = torch.zeros(self.n_states)
+                obs_onehot[state_idx] = 1.0
+                
+                next_obs_onehot = torch.zeros(self.n_states)
+                next_obs_onehot[next_state_idx] = 1.0
+                
+                # Add to dataset
+                self.dataset.data['observation'] = torch.cat([
+                    self.dataset.data['observation'],
+                    obs_onehot.unsqueeze(0)
+                ], dim=0)
+                
+                self.dataset.data['action'] = torch.cat([
+                    self.dataset.data['action'],
+                    torch.tensor([action], dtype=torch.long)
+                ], dim=0)
+                
+                self.dataset.data['next_observation'] = torch.cat([
+                    self.dataset.data['next_observation'],
+                    next_obs_onehot.unsqueeze(0)
+                ], dim=0)
+                
+                # Set alpha: 1.0 for the first entry (start state), 0.0 for others
+                if self.dataset.data['alpha'].shape[0] == 0:
+                    alpha_val = 1.0
+                else:
+                    alpha_val = 0.0
+                
+                self.dataset.data['alpha'] = torch.cat([
+                    self.dataset.data['alpha'],
+                    torch.tensor([alpha_val])
+                ], dim=0)
+        
+        self._ideal_dataset_filled = True
+        print(f"Ideal dataset populated with {self.dataset.size} state-action pairs")
+        print(f"Expected size: {self.n_states * self.n_actions}")
 
     def init_meta(self):
         return OrderedDict()
@@ -784,9 +909,16 @@ class DistMatchingEmbeddingAgent:
     def update_transition_matrix(self, obs, action, next_obs):
         metrics = dict()
 
+        if self.ideal:
+            # Use the full ideal dataset
+            obs = self.dataset.data['observation'].to(self.device)
+            action = self.dataset.data['action'].to(self.device)
+            next_obs = self.dataset.data['next_observation'].to(self.device)
+
         # Encode
         encoded_obs = self.encoder(obs.double())
-        encoded_next = self.encoder(next_obs.double())
+        with torch.no_grad():
+            encoded_next = self.encoder(next_obs.double())
         encoded_state_action = self._encode_state_action(encoded_obs, action)
         
         # Predict next state
@@ -870,10 +1002,12 @@ class DistMatchingEmbeddingAgent:
             obs = tensors['observation'].double().unsqueeze(-1)
             actions = tensors['action']
             next_obs = tensors['next_observation'].double().unsqueeze(-1)
+
             
             self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
             self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
             first_state = self._phi_all_obs[0]
+            
             # find first row in self._phi_all_next that is equal to first_state
             indices = torch.where(torch.all(self._phi_all_next == first_state, dim=1))[0]
 
@@ -887,8 +1021,8 @@ class DistMatchingEmbeddingAgent:
                 self.n_actions
             ).double().reshape(-1, self.n_actions)
 
-            # optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
-            # print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
+            optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
+            print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
         # print(optimal_T)
         # print(torch.sum(optimal_T, dim=0))
         if not self.dataset.is_complete:
@@ -909,37 +1043,47 @@ class DistMatchingEmbeddingAgent:
         if step % self.update_every_steps != 0:
             return metrics
 
-        batch = next(replay_iter)
-        obs, action, reward, discount, next_obs = utils.to_torch(
-            batch, self.device)
-
-        # # augment and encode
-        # obs = self.aug_and_encode(obs)
-        # with torch.no_grad():
-        #     next_obs = self.aug_and_encode(next_obs)
+        if not self.ideal:
+            batch = next(replay_iter)
+            obs, action, reward, discount, next_obs = utils.to_torch(
+                batch, self.device)
+        else:
+            # In ideal mode, we don't need batch from replay_iter
+            # We'll use the full dataset in update_transition_matrix
+            obs = action = next_obs = reward = discount = None
 
         if self.use_tb or self.use_wandb:
-            metrics['batch_reward'] = reward.mean().item()
+            if not self.ideal:
+                metrics['batch_reward'] = reward.mean().item()
+            else:
+                metrics['batch_reward'] = 0.0  # placeholder
         
         # update transition matrix
         # if dataset is not yet complete, we always update T
         # if dataset is complete, we update T only during the initial learning phase
-        if not self.dataset.is_complete or not self._is_T_sufficiently_initialized(step):
+        if self.ideal or not self.dataset.is_complete or not self._is_T_sufficiently_initialized(step):
             metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
-        print(self.dataset.is_complete, "dataset complete")
+        print(self.dataset.is_complete or self.ideal, "dataset complete or ideal mode")
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
         
-        if step % self.update_actor_every_steps == 0:     
+        # In ideal mode, we can update actor immediately
+        if self.ideal or step % self.update_actor_every_steps == 0:     
             # update actor
-            metrics.update(self.update_actor(obs))
+            if not self.ideal:
+                metrics.update(self.update_actor(obs))
+            else:
+                # Pass dummy obs, not used in update_actor
+                metrics.update(self.update_actor(None))
         
             if self.visualizer is not None:
                 save_path = os.path.join(os.getcwd(), f"plot_step_{step}.png")
                 self.visualizer.plot_results(step, save_path=save_path)
+                save_path = os.path.join(os.getcwd(), f"features_step_{step}.png")
+                self.visualizer.plot_embeddings_2d(save_path=save_path, use_tsne=True)
                 print(f"Visualization saved to: {save_path}")
         return metrics
 
