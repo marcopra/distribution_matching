@@ -57,6 +57,7 @@ class DDPGAgent:
 
         # models
         if obs_type == 'pixels':
+            raise NotImplementedError("Pixel-based observations are yet not supported in this agent.")
             self.aug = utils.RandomShiftsAug(pad=4)
             self.encoder = Encoder(obs_shape).to(device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
@@ -64,7 +65,7 @@ class DDPGAgent:
             self.aug = nn.Identity()
             self.encoder = KernelEncoder(obs_shape).to(device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
-        raise NotImplementedError("DDPG discrete with kernel actor not updated for new utils")
+
         self.actor = Actor(obs_type, self.obs_dim, self.action_dim,
                            feature_dim, hidden_dim, linear=linear_actor).to(device)
 
@@ -76,11 +77,9 @@ class DDPGAgent:
 
         # optimizers
 
-        if obs_type == 'pixels':
-            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(),
-                                                lr=lr)
-        else:
-            self.encoder_opt = None
+       
+        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
+       
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
@@ -152,7 +151,6 @@ class DDPGAgent:
             metrics['critic_q2'] = current_q2.mean().item()
             metrics['critic_loss'] = critic_loss.item()
 
-       
 
         # optimize critic
         if self.encoder_opt is not None:

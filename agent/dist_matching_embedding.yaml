@@ -13,10 +13,10 @@ nstep: 1
 lr_encoder: 1e-3
 hidden_dim: 256
 feature_dim: null
-T_learning_steps: 1000
+T_init_steps: 300
 update_every_steps: 1
-update_actor_every_steps: 600
-pmd_steps: 10000
+update_actor_every_steps: 960
+pmd_steps: 15000
 internal_dataset_type: unique # [unique, all]
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}

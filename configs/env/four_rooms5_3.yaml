@@ -5,7 +5,7 @@ env:
   name: "FourRooms-v0"
   room_size: 5
   corridor_length: 1
-  max_steps: 300
+  max_steps: 80
   render_mode: rgb_array
   show_coordinates: false
   

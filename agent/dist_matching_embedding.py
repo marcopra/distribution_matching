@@ -708,7 +708,7 @@ class DistMatchingEmbeddingAgent:
                  update_actor_every_steps,
                  pmd_steps,
                  num_expl_steps,
-                 T_learning_steps,
+                 T_init_steps,
                  internal_dataset_type: str = "unique",
                  device: str = "cpu",
                  linear_actor: bool = False,
@@ -724,7 +724,7 @@ class DistMatchingEmbeddingAgent:
         self.lr_actor = lr_actor
         self.discount = discount
         self.lr_T = lr_T
-        self.T_learning_steps = T_learning_steps
+        self.T_init_steps = T_init_steps
         self.batch_size = batch_size
         self.update_every_steps = update_every_steps
         self.update_actor_every_steps = update_actor_every_steps
@@ -903,8 +903,9 @@ class DistMatchingEmbeddingAgent:
     
     def _is_T_sufficiently_initialized(self, step: int) -> bool:
         """Check if transition learning phase is complete."""
-        # Could add convergence criteria here
-        return step >= self.num_expl_steps + self.T_learning_steps  # Example threshold
+    
+        return step >= self.num_expl_steps + self.T_init_steps 
+    
     
     def update_transition_matrix(self, obs, action, next_obs):
         metrics = dict()
@@ -1058,20 +1059,18 @@ class DistMatchingEmbeddingAgent:
             else:
                 metrics['batch_reward'] = 0.0  # placeholder
         
-        # update transition matrix
-        # if dataset is not yet complete, we always update T
-        # if dataset is complete, we update T only during the initial learning phase
-        if self.ideal or not self.dataset.is_complete or not self._is_T_sufficiently_initialized(step):
-            metrics.update(self.update_transition_matrix(obs, action, next_obs))
+        
+        
+        metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
-        print(self.dataset.is_complete or self.ideal, "dataset complete or ideal mode")
+        print(self.dataset.is_complete, "dataset complete or ideal mode, size:", self.dataset.size)
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
         
         # In ideal mode, we can update actor immediately
-        if self.ideal or step % self.update_actor_every_steps == 0:     
+        if self.ideal or step % self.update_actor_every_steps == 0 or step == self.num_expl_steps+1:     
             # update actor
             if not self.ideal:
                 metrics.update(self.update_actor(obs))
