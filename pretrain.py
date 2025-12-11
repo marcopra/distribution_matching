@@ -224,7 +224,6 @@ class Workspace:
                         log('step', self.global_step)
 
                 if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
-                    print("Updating metabefore reset")
                     meta = self.agent.update_meta(meta, self.global_step, time_step)
                     
                 # reset env
