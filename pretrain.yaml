@@ -7,7 +7,7 @@ defaults:
 reward_free: true
 # task settings
 domain: gym
-task_name: FourRooms-v0 
+task_name: ${env.name} #FourRooms-v0 
 obs_type: discrete_states # [discrete_states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
 action_repeat: 1 # set to 2 for pixels

@@ -1,0 +1,33 @@
+# Configuration for Subsampling Test
+
+defaults:
+  - _self_
+  - env: four_rooms5_0
+
+# Random seed
+seed: 42
+
+# Path to pretrained agent
+policy_path: /path/to/pretrained/agent.pt
+
+
+
+# Data collection parameters
+n_collection_steps: 10000  # Number of transitions to collect
+
+# Subsampling test parameters
+gamma: 0.99            # Discount factor for geometric subsampling
+n_subsamples: 100      # Number of samples to draw from dataset
+n_trials: 100          # Number of subsampling trials for statistics
+
+# Wandb configuration
+wandb:
+  use_wandb: false
+  wandb_project: distribution_matching
+  wandb_run_name: test_subsampling
+  wandb_tag: subsampling_test
+
+# Hydra configuration
+hydra:
+  run:
+    dir: ./outputs/test_subsampling/${now:%Y-%m-%d}/${now:%H-%M-%S}

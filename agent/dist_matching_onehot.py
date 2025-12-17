@@ -34,12 +34,12 @@ class Encoder(nn.Module):
 
         self.fc = nn.Identity()
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
-        self.fc =  nn.Sequential(
-            nn.Linear(obs_shape[0], hidden_dim, bias=False),
-            # nn.ReLU(),
-            nn.Linear(hidden_dim, feature_dim, bias=False),
-            # nn.LayerNorm(feature_dim),
-        )
+        # self.fc =  nn.Sequential(
+        #     nn.Linear(obs_shape[0], hidden_dim, bias=False),
+        #     # nn.ReLU(),
+        #     nn.Linear(hidden_dim, feature_dim, bias=False),
+        #     # nn.LayerNorm(feature_dim),
+        # )
 
         self.apply(utils.weight_init)
 
@@ -73,6 +73,7 @@ class TransitionModel(nn.Module):
         T_optimal = phi_next.T @ torch.linalg.solve(gram_matrix, psi)
         return T_optimal
 
+    
 
 # ============================================================================
 # Distribution Matching Mathematics
@@ -653,10 +654,10 @@ class DistMatchingEmbeddingAgent:
         self.dataset = InternalDataset(self.data_type, self.n_states, self.n_actions, self.discount, n_subsamples)
         
         # Optimizers
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(), 
-            lr=lr_encoder
-        )
+        # self.encoder_optimizer = torch.optim.Adam(
+        #     self.encoder.parameters(), 
+        #     lr=lr_encoder
+        # )
         self.transition_optimizer = torch.optim.Adam(
             self.transition_model.parameters(),
             lr=lr_T
@@ -677,9 +678,9 @@ class DistMatchingEmbeddingAgent:
         timestep = env.reset()
         self.first_state = torch.tensor(timestep.observation).double()
         self.second_state = torch.eye(self.n_states)[1] # TODO at the moment using second state for alpha not the real first, change this in the future
-        
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self)
+
         
         # If ideal mode, pre-populate the dataset
         if self.ideal and not self._ideal_dataset_filled:
@@ -823,10 +824,10 @@ class DistMatchingEmbeddingAgent:
         loss = F.mse_loss(predicted_next, encoded_next) #+ 0.2*F.mse_loss(encoded_obs, encoded_next)
         
         # Optimize
-        self.encoder_optimizer.zero_grad()
+        # self.encoder_optimizer.zero_grad()
         self.transition_optimizer.zero_grad()
         loss.backward()
-        self.encoder_optimizer.step()
+        # self.encoder_optimizer.step()
         self.transition_optimizer.step()
 
         print(f"transition_loss: {loss.item()}")
@@ -893,9 +894,9 @@ class DistMatchingEmbeddingAgent:
         tensors = self.dataset.get_data()
         print("Caching features from dataset of size:", len(tensors['observation']))
         with torch.no_grad():
-            obs = tensors['observation'][:len(tensors['next_observation'])].double().unsqueeze(-1)
+            obs = tensors['observation'][:len(tensors['next_observation'])].double()
             actions = tensors['action']
-            next_obs = tensors['next_observation'].double().unsqueeze(-1)
+            next_obs = tensors['next_observation'].double()
             print("Shapes:", obs.shape, actions.shape, next_obs.shape)
             self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
             self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
@@ -904,12 +905,12 @@ class DistMatchingEmbeddingAgent:
             indices = torch.where(torch.all(next_obs == self.first_state, dim=1))[0]
             if indices.shape[0] == 0:
                 indices = torch.where(torch.all(next_obs == self.second_state, dim=1))[0]
+            print("Found indices for second state:", indices)
 
-            
             self._psi_all = self._encode_state_action(self._phi_all_obs, actions).cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1)).double()
-            print("DEBUG: setting alpha for index", indices[0].item(), len(self._alpha))
+            # print("DEBUG: setting alpha for index", indices[0].item(), len(self._alpha))
             self._alpha[indices[0]] = 1.0  # set alpha to 1.0 for the first state
             self.E = F.one_hot(
                 actions, 

@@ -18,6 +18,7 @@ import torch
 import wandb
 from PIL import Image
 import env.rooms 
+import seaborn as sns
 
 
 class StateCoverageTracker:
@@ -29,12 +30,14 @@ class StateCoverageTracker:
         self.visited_states = set()
         self.coverage_history = []
         self.timestep_history = []
+        self.state_visit_counts = np.zeros(n_states, dtype=np.int64)
         self._timestep = 0
         self._next_eval = evaluate_every
     
     def add_state(self, state: int):
         """Add a visited state and record coverage at evaluation intervals."""
         self.visited_states.add(int(state))
+        self.state_visit_counts[int(state)] += 1
         self._timestep += 1
         
         # Record coverage at evaluation intervals
@@ -65,6 +68,7 @@ class StateCoverageTracker:
         self.visited_states.clear()
         self.coverage_history.clear()
         self.timestep_history.clear()
+        self.state_visit_counts = np.zeros(self.n_states, dtype=np.int64)
         self._timestep = 0
         self._next_eval = self.evaluate_every
 
@@ -148,6 +152,118 @@ def interpolate_coverage(timesteps: np.ndarray, coverage: np.ndarray,
     return np.interp(target_timesteps, timesteps, coverage)
 
 
+def create_state_distribution_heatmap(state_distributions: list, 
+                                     env: gym.Env, 
+                                     output_path: str,
+                                     policy_type: str):
+    """
+    Create a heatmap showing the average state visitation counts (not normalized).
+    
+    Args:
+        state_distributions: List of state visit count arrays from all runs
+        env: The environment instance
+        output_path: Path to save the heatmap
+        policy_type: Type of policy used
+    """
+    # Calculate average hit count across runs (NOT normalized)
+    avg_hits = np.mean(state_distributions, axis=0)
+    
+    # Get grid dimensions from environment
+    # Handle environments that may not have grid_height/grid_width attributes
+    if hasattr(env.unwrapped, 'grid_height') and hasattr(env.unwrapped, 'grid_width'):
+        grid_height = env.unwrapped.grid_height
+        grid_width = env.unwrapped.grid_width
+    else:
+        # Calculate grid dimensions from cells
+        # Handle both dict and list types for cells
+        cells_data = env.unwrapped.cells
+        
+        if isinstance(cells_data, dict):
+            cells = list(cells_data.keys())
+        elif isinstance(cells_data, list):
+            cells = cells_data
+        else:
+            raise ValueError(f"Unsupported cells type: {type(cells_data)}")
+        
+        if not cells:
+            raise ValueError("Environment has no cells defined")
+        
+        x_coords = [pos[0] for pos in cells]
+        y_coords = [pos[1] for pos in cells]
+        grid_width = max(x_coords) + 1
+        grid_height = max(y_coords) + 1
+    
+    # Create a full grid with NaN for non-navigable cells
+    distribution_grid = np.full((grid_height, grid_width), np.nan)
+    
+    # Map state indices back to (x, y) positions
+    # Handle both dict and list types for cells
+    cells_data = env.unwrapped.cells
+    if isinstance(cells_data, dict):
+        state_to_pos = {state: pos for pos, state in cells_data.items()}
+    elif isinstance(cells_data, list):
+        state_to_pos = {idx: pos for idx, pos in enumerate(cells_data)}
+    else:
+        raise ValueError(f"Unsupported cells type: {type(cells_data)}")
+    
+    # Fill in the average hits for navigable cells only
+    for state_idx, avg_count in enumerate(avg_hits):
+        if state_idx in state_to_pos:
+            x, y = state_to_pos[state_idx]
+            distribution_grid[y, x] = avg_count
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(max(10, grid_width * 0.8), max(8, grid_height * 0.8)))
+    
+    # Create heatmap with NaN values shown as gray
+    cmap = plt.cm.YlOrRd.copy()
+    cmap.set_bad(color='lightgray', alpha=0.3)
+    
+    im = ax.imshow(distribution_grid, cmap=cmap, aspect='equal')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Average Visit Count', rotation=270, labelpad=20, fontsize=11)
+    
+    # Set tick positions at cell centers for labels
+    ax.set_xticks(np.arange(grid_width))
+    ax.set_yticks(np.arange(grid_height))
+    ax.set_xticklabels(np.arange(grid_width))
+    ax.set_yticklabels(np.arange(grid_height))
+    
+    # Add grid lines between cells (at -0.5, 0.5, 1.5, etc.)
+    ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+    ax.grid(which='minor', color='white', linestyle='-', linewidth=1.5)
+    ax.tick_params(which='minor', length=0)  # Hide minor tick marks
+    
+    # Add value annotations only for navigable cells
+    max_val = np.nanmax(distribution_grid)
+    for i in range(grid_height):
+        for j in range(grid_width):
+            value = distribution_grid[i, j]
+            if not np.isnan(value):
+                # Use white text for dark cells, black for light cells
+                text_color = 'white' if value > max_val * 0.5 else 'black'
+                # Format as integer if close to integer, otherwise with 1 decimal
+                if abs(value - round(value)) < 0.1:
+                    text = f'{value:.0f}'
+                else:
+                    text = f'{value:.1f}'
+                ax.text(j, i, text, 
+                       ha='center', va='center', 
+                       color=text_color, fontsize=8)
+    
+    ax.set_xlabel('X Coordinate', fontsize=12)
+    ax.set_ylabel('Y Coordinate', fontsize=12)
+    ax.set_title(f'Average State Visit Counts ({policy_type} Policy)', 
+                fontsize=14, pad=15)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config_reach_full_coverage")
 def main(cfg: DictConfig):
     """Main execution function."""
@@ -225,6 +341,7 @@ def main(cfg: DictConfig):
     # Storage for all runs
     all_runs_timesteps = []
     all_runs_coverage = []
+    all_runs_state_distributions = []
     
     print(f"\n{'='*60}")
     print(f"RUNNING {cfg.n_runs} COVERAGE TESTS")
@@ -247,6 +364,7 @@ def main(cfg: DictConfig):
         
         all_runs_timesteps.append(np.array(tracker.timestep_history))
         all_runs_coverage.append(np.array(tracker.coverage_history))
+        all_runs_state_distributions.append(tracker.state_visit_counts.copy())
         
         # Find when full coverage was reached
         full_coverage_idx = np.where(np.array(tracker.coverage_history) >= 1.0)[0]
@@ -338,6 +456,16 @@ def main(cfg: DictConfig):
     print(f"\nCoverage plot saved to: {os.path.join(output_dir, 'state_coverage_plot.png')}")
     plt.close(fig)
     
+    # Create state distribution heatmap
+    heatmap_path = os.path.join(output_dir, 'state_distribution_heatmap.png')
+    create_state_distribution_heatmap(
+        all_runs_state_distributions,
+        env,
+        heatmap_path,
+        policy_type
+    )
+    print(f"State distribution heatmap saved to: {heatmap_path}")
+    
     # Save statistics
     stats = {
         'n_runs': cfg.n_runs,
@@ -351,6 +479,7 @@ def main(cfg: DictConfig):
         'ci_upper': ci_upper,
         'all_runs_coverage': coverage_array,
         'all_runs_timesteps': [np.array(ts) for ts in all_runs_timesteps],
+        'all_runs_state_distributions': all_runs_state_distributions,
         'completion_steps': completion_steps,
         'completed_runs': completed_runs
     }

@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.dist_matching_embedding.DistMatchingEmbeddingAgent
+_target_: agent.dist_matching_onehot.DistMatchingEmbeddingAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
