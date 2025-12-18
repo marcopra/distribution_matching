@@ -3,13 +3,13 @@
 
 env:
   name: "SingleRoom-v0"
-  room_size: 4
-  max_steps: 300
+  room_size: 9
+  max_steps: 80
   render_mode: rgb_array  
   show_coordinates: false
   
   # Goal position (optional, null for random at each episode)
-  goal_position: [3,2]  # Can be [x, y] or null for random
+  goal_position: [3,3]  # Can be [x, y] or null for random
   
   # Start position (optional, null for random at each episode)
-  start_position: [0, 0]  # Can be [x, y] or null for random
+  start_position: [3, 3]  # Can be [x, y] or null for random

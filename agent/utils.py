@@ -5,6 +5,7 @@ import utils
 from utils import ColorPrint
 from typing import Tuple, Optional, Dict
 from dm_env import StepType, specs
+from copy import deepcopy
 
 class Encoder(nn.Module):
     def __init__(self, obs_shape):
@@ -434,26 +435,40 @@ class InternalDataset:
     
     @property
     def observation(self) -> Dict[str, torch.Tensor]:
+        if hasattr(self, '_sampled_data'):
+            return self._sampled_data['observation']
         return self.data['observation']
     
     @property
     def action(self) -> Dict[str, torch.Tensor]:
+        if hasattr(self, '_sampled_data'):
+            return self._sampled_data['action']
         return self.data['action']
     
     @property
     def next_observation(self) -> Dict[str, torch.Tensor]:
+        if hasattr(self, '_sampled_data'):
+            return self._sampled_data['next_observation']
         return self.data['next_observation']
     
     @property
     def alpha(self) -> Dict[str, torch.Tensor]:
+        if hasattr(self, '_sampled_data'):
+            return self._sampled_data['alpha']
         return self.data['alpha']
     
     @property
     def size(self) -> int:
         if self.n_subsamples is None:
+            if hasattr(self, '_sampled_data'):
+                return len(self._sampled_data['next_observation'])
             return len(self.data['next_observation'])
         return self.n_subsamples+1 # dummy transition
     
+    @property
+    def data_size(self) -> int:
+        """Get the size of the internal dataset."""
+        return len(self.data['next_observation'])
     
     def add_pairs(self, state, action):
         pair = (np.argmax(state), action)
@@ -639,8 +654,11 @@ class InternalDataset:
     
     def get_data(self) -> Dict[str, torch.Tensor]:
         """Retrieve the internal dataset, optionally with subsampling."""
+  
         if self.n_subsamples is None or len(self._trajectory_idx) == 0:
-            return self.data
+            self._sampled_data = deepcopy(self.data)
+            self.reset()
+            return self._sampled_data
 
         if self.n_subsamples >= len(self._trajectory_idx):
             utils.ColorPrint.yellow(f"Requested subsample size {self.n_subsamples} exceeds dataset size {len(self._trajectory_idx)}. Returning full dataset.")

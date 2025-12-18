@@ -1,0 +1,18 @@
+# @package _global_
+# Corridor Environment Configuration (S-shaped corridor)
+
+env:
+  name: "Corridor-v0"
+  length: 20
+  height: 2
+  num_curves: 2
+  corridor_width: 1
+  max_steps: 100
+  render_mode: rgb_array
+  show_coordinates: false
+
+  # Goal position (optional, null for random at each episode)
+  goal_position: null  # Can be [x, y] or null for end of corridor
+
+  # Start position (optional, null for random at each episode)
+  start_position: [0, 0]  # Can be [x, y] or null for random

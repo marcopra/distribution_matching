@@ -4,6 +4,14 @@ import os
 
 import gymnasium as gym
 from env.rooms import *
+from env.multiple_rooms import MultipleRoomsEnv
+from env.corridor import CorridorEnv
+from env.continuous_rooms import (
+    ContinuousSingleRoomEnv,
+    ContinuousTwoRoomsEnv, 
+    ContinuousFourRoomsEnv,
+    ContinuousMultipleRoomsEnv
+)
 import numpy as np
 from gymnasium import spaces
 import mujoco
@@ -560,13 +568,20 @@ def make_kwargs(cfg):
             'render_mode': cfg.env.render_mode,
         }
     
+    # Add continuous environment parameters if present
+    if hasattr(cfg.env, 'move_delta'):
+        env_kwargs['move_delta'] = cfg.env.move_delta
+    if hasattr(cfg.env, 'goal_threshold'):
+        env_kwargs['goal_threshold'] = cfg.env.goal_threshold
+    
     # Add environment-specific parameters
     if "SingleRoom" in cfg.env.name:
         env_kwargs['room_size'] = cfg.env.room_size
     elif "TwoRooms" in cfg.env.name:
         env_kwargs['room_size'] = cfg.env.room_size
         env_kwargs['corridor_length'] = cfg.env.corridor_length
-        env_kwargs['corridor_y'] = cfg.env.corridor_y
+        if hasattr(cfg.env, 'corridor_y'):
+            env_kwargs['corridor_y'] = cfg.env.corridor_y
     elif "FourRooms" in cfg.env.name:
         env_kwargs['room_size'] = cfg.env.room_size
         env_kwargs['corridor_length'] = cfg.env.corridor_length
@@ -574,6 +589,18 @@ def make_kwargs(cfg):
             'horizontal': cfg.env.corridor_positions.horizontal,
             'vertical': cfg.env.corridor_positions.vertical
         }
+    elif "MultipleRooms" in cfg.env.name:
+        env_kwargs['num_rooms'] = cfg.env.num_rooms
+        env_kwargs['room_size'] = cfg.env.room_size
+        env_kwargs['corridor_height'] = cfg.env.corridor_height if 'corridor_height' in cfg.env else 1
+        env_kwargs['connector_length'] = cfg.env.connector_length if 'connector_length' in cfg.env else 1
+        env_kwargs['connector_position'] = cfg.env.connector_position if 'connector_position' in cfg.env else None
+    elif "Corridor" in cfg.env.name:
+        env_kwargs['length'] = cfg.env.length
+        env_kwargs['height'] = cfg.env.height
+        env_kwargs['num_curves'] = cfg.env.num_curves
+        env_kwargs['corridor_width'] = cfg.env.corridor_width if 'corridor_width' in cfg.env else 1
+        
     return env_kwargs
 # Tests
 if __name__ == "__main__":

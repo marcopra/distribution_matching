@@ -1,0 +1,25 @@
+# @package _global_
+# Continuous Four Rooms Environment Configuration
+
+env:
+  name: "ContinuousFourRooms-v0"
+  room_size: 5.0
+  corridor_length: 1.0
+  max_steps: 100
+  render_mode: rgb_array
+  show_coordinates: false
+  
+  # Continuous movement parameters
+  move_delta: 0.5  # Distance moved per action
+  goal_threshold: 0.5  # Distance to goal to consider it reached
+  
+  # Corridor positions for horizontal and vertical corridors
+  corridor_positions:
+    horizontal: 2.5
+    vertical: 2.5
+  
+  # Goal position (optional, null for random at each episode)
+  goal_position: null  # Can be [x, y] or null for random
+  
+  # Start position (optional, null for random at each episode)
+  start_position: null  # Can be [x, y] or null for random

@@ -677,6 +677,7 @@ class DistMatchingEmbeddingAgent:
         self.env = env.unwrapped # This is needed just for visualization
         timestep = env.reset()
         self.first_state = torch.tensor(timestep.observation).double()
+      
         self.second_state = torch.eye(self.n_states)[1] # TODO at the moment using second state for alpha not the real first, change this in the future
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self)
@@ -958,6 +959,7 @@ class DistMatchingEmbeddingAgent:
         metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
         print(self.dataset.is_complete, "dataset complete or ideal mode, size:", self.dataset.size)
+        print("Real dataeset size:", self.dataset.data_size)
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value

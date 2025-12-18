@@ -52,11 +52,11 @@ class MultipleRoomsEnv(BaseRoomEnv):
     
     def __init__(
         self,
-        num_rooms: int = 3,
-        room_size: int = 5,
-        corridor_height: int = 1,
-        connector_length: int = 1,
-        connector_position: Optional[int] = None,
+        num_rooms: int,
+        room_size: int,
+        corridor_height: int,
+        connector_length: int,
+        connector_position: Optional[int],
         goal_position: Optional[Tuple[int, int]] = None,
         start_position: Optional[Tuple[int, int]] = None,
         max_steps: int = 300,

@@ -87,6 +87,8 @@ class DistributionMatcher:
                 next_idx = self.env.state_to_idx[next_cell]
                 col = s_idx * n_actions + action
                 T[next_idx, col] = 1.0
+                if next_cell == (1, 1): #or cell == (3, 3) or next_cell == (3, 2) or cell == (3, 2) or next_cell == (2, 3) or cell == (2, 3) or next_cell == (1, 3) or cell == (1, 3) or next_cell == (3, 1) or cell == (3, 1) or next_cell == (2, 2) or cell == (2, 2):  # Example of special handling for terminal state
+                    T[next_idx, col] = 0.0 # No transitions from terminal state
         return T
     
     def M_pi_operator(self, P: np.ndarray) -> np.ndarray:
