@@ -12,6 +12,7 @@ from env.continuous_rooms import (
     ContinuousFourRoomsEnv,
     ContinuousMultipleRoomsEnv
 )
+from env.wrappers import DiscretizedContinuousEnv
 import numpy as np
 from gymnasium import spaces
 import mujoco
@@ -500,7 +501,7 @@ def action_spec(env):
         max_action = env.action_space.high[0]
         return specs.BoundedArray(shape, np.float32, min_action, max_action, 'action')
 
-def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, **kwargs):
+def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, discretize=False, cell_size=1.0, lava=False, **kwargs):
     """
     Create a Gymnasium environment with wrappers.
     
@@ -513,6 +514,9 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         random_init: Se True, usa posizioni iniziali casuali
         randomize_goal: Se True, usa goal casuali
         enable_relabelling: Se True, aggiunge i wrapper per il relabelling CDMC
+        discretize: Se True, discretizza l'environment continuo
+        cell_size: Dimensione delle celle per la discretizzazione
+        lava: Se True, le mosse invalide portano a uno stato dead
     
     Returns:
         Wrapped environment
@@ -523,6 +527,10 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         assert kwargs['render_mode'] == 'rgb_array', "For pixel observations, render_mode must be 'rgb_array'"
     
     env = gym.make(name, **kwargs)
+    
+    # Apply discretization wrapper for continuous environments
+    if discretize:
+        env = DiscretizedContinuousEnv(env, cell_size=cell_size, lava=lava)
     
     # Assert that render_mode is 'rgb_array' if pixels observation is requested
     if obs_type == 'pixels':
@@ -574,6 +582,12 @@ def make_kwargs(cfg):
     if hasattr(cfg.env, 'goal_threshold'):
         env_kwargs['goal_threshold'] = cfg.env.goal_threshold
     
+    # Add discretization parameters
+    if hasattr(cfg.env, 'discretize') and cfg.env.discretize:
+        env_kwargs['discretize'] = True
+        env_kwargs['cell_size'] = cfg.env.cell_size if hasattr(cfg.env, 'cell_size') else 1.0
+        env_kwargs['lava'] = cfg.env.lava if hasattr(cfg.env, 'lava') else False
+    
     # Add environment-specific parameters
     if "SingleRoom" in cfg.env.name:
         env_kwargs['room_size'] = cfg.env.room_size
@@ -582,13 +596,27 @@ def make_kwargs(cfg):
         env_kwargs['corridor_length'] = cfg.env.corridor_length
         if hasattr(cfg.env, 'corridor_y'):
             env_kwargs['corridor_y'] = cfg.env.corridor_y
+        # Continuous TwoRooms parameters
+        if hasattr(cfg.env, 'corridor_width'):
+            env_kwargs['corridor_width'] = cfg.env.corridor_width
     elif "FourRooms" in cfg.env.name:
         env_kwargs['room_size'] = cfg.env.room_size
-        env_kwargs['corridor_length'] = cfg.env.corridor_length
-        env_kwargs['corridor_positions'] = {
-            'horizontal': cfg.env.corridor_positions.horizontal,
-            'vertical': cfg.env.corridor_positions.vertical
-        }
+        # Check if it's continuous or discrete
+        if "Continuous" in cfg.env.name:
+            if hasattr(cfg.env, 'corridor_width'):
+                env_kwargs['corridor_width'] = cfg.env.corridor_width
+            if hasattr(cfg.env, 'corridor_offset'):
+                env_kwargs['corridor_offset'] = cfg.env.corridor_offset
+            if hasattr(cfg.env, 'wall_thickness'):
+                env_kwargs['wall_thickness'] = cfg.env.wall_thickness
+            if hasattr(cfg.env, 'agent_radius'):
+                env_kwargs['agent_radius'] = cfg.env.agent_radius
+        else:
+            env_kwargs['corridor_length'] = cfg.env.corridor_length
+            env_kwargs['corridor_positions'] = {
+                'horizontal': cfg.env.corridor_positions.horizontal,
+                'vertical': cfg.env.corridor_positions.vertical
+            }
     elif "MultipleRooms" in cfg.env.name:
         env_kwargs['num_rooms'] = cfg.env.num_rooms
         env_kwargs['room_size'] = cfg.env.room_size

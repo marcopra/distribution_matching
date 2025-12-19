@@ -1,0 +1,26 @@
+# @package _global_
+# Continuous Single Room Environment - Discretized Configuration
+
+env:
+  name: "ContinuousSingleRoom-v0"
+  
+  # Discretization settings
+  discretize: true
+  cell_size: 1.0
+  lava: false
+  
+  # Continuous environment base parameters
+  room_size: 5.0
+  wall_thickness: 0.3
+  agent_radius: 0.15
+  
+  # Movement parameters
+  move_delta: 0.3
+  goal_threshold: 0.4
+  
+  max_steps: 300
+  render_mode: rgb_array
+  show_coordinates: false
+  
+  goal_position: null
+  start_position: null

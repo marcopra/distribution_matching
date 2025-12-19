@@ -199,8 +199,6 @@ class EmbeddingDistributionVisualizer:
         self.n_states = agent.n_states
         self.n_actions = agent.n_actions
 
-
-        
         # Get grid dimensions
         valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
         min_x = min(cell[0] for cell in valid_cells)
@@ -211,7 +209,6 @@ class EmbeddingDistributionVisualizer:
         valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
         self.all_state_ids_one_hot = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
 
-        
         if hasattr(self.env, 'lava') and self.env.lava:
             min_x = min(min_x, -1)
             min_y = min(min_y, -1)
@@ -221,10 +218,29 @@ class EmbeddingDistributionVisualizer:
         self.grid_width = max_x - min_x + 1
         self.grid_height = max_y - min_y + 1
         
-        # Action symbols and colors
-        self.action_symbols = {0: '↑', 1: '↓', 2: '←', 3: '→'}
-        self.action_colors = ['red', 'blue', 'green', 'orange']
-        self.action_names = ['up', 'down', 'left', 'right']
+        # Action symbols and colors - support both 4 and 8 actions
+        if self.n_actions == 4:
+            self.action_symbols = {0: '↑', 1: '↓', 2: '←', 3: '→'}
+            self.action_colors = ['red', 'blue', 'green', 'orange']
+            self.action_names = ['up', 'down', 'left', 'right']
+        elif self.n_actions == 8:
+            self.action_symbols = {
+                0: '↑', 1: '↓', 2: '←', 3: '→',
+                4: '↖', 5: '↗', 6: '↙', 7: '↘'
+            }
+            self.action_colors = [
+                'red', 'blue', 'green', 'orange',
+                'purple', 'cyan', 'magenta', 'brown'
+            ]
+            self.action_names = [
+                'up', 'down', 'left', 'right',
+                'up-left', 'up-right', 'down-left', 'down-right'
+            ]
+        else:
+            # Fallback for other action counts
+            self.action_symbols = {i: str(i) for i in range(self.n_actions)}
+            self.action_colors = plt.cm.tab10(np.linspace(0, 1, self.n_actions)).tolist()
+            self.action_names = [f'action_{i}' for i in range(self.n_actions)]
     
     def _state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
         """Convert state distribution vector to 2D grid."""
@@ -353,7 +369,9 @@ class EmbeddingDistributionVisualizer:
             step: Current training step
             save_path: Path to save figure (optional)
         """
-        fig = plt.figure(figsize=(24, 12))
+        # Adjust figure size based on number of actions
+        n_action_cols = min(self.n_actions, 8)
+        fig = plt.figure(figsize=(5 * max(5, n_action_cols), 12))
         
         # Add parameter text
         param_text = (
@@ -361,29 +379,31 @@ class EmbeddingDistributionVisualizer:
             f"γ = {self.agent.discount}\n"
             f"η = {self.agent.lr_actor}\n"
             f"λ = {self.agent.lambda_reg}\n"
-            f"PMD steps = {self.agent.pmd_steps}"
+            f"PMD steps = {self.agent.pmd_steps}\n"
+            f"Actions = {self.n_actions}"
         )
         fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        # Create subplot grid (now 2x5 to include dataset occupancy)
+        # Create subplot grid
         ax_init = plt.subplot2grid((2, 5), (0, 0), colspan=1)
         ax_current = plt.subplot2grid((2, 5), (0, 1), colspan=1)
-        ax_dataset = plt.subplot2grid((2, 5), (0, 2), colspan=1)  # New subplot
+        ax_dataset = plt.subplot2grid((2, 5), (0, 2), colspan=1)
         ax_arrows = plt.subplot2grid((2, 5), (0, 3), colspan=1)
         ax_bars = plt.subplot2grid((2, 5), (0, 4), colspan=1)
         
-        # Second row: action heatmaps
-        ax_actions = [plt.subplot2grid((2, 5), (1, i), colspan=1) for i in range(4)]
+        # Second row: action heatmaps (up to 5, or adjust for 8 actions)
+        n_heatmap_cols = min(5, self.n_actions)
+        ax_actions = [plt.subplot2grid((2, 5), (1, i), colspan=1) for i in range(n_heatmap_cols)]
         
         # Compute distributions
         nu_init = self._compute_initial_distribution()
-        nu_current = np.zeros(self.n_states) # TODO remove
+        nu_current = np.zeros(self.n_states)
         
         # Plot distributions
         self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
         self._plot_distribution(ax_current, nu_current, 'Current Occupancy')
-        self._plot_dataset_occupancy(ax_dataset)  # New plot
+        self._plot_dataset_occupancy(ax_dataset)
         
         # Plot policy
         policy_per_state = self._get_policy_per_state()
@@ -476,9 +496,11 @@ class EmbeddingDistributionVisualizer:
             ax.add_patch(rect)
             
             probs = policy_per_state[s_idx]
-            bar_width = 0.15
-            bar_spacing = 0.2
-            start_x = x - 1.5 * bar_spacing
+            # Adjust bar width and spacing based on number of actions
+            total_width = 0.7
+            bar_width = total_width / self.n_actions * 0.8
+            bar_spacing = total_width / self.n_actions
+            start_x = x - total_width / 2 + bar_spacing / 2
             max_bar_height = 0.7
             
             for a_idx in range(self.n_actions):
@@ -494,11 +516,15 @@ class EmbeddingDistributionVisualizer:
         legend_elements = [Patch(facecolor=self.action_colors[i], 
                                 label=self.action_names[i])
                           for i in range(self.n_actions)]
-        ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=6 if self.n_actions > 4 else 8)
     
     def _plot_action_heatmaps(self, axes_list, policy_per_state):
         """Plot heatmaps for each action's probability distribution."""
-        for a_idx, ax in enumerate(axes_list):
+        # Only plot up to the number of available axes
+        num_plots = min(len(axes_list), self.n_actions)
+        
+        for a_idx in range(num_plots):
+            ax = axes_list[a_idx]
             grid_action = np.zeros((self.grid_height, self.grid_width))
             
             for s_idx in range(self.n_states):
@@ -525,7 +551,70 @@ class EmbeddingDistributionVisualizer:
                 ax.add_patch(dead_rect)
             
             plt.colorbar(im, ax=ax)
+        
+        # Hide unused axes if n_actions < len(axes_list)
+        for a_idx in range(num_plots, len(axes_list)):
+            axes_list[a_idx].axis('off')
     
+    def plot_results(self, step: int, save_path: str = None):
+        """
+        Create comprehensive visualization of learning progress.
+        
+        Args:
+            step: Current training step
+            save_path: Path to save figure (optional)
+        """
+        # Adjust figure size based on number of actions
+        n_action_cols = min(self.n_actions, 8)
+        fig = plt.figure(figsize=(5 * max(5, n_action_cols), 12))
+        
+        # Add parameter text
+        param_text = (
+            f"Step: {step}\n"
+            f"γ = {self.agent.discount}\n"
+            f"η = {self.agent.lr_actor}\n"
+            f"λ = {self.agent.lambda_reg}\n"
+            f"PMD steps = {self.agent.pmd_steps}\n"
+            f"Actions = {self.n_actions}"
+        )
+        fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create subplot grid
+        ax_init = plt.subplot2grid((2, 5), (0, 0), colspan=1)
+        ax_current = plt.subplot2grid((2, 5), (0, 1), colspan=1)
+        ax_dataset = plt.subplot2grid((2, 5), (0, 2), colspan=1)
+        ax_arrows = plt.subplot2grid((2, 5), (0, 3), colspan=1)
+        ax_bars = plt.subplot2grid((2, 5), (0, 4), colspan=1)
+        
+        # Second row: action heatmaps (up to 5, or adjust for 8 actions)
+        n_heatmap_cols = min(5, self.n_actions)
+        ax_actions = [plt.subplot2grid((2, 5), (1, i), colspan=1) for i in range(n_heatmap_cols)]
+        
+        # Compute distributions
+        nu_init = self._compute_initial_distribution()
+        nu_current = np.zeros(self.n_states)
+        
+        # Plot distributions
+        self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
+        self._plot_distribution(ax_current, nu_current, 'Current Occupancy')
+        self._plot_dataset_occupancy(ax_dataset)
+        
+        # Plot policy
+        policy_per_state = self._get_policy_per_state()
+        self._plot_policy_arrows(ax_arrows, policy_per_state)
+        self._plot_policy_bars(ax_bars, policy_per_state)
+        
+        # Plot action heatmaps
+        self._plot_action_heatmaps(ax_actions, policy_per_state)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"\nVisualization saved to: {save_path}")
+            plt.close(fig)
+
     def _plot_dataset_occupancy(self, ax, title='Dataset State Occupancy'):
         """Plot heatmap of state occupancy in the internal dataset."""
         # Get dataset
@@ -575,7 +664,6 @@ class EmbeddingDistributionVisualizer:
             ax.add_patch(dead_rect)
         
         plt.colorbar(im, ax=ax)
-
 # ============================================================================
 # Main Agent
 # ============================================================================
@@ -674,19 +762,53 @@ class DistMatchingEmbeddingAgent:
         self.transition_model.train(training)
     
     def insert_env(self, env):
-        self.env = env.unwrapped # This is needed just for visualization
+        # Find the discretized environment (could be the env itself or a wrapper)
+        self.wrapped_env = env  # Keep reference to full wrapped env
+        
+        # Find the discrete environment interface (either native or discretized wrapper)
+        self._discrete_env = self._find_discrete_env(env)
+        
+        # For compatibility, also keep unwrapped reference
+        self.env = self._discrete_env
+        
         timestep = env.reset()
         self.first_state = torch.tensor(timestep.observation).double()
       
-        self.second_state = torch.eye(self.n_states)[1] # TODO at the moment using second state for alpha not the real first, change this in the future
+        self.second_state = torch.eye(self.n_states)[1]
+        
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self)
 
-        
         # If ideal mode, pre-populate the dataset
         if self.ideal and not self._ideal_dataset_filled:
             self._populate_ideal_dataset()
     
+    def _find_discrete_env(self, env):
+        """
+        Find the discrete environment interface by traversing the wrapper chain.
+        Returns the first environment that has 'cells' attribute (either native discrete
+        or DiscretizedContinuousEnv wrapper).
+        """
+        current = env
+        while current is not None:
+            # Check if this level has the discrete interface (cells, state_to_idx, etc.)
+            if hasattr(current, 'cells') and hasattr(current, 'state_to_idx'):
+                return current
+            
+            # Move to next wrapper level
+            if hasattr(current, 'env'):
+                current = current.env
+            elif hasattr(current, 'unwrapped') and current.unwrapped is not current:
+                current = current.unwrapped
+            else:
+                break
+        
+        raise AttributeError(
+            "Could not find discrete environment interface. "
+            "Ensure the environment has 'cells' and 'state_to_idx' attributes "
+            "(either native discrete env or wrapped with DiscretizedContinuousEnv)."
+        )
+
     def _populate_ideal_dataset(self):
         """Pre-populate the dataset with all state-action pairs in ideal mode."""
         print("=== Populating ideal dataset with all state-action pairs ===")

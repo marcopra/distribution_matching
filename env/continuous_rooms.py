@@ -4,13 +4,14 @@ The agent moves in continuous 2D space with discrete actions (8 directions).
 Goal is reached when agent is within a threshold distance.
 Uses Pygame for modern rendering.
 """
-
+import pygame
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, List
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.envs.registration import register
+
 
 # Colors (RGB)
 COLORS = {
@@ -59,10 +60,16 @@ class ContinuousRoomEnv(gym.Env, ABC):
         start_position: Optional[Tuple[float, float]] = None,
         render_resolution: int = 512,
         wall_thickness: float = 0.3,
-        agent_radius: float = 0.15,  # Raggio dell'agente per collision detection
+        agent_radius: float = 0.15,
+        num_actions: int = 8,
     ):
         super().__init__()
         
+        # Validate num_actions
+        if num_actions not in [4, 8]:
+            raise ValueError(f"num_actions must be 4 or 8, got {num_actions}")
+        
+        self.num_actions = num_actions
         self.move_delta = move_delta
         self.goal_threshold = goal_threshold
         self.max_steps = max_steps
@@ -81,25 +88,37 @@ class ContinuousRoomEnv(gym.Env, ABC):
         
         self._build_environment()
         
+        # Calculate actual walkable bounds (excluding walls)
+        min_x = min(area[0] for area in self.walkable_areas)
+        min_y = min(area[1] for area in self.walkable_areas)
+        max_x = max(area[0] + area[2] for area in self.walkable_areas)
+        max_y = max(area[1] + area[3] for area in self.walkable_areas)
+        
         self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0], dtype=np.float32),
-            high=np.array([self.width, self.height], dtype=np.float32),
+            low=np.array([min_x, min_y], dtype=np.float32),
+            high=np.array([max_x, max_y], dtype=np.float32),
             dtype=np.float32
         )
-        self.action_space = spaces.Discrete(8)
+        self.action_space = spaces.Discrete(self.num_actions)
         
         self.position: np.ndarray = np.zeros(2, dtype=np.float32)
         self.goal: np.ndarray = np.zeros(2, dtype=np.float32)
         self.steps: int = 0
         
+        # Validate fixed positions if provided
+        if self._fixed_start_position is not None:
+            self._validate_position(self._fixed_start_position, "start")
+        if self._fixed_goal_position is not None:
+            self._validate_position(self._fixed_goal_position, "goal")
+        
         self._pygame_initialized = False
         self._screen = None
         self._clock = None
-        
+
     def _init_pygame(self):
         if self._pygame_initialized:
             return
-        import pygame
+        
         pygame.init()
         self._pygame_initialized = True
         if self.render_mode == "human":
@@ -108,6 +127,16 @@ class ContinuousRoomEnv(gym.Env, ABC):
             )
             pygame.display.set_caption("Continuous Room Environment")
         self._clock = pygame.time.Clock()
+
+    def _validate_position(self, position: Tuple[float, float], name: str):
+        """Validate that a position (with agent radius) is fully inside walkable areas."""
+        x, y = position
+        if not self._is_position_valid_with_radius(x, y):
+            raise ValueError(
+                f"{name.capitalize()} position ({x:.2f}, {y:.2f}) with agent radius "
+                f"{self.agent_radius:.2f} is not fully inside any walkable area. "
+                f"Walkable areas: {self.walkable_areas}"
+            )
     
     @abstractmethod
     def _build_environment(self) -> None:
@@ -169,6 +198,10 @@ class ContinuousRoomEnv(gym.Env, ABC):
         return center_in_walkable
     
     def _move(self, action: int) -> np.ndarray:
+        # Validate action is within available actions
+        if action >= self.num_actions:
+            raise ValueError(f"Action {action} is invalid for num_actions={self.num_actions}")
+        
         direction = np.array(self.ACTIONS[action], dtype=np.float32)
         if action >= 4:
             direction = direction / np.sqrt(2)
@@ -176,16 +209,31 @@ class ContinuousRoomEnv(gym.Env, ABC):
         new_position = self.position + direction * self.move_delta
         
         # Check if new position is valid considering agent radius
-        if not self._is_position_valid_with_radius(new_position[0], new_position[1]):
-            return self.position.copy()
+        if self._is_position_valid_with_radius(new_position[0], new_position[1]):
+            # Check path for collisions (sample intermediate points)
+            collision_free = True
+            for t in np.linspace(0, 1, 5):
+                mid = self.position + t * (new_position - self.position)
+                if not self._is_position_valid_with_radius(mid[0], mid[1]):
+                    collision_free = False
+                    break
+            
+            if collision_free:
+                return new_position
         
-        # Check path for collisions (sample intermediate points)
-        for t in np.linspace(0, 1, 5):
-            mid = self.position + t * (new_position - self.position)
-            if not self._is_position_valid_with_radius(mid[0], mid[1]):
-                return self.position.copy()
+        # If direct movement fails, try sliding along walls
+        # Try moving only in X direction
+        x_only = np.array([new_position[0], self.position[1]], dtype=np.float32)
+        if self._is_position_valid_with_radius(x_only[0], x_only[1]):
+            return x_only
         
-        return new_position
+        # Try moving only in Y direction
+        y_only = np.array([self.position[0], new_position[1]], dtype=np.float32)
+        if self._is_position_valid_with_radius(y_only[0], y_only[1]):
+            return y_only
+        
+        # If all attempts fail, stay in current position
+        return self.position.copy()
     
     def _distance_to_goal(self) -> float:
         return float(np.linalg.norm(self.position - self.goal))
@@ -227,6 +275,10 @@ class ContinuousRoomEnv(gym.Env, ABC):
         else:
             self.position = self._sample_valid_position()
         
+        # Validate position is within observation space bounds
+        assert self.observation_space.contains(self.position), \
+            f"Start position {self.position} is outside observation space bounds"
+        
         if self._fixed_goal_position is not None:
             self.goal = np.array(self._fixed_goal_position, dtype=np.float32)
         else:
@@ -236,6 +288,10 @@ class ContinuousRoomEnv(gym.Env, ABC):
                 self.goal = self._sample_valid_position()
                 attempts += 1
         
+        # Validate goal is within observation space bounds
+        assert self.observation_space.contains(self.goal), \
+            f"Goal position {self.goal} is outside observation space bounds"
+        
         self.steps = 0
         
         info = {
@@ -243,7 +299,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
             "goal": self.goal.copy(),
             "distance_to_goal": self._distance_to_goal()
         }
-        return self.position.copy(), info
+        return self.position.astype(np.float32).copy(), info
     
     def step(self, action: int):
         self.steps += 1
@@ -259,14 +315,14 @@ class ContinuousRoomEnv(gym.Env, ABC):
             "distance_to_goal": self._distance_to_goal(),
             "success": terminated
         }
-        return self.position.copy(), reward, terminated, truncated, info
+        return self.position.astype(np.float32).copy(), reward, terminated, truncated, info
     
     def render(self) -> Optional[np.ndarray]:
         if self.render_mode is None:
             return None
         
         self._init_pygame()
-        import pygame
+        
         
         surface = pygame.Surface((self.render_resolution, self.render_resolution))
         surface.fill(COLORS['wall'])
@@ -318,7 +374,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
     
     def close(self):
         if self._pygame_initialized:
-            import pygame
+            
             pygame.quit()
             self._pygame_initialized = False
 
@@ -375,7 +431,7 @@ class ContinuousFourRoomsEnv(ContinuousRoomEnv):
     
     def __init__(
         self,
-        room_size: float = 4.0,
+        room_size: float,
         corridor_width: float = 0.8,
         corridor_offset: float = 1.2,
         wall_thickness: float = 0.6,
@@ -510,8 +566,12 @@ if __name__ == "__main__":
         print(f"  World: {env.width:.1f} x {env.height:.1f}, Areas: {len(env.walkable_areas)}")
         
         frames = [env.render()]
-        for _ in range(100):
-            action = env.action_space.sample()
+        actions = [6, 6, 6, 2, 6]
+        for action in actions: #for i in range(100):
+            # if i < len(actions):
+            #     action = actions[i]
+            # else:
+            #     action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
             frames.append(env.render())
             if terminated or truncated:
@@ -523,10 +583,10 @@ if __name__ == "__main__":
         env.close()
     
     environments = [
-        (ContinuousSingleRoomEnv, "ContinuousSingleRoom", {"room_size": 5.0}),
-        (ContinuousTwoRoomsEnv, "ContinuousTwoRooms", {"room_size": 4.0, "corridor_width": 1.0, "corridor_length": 2.0}),
-        (ContinuousFourRoomsEnv, "ContinuousFourRooms", {"room_size": 4.0, "corridor_width": 0.8, "corridor_offset": 1.2}),
-        (ContinuousMultipleRoomsEnv, "ContinuousMultipleRooms", {"num_rooms": 4, "room_size": 3.0}),
+        # (ContinuousSingleRoomEnv, "ContinuousSingleRoom", {"room_size": 5.0}),
+        # (ContinuousTwoRoomsEnv, "ContinuousTwoRooms", {"room_size": 4.0, "corridor_width": 1.0, "corridor_length": 2.0}),
+        (ContinuousFourRoomsEnv, "ContinuousFourRooms", {"room_size": 5.0, "max_steps": 100, "move_delta": 0.5, "goal_threshold": 0.5, "goal_position": [4.5, 4.5], "start_position": [0.9, 0.9]}),
+        # (ContinuousMultipleRoomsEnv, "ContinuousMultipleRooms", {"num_rooms": 4, "room_size": 3.0}),
     ]
     
     print("="*60)

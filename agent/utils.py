@@ -404,7 +404,7 @@ def train_supervised(env, policy, train_steps=100, batch_size=5000):
 class InternalDataset:
     """Manages the agent's internal experience buffer."""
     
-    def __init__(self, dataset_type: str, n_states: int, n_actions: int, gamma: float, n_subsamples: int):
+    def __init__(self, dataset_type: str, n_states: int, n_actions: int, gamma: float, n_subsamples: int, device: str = 'cpu'):
         self.dataset_type = dataset_type
         self.n_states = n_states
         self.n_actions = n_actions
@@ -412,25 +412,24 @@ class InternalDataset:
         assert dataset_type in ("unique", "all"), "dataset_type must be 'unique' or 'all'"
         self.n_subsamples = n_subsamples
         self.gamma = gamma
+        self.device = torch.device(device)
         self.reset()
     
     def reset(self):
         utils.ColorPrint.yellow("Resetting internal dataset.")
-        # Initialize as empty tensors
         self.data = {
-            'observation': torch.empty((0, )),
-            'action': torch.empty((0,), dtype=torch.long),
-            'next_observation': torch.empty((0, )),
-            'alpha': torch.empty((0, ))
+            'observation': torch.empty((0, ), device=self.device, dtype=torch.double),
+            'action': torch.empty((0,), device=self.device, dtype=torch.long),
+            'next_observation': torch.empty((0, ), device=self.device, dtype=torch.double),
+            'alpha': torch.empty((0, ), device=self.device, dtype=torch.double)
         }
         self._trajectory_idx = np.array([], dtype=np.int32)
         self._unique_pairs: set = set()
         self._prev_obs: Optional[np.ndarray] = None
         
-        # Cache for trajectory boundaries (start_idx, end_idx) per trajectory
         self._traj_boundaries: Dict[int, Tuple[int, int]] = {}
         self._current_traj_idx = 0
-        self._trajectory_active = False  # Track if a trajectory is currently being recorded
+        self._trajectory_active = False
 
     
     @property
@@ -499,8 +498,7 @@ class InternalDataset:
             self._current_traj_idx += 1
             self._trajectory_active = True
             return
-        
-        # Skip adding data if no active trajectory (e.g., after reset mid-trajectory)
+        # Skipping adding data if no active trajectory (e.g., after reset mid-trajectory)
         if not self._trajectory_active:
             return
         
@@ -509,35 +507,35 @@ class InternalDataset:
             
             if pair not in self._unique_pairs:
                 self._unique_pairs.add(pair)
-                # Convert to tensors and concatenate
+                # Convert to tensors and add to dataset
                 self.data['observation'] = torch.cat([
                     self.data['observation'],
-                    torch.tensor(self._prev_obs).unsqueeze(0)
+                    torch.tensor(self._prev_obs, device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
                 self.data['action'] = torch.cat([
                     self.data['action'],
-                    torch.tensor([time_step.action], dtype=torch.long).unsqueeze(0)
+                    torch.tensor([time_step.action], device=self.device, dtype=torch.long).unsqueeze(0)
                 ], dim=0)
                 self.data['next_observation'] = torch.cat([
                     self.data['next_observation'],
-                    torch.tensor(time_step.observation).unsqueeze(0)
+                    torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
-                # first time we have a unique pair, alpha is 1.0 else is 0
+                # First unique pair gets alpha=1.0, others get alpha=0.0
                 if len(self._unique_pairs) == 1:
                     self.data['alpha'] = torch.cat([
                         self.data['alpha'],
-                        torch.tensor([1.0]).unsqueeze(0)
+                        torch.tensor([1.0], device=self.device, dtype=torch.double).unsqueeze(0)
                     ], dim=0)
                 else:
                     self.data['alpha'] = torch.cat([
                         self.data['alpha'],
-                        torch.tensor([0.0]).unsqueeze(0)
+                        torch.tensor([0.0], device=self.device, dtype=torch.double).unsqueeze(0)
                     ], dim=0)
                 
                 # Add trajectory index
                 self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
                 
-                # Update trajectory boundaries cache
+                # Update trajectory boundaries
                 current_idx = len(self._trajectory_idx) - 1
                 if self._current_traj_idx not in self._traj_boundaries:
                     self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
@@ -546,8 +544,7 @@ class InternalDataset:
                     self._traj_boundaries[self._current_traj_idx] = (start_idx, current_idx)
             
             self._prev_obs = time_step.observation
-            
-            # Mark trajectory as inactive if LAST
+            # Mark trajectory as inactive if LAST step
             if time_step.step_type == StepType.LAST:
                 self._trajectory_active = False
         else:
@@ -563,19 +560,18 @@ class InternalDataset:
             
             self.data['observation'] = torch.cat([
                 self.data['observation'],
-                torch.tensor(time_step.observation).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
             ], dim=0)
 
-            # first time we have a unique pair, alpha is 1.0 else is 0
             if self.data['observation'].shape[0] == 1:
                 self.data['alpha'] = torch.cat([
                     self.data['alpha'],
-                    torch.tensor([1.0]).unsqueeze(0)
+                    torch.tensor([1.0], device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
             else:
                 self.data['alpha'] = torch.cat([
                     self.data['alpha'],
-                    torch.tensor([0.0]).unsqueeze(0)
+                    torch.tensor([0.0], device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
             
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
@@ -587,23 +583,22 @@ class InternalDataset:
                 
             self.data['observation'] = torch.cat([
                 self.data['observation'],
-                torch.tensor(time_step.observation).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
             ], dim=0)
             self.data['action'] = torch.cat([
                 self.data['action'],
-                torch.tensor([time_step.action], dtype=torch.long)
+                torch.tensor([time_step.action], device=self.device, dtype=torch.long)
             ], dim=0)
             self.data['next_observation'] = torch.cat([
                 self.data['next_observation'],
-                torch.tensor(time_step.observation).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
             ], dim=0)
             self.data['alpha'] = torch.cat([
                     self.data['alpha'],
-                    torch.tensor([0.0]).unsqueeze(0)
+                    torch.tensor([0.0], device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
             
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
-            # Update end boundary
             start_idx = self._traj_boundaries[self._current_traj_idx][0]
             self._traj_boundaries[self._current_traj_idx] = (start_idx, len(self._trajectory_idx) - 1)
             
@@ -616,11 +611,11 @@ class InternalDataset:
             # Do NOT add to _trajectory_idx since there's no new observation to sample from
             self.data['action'] = torch.cat([
                 self.data['action'],
-                torch.tensor([time_step.action], dtype=torch.long)
+                torch.tensor([time_step.action], device=self.device, dtype=torch.long)
             ], dim=0)
             self.data['next_observation'] = torch.cat([
                 self.data['next_observation'],
-                torch.tensor(time_step.observation).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
             ], dim=0)
             # Don't update trajectory boundaries for LAST step
             # The last valid index remains from the previous MID step
@@ -633,9 +628,10 @@ class InternalDataset:
         
         if not hasattr(self, '_dummy_transition') or self._dummy_first_state is False:
             self._dummy_first_state = True
-            indices = torch.where(torch.all(self.data['next_observation'] == torch.eye(self.n_states)[0].unsqueeze(0), axis=1))[0]
+            eye_tensor = torch.eye(self.n_states, device=self.device, dtype=torch.double)
+            indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
             if indices.shape[0] == 0:
-                indices = torch.where(torch.all(self.data['next_observation'] == torch.eye(self.n_states)[1].unsqueeze(0), axis=1))[0]
+                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
                 self._dummy_first_state = False
             # TODO at the moment using second state for alpha not the real first, change this in the future
             self._dummy_transition = {
@@ -657,7 +653,7 @@ class InternalDataset:
   
         if self.n_subsamples is None or len(self._trajectory_idx) == 0:
             self._sampled_data = deepcopy(self.data)
-            self.reset()
+            # self.reset()
             return self._sampled_data
 
         if self.n_subsamples >= len(self._trajectory_idx):
@@ -671,7 +667,6 @@ class InternalDataset:
         
         if len(unique_traj_ids) == 0:
             return self.data
-        
         # Sample random trajectories for each datapoint (vectorized)
         sampled_traj_ids = np.random.choice(unique_traj_ids, size=self.n_subsamples)
         
