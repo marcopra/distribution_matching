@@ -31,22 +31,26 @@ class Encoder(nn.Module):
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
+        self.temperature = 1
 
-        self.fc = nn.Identity()
+        # self.fc = nn.Identity()
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
         self.fc =  nn.Sequential(
             nn.Linear(obs_shape[0], hidden_dim, bias=False),
-            # nn.ReLU(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, feature_dim, bias=False),
             # nn.LayerNorm(feature_dim),
         )
 
+        # nn.init.eye_(self.fc[0].weight)
         self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
-  
+        # h = F.normalize(h, p=2, dim=-1)
+        h = F.softmax(h/self.temperature, dim=-1)
+
         return h
 
 class TransitionModel(nn.Module):
@@ -135,7 +139,7 @@ class DistributionMatcher:
         identity = torch.eye(N, device=self.device)
         gram_matrix = psi @ psi.T + self.lambda_reg * identity
 
-        s,v,d= torch.linalg.svd(gram_matrix)
+        # s,v,d= torch.linalg.svd(gram_matrix)
         # print(f"SVD of gram matrix:  {v}, V shape {v.shape}, D shape {d.shape}")
         # exit()
         
@@ -244,12 +248,15 @@ class EmbeddingDistributionVisualizer:
             one_hot_unique_states = torch.eye(self.n_states).to(self.agent.device)
             
             phi_states = self.agent.encoder(one_hot_unique_states).cpu()
-            
+        
 
             # Compute distribution: φᵀ @ alpha
-            H = phi_states @ self.agent._phi_all_obs.cpu().T
-
-            nu_init = H @ self.agent._alpha
+            # H = phi_states @ self.agent._phi_all_obs.cpu().T
+            H = phi_states @ phi_states.T
+            
+            
+            nu_init = H #@ self.agent._alpha
+            utils.ColorPrint.yellow("Kernel matrix insted of 'fake' initial distribution used.")
         return nu_init.flatten().numpy()
     
     def _compute_current_distribution(self) -> np.ndarray:
@@ -296,6 +303,59 @@ class EmbeddingDistributionVisualizer:
         
         return policy_per_state
     
+    def _compute_state_correlation_matrix(self) -> np.ndarray:
+        """Compute correlation matrix between encoded unique states."""
+        with torch.no_grad():
+            # Get embeddings for all valid states
+            valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+            valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
+            
+            one_hot_states = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
+            embeddings = self.agent.encoder(one_hot_states).cpu()  # [n_states, feature_dim]
+            
+            # Compute correlation matrix: Φ @ Φᵀ
+            correlation_matrix = embeddings @ embeddings.T
+            
+        return correlation_matrix.numpy()
+    
+    def _compute_state_to_states_correlation(self) -> np.ndarray:
+        """
+        Compute for each state how much it deviates from orthogonality with other states.
+        
+        For orthonormal embeddings we want:
+        - φ(s) · φ(s') ≈ 0 for s ≠ s' (orthogonal)
+        - ||φ(s)|| = 1 (normalized, enforced by encoder)
+        
+        Returns:
+            Array of shape [n_states] with average absolute correlation for each state.
+            Values close to 0.0 indicate good orthogonality.
+            Values close to 1.0 indicate poor orthogonality (states are aligned).
+        """
+        with torch.no_grad():
+            # Get embeddings for all states
+            one_hot_states = torch.eye(self.n_states).to(self.agent.device)
+            embeddings = self.agent.encoder(one_hot_states).cpu()  # [n_states, feature_dim]
+            
+            # Compute Gram matrix (correlation matrix): Φ @ Φᵀ
+            # For normalized embeddings: G[i,j] = cos(angle between φ(i) and φ(j))
+            gram_matrix = embeddings @ embeddings.T  # [n_states, n_states]
+            
+            # For each state, compute average deviation from orthogonality
+            # We want off-diagonal elements to be close to 0
+            state_orthogonality_deviation = torch.zeros(self.n_states)
+            
+            for i in range(self.n_states):
+                # Get correlations with all other states (exclude self)
+                correlations = gram_matrix[i].clone()
+                correlations[i] = 0.0  # Exclude self-correlation
+                
+                # Average absolute correlation (deviation from orthogonality)
+                # |cos(θ)| where θ is angle between embeddings
+                # 0.0 = orthogonal (good), 1.0 = aligned (bad)
+                state_orthogonality_deviation[i] = torch.abs(correlations).sum()#.mean()
+            
+        return state_orthogonality_deviation.numpy()
+    
     def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False):
         """
         Plot 2D projection of state embeddings using PCA or t-SNE.
@@ -311,6 +371,11 @@ class EmbeddingDistributionVisualizer:
             
             one_hot_states = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
             embeddings = self.agent.encoder(one_hot_states).cpu().numpy()
+        
+        # Get states in dataset
+        dataset_dict = self.agent.dataset._sampled_data if hasattr(self.agent.dataset, '_sampled_data') else self.agent.dataset.data
+        dataset_observations = dataset_dict['observation']
+        dataset_state_indices = set(torch.argmax(dataset_observations, dim=1).numpy().tolist())
         
         # Dimensionality reduction
         if use_tsne:
@@ -328,16 +393,32 @@ class EmbeddingDistributionVisualizer:
         # Color code by state ID or grid position
         colors = plt.cm.viridis(np.linspace(0, 1, len(valid_ids)))
         
-        for idx, (cell, embedding_2d) in enumerate(zip(valid_cells, embeddings_2d)):
+        for idx, (cell, embedding_2d, state_id) in enumerate(zip(valid_cells, embeddings_2d, valid_ids)):
+            # Use circle for states in dataset, triangle for states not in dataset
+            if state_id in dataset_state_indices:
+                marker = 'o'  # circle
+            else:
+                marker = '^'  # triangle
+            
             ax.scatter(embedding_2d[0], embedding_2d[1], 
-                      c=[colors[idx]], s=100, edgecolors='black', linewidth=1.5)
+                      c=[colors[idx]], s=100, edgecolors='black', linewidth=1.5, marker=marker)
             ax.annotate(f"{cell}", (embedding_2d[0], embedding_2d[1]), 
-                       fontsize=8, ha='center', va='center', color='green', fontweight='bold')
+                       fontsize=8, ha='center', va='center', color='darkblue', fontweight='bold')
         
         ax.set_xlabel(f'{method_name} Component 1')
         ax.set_ylabel(f'{method_name} Component 2')
         ax.set_title(f'State Embeddings Visualization ({method_name})')
         ax.grid(True, alpha=0.3)
+        
+        # Add legend
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', 
+                   markersize=8, label='In Dataset'),
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='gray', 
+                   markersize=8, label='Not in Dataset')
+        ]
+        ax.legend(handles=legend_elements, loc='upper right')
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -345,6 +426,116 @@ class EmbeddingDistributionVisualizer:
         plt.close(fig)
     
     def plot_results(self, step: int, save_path: str = None):
+        """
+        Create comprehensive visualization of learning progress.
+        
+        Args:
+            step: Current training step
+            save_path: Path to save figure (optional)
+        """
+        fig = plt.figure(figsize=(24, 10))
+        
+        # Add parameter text
+        param_text = (
+            f"Step: {step}\n"
+            f"γ = {self.agent.discount}\n"
+            f"η = {self.agent.lr_actor}\n"
+            f"λ = {self.agent.lambda_reg}\n"
+            f"PMD steps = {self.agent.pmd_steps}"
+        )
+        fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create subplot grid: 2x3 layout for the 6 plots
+        ax_correlation = plt.subplot2grid((2, 3), (0, 0), colspan=1)
+        ax_state_corr = plt.subplot2grid((2, 3), (0, 1), colspan=1)  # New plot
+        ax_dataset = plt.subplot2grid((2, 3), (0, 2), colspan=1)
+        ax_arrows = plt.subplot2grid((2, 3), (1, 0), colspan=1)
+        ax_bars = plt.subplot2grid((2, 3), (1, 1), colspan=1)
+        ax_placeholder = plt.subplot2grid((2, 3), (1, 2), colspan=1)  # Placeholder for future use
+        ax_placeholder.axis('off')  # Hide for now
+        
+        # Compute and plot correlation matrix
+        correlation_matrix = self._compute_state_correlation_matrix()
+        self._plot_state_correlations(ax_correlation, correlation_matrix)
+        
+        # Compute and plot state-to-states correlation
+        state_correlations = self._compute_state_to_states_correlation()
+        self._plot_state_to_states_correlation(ax_state_corr, state_correlations)
+        
+        # Plot dataset occupancy
+        self._plot_dataset_occupancy(ax_dataset)
+        
+        # Plot policy
+        policy_per_state = self._get_policy_per_state()
+        self._plot_policy_arrows(ax_arrows, policy_per_state)
+        self._plot_policy_bars(ax_bars, policy_per_state)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"\nVisualization saved to: {save_path}")
+            plt.close(fig)
+    
+    def _plot_state_correlations(self, ax, correlation_matrix):
+        """Plot correlation matrix heatmap for encoded states."""
+        im = ax.imshow(correlation_matrix, cmap='RdBu_r', interpolation='nearest', 
+                      vmin=-1, vmax=1, aspect='auto')
+        ax.set_title('State Embedding Correlations\n(Φ @ Φᵀ)')
+        ax.set_xlabel('State Index')
+        ax.set_ylabel('State Index')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Correlation', rotation=270, labelpad=15)
+        
+        # Add grid for better readability
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    
+    def _plot_state_to_states_correlation(self, ax, state_correlations):
+        """
+        Plot heatmap showing orthogonality quality of each state's embedding.
+        
+        The visualization shows how much each state deviates from being orthogonal
+        to all other states. Lower values (lighter colors) indicate better orthogonality.
+        
+        Color interpretation:
+        - Light yellow: embeddings are nearly orthogonal to others (GOOD)
+        - Dark red: embeddings are aligned with others (BAD - representation collapse)
+        """
+        # Convert to grid matching environment structure
+        normalized_state_correlations = state_correlations #/ max(state_correlations + 1e-10)
+        grid = self._state_dist_to_grid(normalized_state_correlations)
+        
+        # Plot with YlOrRd colormap: yellow (good orthogonality) to red (poor orthogonality)
+        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest', vmin=0)
+        ax.set_title('Orthogonality Quality\n(avg |⟨φ(s), φ(s\')⟩| for s≠s\')\nLower = Better')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        
+        # Add grid
+        ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
+        ax.grid(which='minor', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+        
+        # Highlight dead state if lava enabled
+        if hasattr(self.env, 'lava') and self.env.lava:
+            dead_grid_x = -1 - self.min_x
+            dead_grid_y = -1 - self.min_y
+            dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
+                                 fill=False, edgecolor='#CF1020', linewidth=3)
+            ax.add_patch(dead_rect)
+        
+        # Add colorbar with clear labels
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Deviation from Orthogonality', 
+                      rotation=270, labelpad=20)
+        
+
+        
+    
+    def plot_results_old(self, step: int, save_path: str = None):
         """
         Create comprehensive visualization of learning progress.
         
@@ -497,33 +688,8 @@ class EmbeddingDistributionVisualizer:
     
     def _plot_action_heatmaps(self, axes_list, policy_per_state):
         """Plot heatmaps for each action's probability distribution."""
-        for a_idx, ax in enumerate(axes_list):
-            grid_action = np.zeros((self.grid_height, self.grid_width))
-            
-            for s_idx in range(self.n_states):
-                cell = self.env.idx_to_state[s_idx]
-                grid_x = cell[0] - self.min_x
-                grid_y = cell[1] - self.min_y
-                grid_action[grid_y, grid_x] = policy_per_state[s_idx, a_idx]
-            
-            im = ax.imshow(grid_action, cmap='YlOrRd', interpolation='nearest',
-                          vmin=0, vmax=1)
-            ax.set_title(f'π({self.action_names[a_idx]}|s)')
-            ax.set_xlabel('x')
-            ax.set_ylabel('y')
-            ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
-            ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
-            ax.grid(which='minor', color='white', linestyle='-',
-                   linewidth=0.5, alpha=0.5)
-            
-            if hasattr(self.env, 'lava') and self.env.lava:
-                dead_grid_x = -1 - self.min_x
-                dead_grid_y = -1 - self.min_y
-                dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
-                                     fill=False, edgecolor='#CF1020', linewidth=2)
-                ax.add_patch(dead_rect)
-            
-            plt.colorbar(im, ax=ax)
+        # Metodo rimosso - non più necessario
+        pass
     
     def _plot_dataset_occupancy(self, ax, title='Dataset State Occupancy'):
         """Plot heatmap of state occupancy in the internal dataset."""
@@ -638,6 +804,7 @@ class DistMatchingEmbeddingAgent:
             self.feature_dim
         ).to(self.device)
         
+        # self.transition_model = torch.nn.Parameter(torch.randn(self.feature_dim * self.n_actions, self.feature_dim, device=self.device))
         self.transition_model = TransitionModel(
             self.feature_dim * self.n_actions,
             self.feature_dim
@@ -647,7 +814,7 @@ class DistMatchingEmbeddingAgent:
             gamma=self.discount,
             eta=self.lr_actor,
             lambda_reg=self.lambda_reg,
-            device='cpu' #self.device At the moment forcing computatiosn on cpu, to save gpu memory
+            device='cpu' #self.device #At the moment forcing computatiosn on cpu, to save gpu memory
         )
         
         self.dataset = InternalDataset(self.data_type, self.n_states, self.n_actions, self.discount, n_subsamples)
@@ -655,12 +822,14 @@ class DistMatchingEmbeddingAgent:
         # Optimizers
         self.encoder_optimizer = torch.optim.Adam(
             self.encoder.parameters(), 
-            lr=lr_encoder
+            lr=lr_encoder,
         )
+
         self.transition_optimizer = torch.optim.Adam(
             self.transition_model.parameters(),
-            lr=lr_T
+            lr=lr_T,
         )
+        self.cross_entropy_loss = nn.CrossEntropyLoss()
         
         self.training = False
         # Initialize visualizer (will be properly set after env is inserted)
@@ -788,6 +957,8 @@ class DistMatchingEmbeddingAgent:
         if step < self.num_expl_steps:
             return np.random.randint(self.n_actions)
         
+        if np.random.random() < 0.1 and not eval_mode:
+            return np.random.randint(self.n_actions)
         # Compute action probabilities
         action_probs = self.compute_action_probs(obs)
         
@@ -820,7 +991,28 @@ class DistMatchingEmbeddingAgent:
         predicted_next = self.transition_model(encoded_state_action)
         
         # Compute loss
-        loss = F.mse_loss(predicted_next, encoded_next) #+ 0.2*F.mse_loss(encoded_obs, encoded_next)
+        # 1. Contrastive loss:
+        logits = predicted_next @ encoded_next.T  # [B, B]
+        logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+        contrastive_loss = self.cross_entropy_loss(logits, labels)
+
+        # 2. Compute Feature Correlation Matrix (Z x Z)
+        #    Shape: [Feature_Dim, Feature_Dim]
+        #    We want this to be close to Identity (uncorrelated features)
+        # remove duplicates from encoded_obs
+        unique_obs = torch.unique(obs, dim=0)
+        encoded_obs = self.encoder(unique_obs.double())
+        cov_matrix = (encoded_obs.T @ encoded_obs) / (encoded_obs.shape[0] - 1)
+
+        # 3. Decorrelation Loss (Push off-diagonals to 0)
+        #    This forces each dimension to represent independent information, 
+        #    preventing "feature collapse" where all dimensions encode the same thing.
+        off_diagonal_mask = ~torch.eye(cov_matrix.shape[0], dtype=torch.bool, device=self.device)
+        decorrelation_loss = torch.abs(cov_matrix[off_diagonal_mask]).sum()
+        
+        loss =  contrastive_loss # + 0.*decorrelation_loss 
+        # loss =  contrastive_loss + 0.1*decorrelation_loss # NON CAMBIARE VA BENE COSì
         
         # Optimize
         self.encoder_optimizer.zero_grad()
@@ -829,7 +1021,7 @@ class DistMatchingEmbeddingAgent:
         self.encoder_optimizer.step()
         self.transition_optimizer.step()
 
-        print(f"transition_loss: {loss.item()}")
+        print(f"transition_loss: {loss.item()}, deco_loss: {decorrelation_loss.item()}, contrastive_loss: {contrastive_loss.item()}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
@@ -893,10 +1085,9 @@ class DistMatchingEmbeddingAgent:
         tensors = self.dataset.get_data()
         print("Caching features from dataset of size:", len(tensors['observation']))
         with torch.no_grad():
-            obs = tensors['observation'][:len(tensors['next_observation'])].double().unsqueeze(-1)
+            obs = tensors['observation'][:len(tensors['next_observation'])].double()
             actions = tensors['action']
-            next_obs = tensors['next_observation'].double().unsqueeze(-1)
-            print("Shapes:", obs.shape, actions.shape, next_obs.shape)
+            next_obs = tensors['next_observation'].double()
             self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
             self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
          
@@ -904,11 +1095,11 @@ class DistMatchingEmbeddingAgent:
             indices = torch.where(torch.all(next_obs == self.first_state, dim=1))[0]
             if indices.shape[0] == 0:
                 indices = torch.where(torch.all(next_obs == self.second_state, dim=1))[0]
-
             
             self._psi_all = self._encode_state_action(self._phi_all_obs, actions).cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1)).double()
+
             print("DEBUG: setting alpha for index", indices[0].item(), len(self._alpha))
             self._alpha[indices[0]] = 1.0  # set alpha to 1.0 for the first state
             self.E = F.one_hot(
@@ -954,9 +1145,11 @@ class DistMatchingEmbeddingAgent:
             else:
                 metrics['batch_reward'] = 0.0  # placeholder
         
+        # if step < self.num_expl_steps + self.T_init_steps and not self.ideal:
         metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
         print(self.dataset.is_complete, "dataset complete or ideal mode, size:", self.dataset.size)
+        print("Real dataeset size:", self.dataset.data_size)
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value
@@ -965,13 +1158,7 @@ class DistMatchingEmbeddingAgent:
 
         # In ideal mode, we can update actor immediately
         if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
-            # raise NotImplementedError("Testare, con pretrained agent, che effettivamente in questo modo \
-            #                           l'internal dataset riesca a prendere dei dati in maniera uniforme \
-            #                           così a runtime è un po complesso da capire \
-            #                           sembra che ci sia una representation collapse \
-            #                           update delle policy fatte male \
-            #                           non so se è un problem di dati che vengoo presi per pmd \
-            #                     ")  
+            # metrics.update(self.update_transition_matrix(obs, action, next_obs))
             # update actor
             if not self.ideal:
                 metrics.update(self.update_actor(obs))

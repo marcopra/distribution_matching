@@ -36,7 +36,7 @@ class Encoder(nn.Module):
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
         self.fc =  nn.Sequential(
             nn.Linear(obs_shape[0], hidden_dim, bias=False),
-            # nn.ReLU(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, feature_dim, bias=False),
             # nn.LayerNorm(feature_dim),
         )
@@ -46,6 +46,7 @@ class Encoder(nn.Module):
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
+        h = F.normalize(h, dim=-1)
   
         return h
 
@@ -491,7 +492,7 @@ class DistMatchingEmbeddingAgent:
         self.update_actor_every_steps = update_actor_every_steps
         self.use_tb = use_tb
         self.use_wandb = use_wandb
-        self.device = device
+        self.device = "cpu" #device
         self.data_type = data_type
         self.pmd_steps = pmd_steps
         self.ideal = ideal
@@ -530,6 +531,7 @@ class DistMatchingEmbeddingAgent:
             self.transition_model.parameters(),
             lr=lr_T
         )
+        self.cross_entropy_loss = nn.CrossEntropyLoss()
         
         self.training = False
         self.visualizer = None
@@ -638,7 +640,28 @@ class DistMatchingEmbeddingAgent:
         predicted_next = self.transition_model(encoded_state_action)
         
         # Compute loss
-        loss = F.mse_loss(predicted_next, encoded_next) #+ 0.2*F.mse_loss(encoded_obs, encoded_next)
+        # 1. Contrastive loss:
+        logits = predicted_next @ encoded_next.T  # [B, B]
+        logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+        contrastive_loss = self.cross_entropy_loss(logits, labels)
+
+        # 2. Compute Feature Correlation Matrix (Z x Z)
+        #    Shape: [Feature_Dim, Feature_Dim]
+        #    We want this to be close to Identity (uncorrelated features)
+        # remove duplicates from encoded_obs
+        unique_obs = torch.unique(obs, dim=0)
+        encoded_obs = self.encoder(unique_obs.double())
+        cov_matrix = (encoded_obs.T @ encoded_obs) / (encoded_obs.shape[0] - 1)
+
+        # 3. Decorrelation Loss (Push off-diagonals to 0)
+        #    This forces each dimension to represent independent information, 
+        #    preventing "feature collapse" where all dimensions encode the same thing.
+        off_diagonal_mask = ~torch.eye(cov_matrix.shape[0], dtype=torch.bool, device=self.device)
+        decorrelation_loss = torch.abs(cov_matrix[off_diagonal_mask]).sum()
+        
+        loss =  contrastive_loss + 0.01*decorrelation_loss 
+        # loss =  contrastive_loss + 0.1*decorrelation_loss # NON CAMBIARE VA BENE COSì
         
         # Optimize
         self.encoder_optimizer.zero_grad()
@@ -647,7 +670,7 @@ class DistMatchingEmbeddingAgent:
         self.encoder_optimizer.step()
         self.transition_optimizer.step()
 
-        print(f"transition_loss: {loss.item()}")
+        print(f"transition_loss: {loss.item()}, deco_loss: {decorrelation_loss.item()}, contrastive_loss: {contrastive_loss.item()}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics

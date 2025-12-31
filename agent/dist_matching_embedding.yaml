@@ -7,11 +7,11 @@ action_shape: ??? # to be specified later
 lr_actor: 0.05 # eta
 discount: ${discount} # gamma
 lambda_reg: 1e-8
-lr_T: 1e-3
+lr_T: 1e-4
 batch_size: 1024
 nstep: 1
-lr_encoder: 1e-3
-hidden_dim: 256
+lr_encoder: 1e-4
+hidden_dim: 1024
 feature_dim: null
 T_init_steps: 300
 update_every_steps: 1

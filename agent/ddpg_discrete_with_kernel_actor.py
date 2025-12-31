@@ -93,6 +93,44 @@ class DDPGAgent:
         self.critic.train(training)
 
     def init_from(self, other):
+        # Caso 1: Altro DDPGAgent (comportamento esistente)
+        if type(other).__name__ == 'DDPGAgent':
+            raise NotImplementedError("DDPGAgent init_from another DDPGAgent is not implemented yet.")
+            utils.hard_update_params(other.encoder, self.encoder)
+            utils.hard_update_params(other.actor, self.actor)
+            if self.init_critic:
+                utils.hard_update_params(other.critic.trunk, self.critic.trunk)
+            print("✓ Initialized from another DDPG agent")
+        
+        # Caso 2: DistMatchingEmbeddingAgent
+        elif type(other).__name__ == 'DistMatchingEmbeddingAgent':
+            # Carica encoder
+            self.encoder.load_state_dict(other.encoder.state_dict())
+            print("✓ Encoder loaded from DistMatchingEmbeddingAgent")
+            
+            # Inizializza kernel actor se disponibile
+            if not hasattr(other, '_phi_all_obs'):
+                raise RuntimeError(
+                    "DistMatchingEmbeddingAgent not fully trained. "
+                    "Missing cached features (_phi_all_obs). "
+                    "Make sure the agent completed at least one policy update."
+                )
+            
+            self.actor.initialize_from_pretrained(
+                phi_dataset=other._phi_all_obs.to(self.device),
+                gradient_coeff=other.gradient_coeff.to(self.device),
+                eta=other.lr_actor
+            )
+            print("✓ KernelActorDiscrete initialized from pretrained weights")
+            print(f"  Dataset size: {other.dataset.size}")
+            print(f"  Feature dim: {other.feature_dim}")
+            print(f"  Eta: {other.lr_actor}")
+                  
+        else:
+            raise ValueError(
+                f"Cannot init_from agent of type {type(other).__name__}. "
+                f"Expected DDPGAgent or DistMatchingEmbeddingAgent."
+            )
         # copy parameters over
         utils.hard_update_params(other.encoder, self.encoder)
         utils.hard_update_params(other.actor, self.actor)

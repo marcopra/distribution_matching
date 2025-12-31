@@ -1020,7 +1020,6 @@ class DistMatchingEmbeddingAgent:
             obs = tensors['observation'][:len(tensors['next_observation'])].double()
             actions = tensors['action']
             next_obs = tensors['next_observation'].double()
-            print("Shapes:", obs.shape, actions.shape, next_obs.shape)
             self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
             self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
          

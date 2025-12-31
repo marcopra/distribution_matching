@@ -90,84 +90,123 @@ class ActorDiscrete(nn.Module):
         return log_p.squeeze(-1)                           # (T,)
 
 class KernelActorDiscrete(nn.Module):
-    def __init__(self, obs_type, dataset_dim, action_dim, feature_dim, eta):
+    """
+    Kernel-based actor that computes: π(a|s) = softmax(-η · H^T · C)
+    where H = φ(s) @ φ_dataset^T
+    
+    This architecture allows loading pretrained kernel weights and
+    optionally finetuning them with RL algorithms.
+    """
+    
+    def __init__(self, obs_type, dataset_dim, action_dim, feature_dim, eta, trainable=True):
         """
         Args:
-            phi_dataset (Tensor): Matrix of dataset features phi(x_i), shape (n, d).
-            C (Tensor): Transformation matrix, shape (n, n).
-            eta (float): Scalar scaling factor.
-            trainable (bool): If True, allows phi_dataset and C to be updated during training.
+            obs_type: Type of observation ('states' or 'pixels')
+            dataset_dim: Number of dataset examples (n)
+            action_dim: Number of actions
+            feature_dim: Dimension of feature space (d)
+            eta: Scalar scaling factor (learning rate)
+            trainable: If True, allows weights to be updated during finetuning
         """
         super().__init__()
-
         
-        # Get dimensions: n = number of dataset elements, d = feature dimension
-    
-        
-        # Layer 1: Computes H(x, x_i) = <phi(x), phi(x_i)>
-        # A Linear layer computes y = x @ W.T
-        # We want y = phi(x) @ phi_dataset.T
-        # Therefore, we set W = phi_dataset
+        # Layer 1: Kernel layer computes H = φ(x) @ φ_dataset^T
+        # Linear layer computes y = x @ W^T
+        # We want H = φ(x) @ φ_dataset^T
+        # Therefore W = φ_dataset
         self.kernel_layer = nn.Linear(feature_dim, dataset_dim, bias=False)
-
         
-        # Layer 2: Computes z = H @ C
-        # A Linear layer computes z = H @ W.T
-        # We want z = H @ C
-        # Therefore, we set W = C.T (transpose of C)
+        # Layer 2: Computes logits = H @ C
+        # We want logits = H @ C
+        # Linear computes z = H @ W^T, so W = C^T
         self.grad_coefficient = nn.Linear(dataset_dim, action_dim, bias=False)
         
-            
-        self.eta = eta
-        self.softmax = nn.Softmax(dim=1) # Apply row-wise (dim=1 for batch)
-
+        self.eta = nn.Parameter(torch.tensor(eta), requires_grad=trainable)
+        self.softmax = nn.Softmax(dim=1)
+        
+        # Control whether weights are trainable
+        if not trainable:
+            for param in self.parameters():
+                param.requires_grad = False
+        
         self.apply(utils.weight_init)
 
-    def initialize_weights(self, phi_dataset, C):
-        # Initialize kernel layer weights with phi_dataset
-        with torch.no_grad():
-            self.kernel_layer.weight.copy_(phi_dataset)
+    def initialize_from_pretrained(self, phi_dataset, gradient_coeff, eta):
+        """
+        Initialize weights from pretrained kernel policy.
         
-        # Initialize transform layer weights with C
-        with torch.no_grad():
-            ColorPrint.yellow("Check transpose of C ad phi for the intialization!")
-            ColorPrint.red("Check transpose of C ad phi for the intialization!???????????????")
-            ColorPrint.blue("Check transpose of C ad phi for the intialization!")
-            self.grad_coefficient.weight.copy_(C.T)
+        Args:
+            phi_dataset: [num_unique, feature_dim] - dataset feature matrix
+            gradient_coeff: [num_unique, n_actions] - learned coefficients
+            eta: scalar - learning rate / temperature
+        """
+        # kernel_layer.weight shape: [dataset_dim, feature_dim]
+        # We want: H = φ(x) @ φ_dataset^T = φ(x) @ W^T
+        # So W = φ_dataset
+        self.kernel_layer.weight.copy_(phi_dataset)
+        
+        # grad_coefficient.weight shape: [n_actions, dataset_dim]
+        # We want: logits = H @ C = H @ W^T
+        # So W^T = C, hence W = C^T
+        self.grad_coefficient.weight.copy_(gradient_coeff.T)
+        
+        # Set eta
+        self.eta.data.copy_(torch.tensor(eta))
+        
+        print(f"Kernel actor initialized from pretrained weights:")
+        print(f"  - Kernel layer: {self.kernel_layer.weight.shape}")
+        print(f"  - Grad coeff: {self.grad_coefficient.weight.shape}")
+        print(f"  - Eta: {self.eta.item()}")
 
     def forward(self, phi_x):
-        # 1. Compute Kernel Vector H: Shape (batch_size, n)
+        """
+        Forward pass: π(a|s) = softmax(-η · φ(s)^T φ_dataset^T C)
+        
+        Args:
+            phi_x: [batch_size, feature_dim] - encoded observations
+            
+        Returns:
+            probs: [batch_size, n_actions] - action probabilities
+        """
+        # 1. Compute kernel similarities: H = φ(x) @ φ_dataset^T
+        # Shape: [batch_size, dataset_dim]
         h = self.kernel_layer(phi_x)
         
-        # 2. Apply Matrix C: Shape (batch_size, n)
+        # 2. Apply gradient coefficients: logits = H @ C
+        # Shape: [batch_size, n_actions]
         logits = self.grad_coefficient(h)
         
-        # 3. Scale by eta and apply Softmax
-        # Formula: softmax(H C * eta)
-        return self.softmax(logits * self.eta)
+        # 3. Scale by -eta and apply softmax
+        # Note: negative sign because we minimize in the original formulation
+        probs = self.softmax(-self.eta * logits)
+        
+        return probs
 
     def _logits(self, phi_x):
-        # 1. Compute Kernel Vector H: Shape (batch_size, n)
+        """Get logits without softmax (useful for some RL algorithms)."""
         h = self.kernel_layer(phi_x)
-        
-        # 2. Apply Matrix C: Shape (batch_size, n)
         logits = self.grad_coefficient(h)
-        
-        return logits* self.eta
+        return -self.eta * logits
 
     def get_log_p(self, phi_x, actions):
         """
-        states:  (T, obs_dim) or (batch, obs_dim)
-        actions: (T,) or (batch,) float with action indices
-        returns: (T,) log-probabilities log pi(a_t | s_t)
+        Compute log probabilities for given actions.
+        
+        Args:
+            phi_x: [T, feature_dim] - encoded states
+            actions: [T] - action indices
+            
+        Returns:
+            log_p: [T] - log probabilities
         """
-        logits = self._logits(phi_x)                      # (T, K)
-        log_probs = F.log_softmax(logits, dim=-1)          # (T, K)
-        # convert actions to int64 for gather
-        actions = actions.long()             # (T, 1)
-        # Gather the log-prob of the taken action at each step
-        log_p = log_probs.gather(dim=1, index=actions)     # (T, 1)
-        return log_p.squeeze(-1)                           # (T,)
+        logits = self._logits(phi_x)  # [T, n_actions]
+        log_probs = F.log_softmax(logits, dim=-1)  # [T, n_actions]
+        
+        # Gather log-prob of taken actions
+        actions = actions.long().unsqueeze(1)  # [T, 1]
+        log_p = log_probs.gather(dim=1, index=actions)  # [T, 1]
+        
+        return log_p.squeeze(-1)  # [T]
     
 class CriticDiscrete(nn.Module):
     def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim):
