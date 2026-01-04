@@ -106,6 +106,10 @@ class BaseRoomEnv(gym.Env, ABC):
             if isinstance(goal_position, int):
                 return self.idx_to_state[goal_position]
             else:
+                # convert list to tuple if needed
+                
+                goal_position = tuple(goal_position)
+                assert isinstance(goal_position, tuple), "Goal position must be a tuple (x, y) or an int index"
                 if goal_position not in self.state_to_idx:
                     raise ValueError(f"Goal position {goal_position} is not a valid cell")
                 return goal_position
@@ -118,6 +122,7 @@ class BaseRoomEnv(gym.Env, ABC):
             if isinstance(start_position, int):
                 return self.idx_to_state[start_position]
             else:
+                start_position = tuple(start_position)
                 if start_position not in self.state_to_idx:
                     raise ValueError(f"Start position {start_position} is not a valid cell")
                 return start_position

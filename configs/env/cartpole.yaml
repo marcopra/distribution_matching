@@ -1,0 +1,8 @@
+# @package _global_
+# Continuous Four Rooms Environment Configuration
+
+env:
+  name: "CartPole-v1"
+  
+  render_mode: rgb_array
+  

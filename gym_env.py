@@ -568,20 +568,19 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
 
 def make_kwargs(cfg):
     """Return default kwargs for make function."""
-    env_kwargs = {
-            'max_steps': cfg.env.max_steps,
-            'show_coordinates': cfg.env.show_coordinates,
-            'goal_position': tuple(cfg.env.goal_position) if cfg.env.goal_position else None,
-            'start_position': tuple(cfg.env.start_position) if cfg.env.start_position else None,
-            'render_mode': cfg.env.render_mode,
-        }
+    env_kwargs = {}
     
-    # Add continuous environment parameters if present
-    if hasattr(cfg.env, 'move_delta'):
-        env_kwargs['move_delta'] = cfg.env.move_delta
-    if hasattr(cfg.env, 'goal_threshold'):
-        env_kwargs['goal_threshold'] = cfg.env.goal_threshold
+    for key, value in cfg.env.items():
+        if key not in ['name']:
+            env_kwargs[key] = value
+        print(f"Setting env param: {key} = {value}")
     
+    
+    if hasattr(cfg.env, 'dense_reward'):
+        env_kwargs['dense_reward'] = cfg.env.dense_reward
+    if hasattr(cfg.env, 'num_actions'):
+        env_kwargs['num_actions'] = cfg.env.num_actions
+        
     # Add discretization parameters
     if hasattr(cfg.env, 'discretize') and cfg.env.discretize:
         env_kwargs['discretize'] = True

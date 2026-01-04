@@ -62,6 +62,8 @@ class ContinuousRoomEnv(gym.Env, ABC):
         wall_thickness: float = 0.3,
         agent_radius: float = 0.15,
         num_actions: int = 8,
+        dense_reward: bool = False,
+        wall_penalty: float = 0.0,
     ):
         super().__init__()
         
@@ -78,6 +80,8 @@ class ContinuousRoomEnv(gym.Env, ABC):
         self.render_resolution = render_resolution
         self.wall_thickness = wall_thickness
         self.agent_radius = agent_radius
+        self.dense_reward = dense_reward
+        self.wall_penalty = wall_penalty
         
         self._fixed_goal_position = goal_position
         self._fixed_start_position = start_position
@@ -104,6 +108,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
         self.position: np.ndarray = np.zeros(2, dtype=np.float32)
         self.goal: np.ndarray = np.zeros(2, dtype=np.float32)
         self.steps: int = 0
+        self.wall_collision: bool = False
         
         # Validate fixed positions if provided
         if self._fixed_start_position is not None:
@@ -197,7 +202,11 @@ class ContinuousRoomEnv(gym.Env, ABC):
         
         return center_in_walkable
     
-    def _move(self, action: int) -> np.ndarray:
+    def _move(self, action: int) -> Tuple[np.ndarray, bool]:
+        """
+        Move the agent based on action.
+        Returns: (new_position, wall_collision)
+        """
         # Validate action is within available actions
         if action >= self.num_actions:
             raise ValueError(f"Action {action} is invalid for num_actions={self.num_actions}")
@@ -207,6 +216,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
             direction = direction / np.sqrt(2)
         
         new_position = self.position + direction * self.move_delta
+        wall_collision = False
         
         # Check if new position is valid considering agent radius
         if self._is_position_valid_with_radius(new_position[0], new_position[1]):
@@ -219,21 +229,24 @@ class ContinuousRoomEnv(gym.Env, ABC):
                     break
             
             if collision_free:
-                return new_position
+                return new_position, wall_collision
+        
+        # Movement was blocked - mark collision
+        wall_collision = True
         
         # If direct movement fails, try sliding along walls
         # Try moving only in X direction
         x_only = np.array([new_position[0], self.position[1]], dtype=np.float32)
         if self._is_position_valid_with_radius(x_only[0], x_only[1]):
-            return x_only
+            return x_only, wall_collision
         
         # Try moving only in Y direction
         y_only = np.array([self.position[0], new_position[1]], dtype=np.float32)
         if self._is_position_valid_with_radius(y_only[0], y_only[1]):
-            return y_only
+            return y_only, wall_collision
         
         # If all attempts fail, stay in current position
-        return self.position.copy()
+        return self.position.copy(), wall_collision
     
     def _distance_to_goal(self) -> float:
         return float(np.linalg.norm(self.position - self.goal))
@@ -303,17 +316,36 @@ class ContinuousRoomEnv(gym.Env, ABC):
     
     def step(self, action: int):
         self.steps += 1
-        self.position = self._move(action)
+        self.position, self.wall_collision = self._move(action)
         
         terminated = self._is_goal_reached()
         truncated = self.steps >= self.max_steps
-        reward = 1.0 if terminated else 0.0
+        
+        # Calculate reward
+        if self.dense_reward:
+            # terminated = False  # Disable termination for dense reward
+            # otherwise, the maximum reward for the episode is always staying close to the target without
+            # actually reaching it.
+
+            # Dense reward: exponential negative Euclidean distance to goal
+            distance = self._distance_to_goal()
+            reward = np.exp(-distance)
+            reward += 1000 if terminated else 0.0
+            # Apply wall penalty if collision occurred
+            if self.wall_collision and self.wall_penalty > 0.0:
+                reward -= self.wall_penalty
+        else:
+            # Sparse reward: 1.0 if goal reached, 0.0 otherwise
+            reward = 0.0 if terminated else -1.0
+        
+        
         
         info = {
             "position": self.position.copy(),
             "goal": self.goal.copy(),
             "distance_to_goal": self._distance_to_goal(),
-            "success": terminated
+            "success": terminated,
+            "wall_collision": self.wall_collision
         }
         return self.position.astype(np.float32).copy(), reward, terminated, truncated, info
     
@@ -432,7 +464,7 @@ class ContinuousFourRoomsEnv(ContinuousRoomEnv):
     def __init__(
         self,
         room_size: float,
-        corridor_width: float = 0.8,
+        corridor_width: float = 1.5,
         corridor_offset: float = 1.2,
         wall_thickness: float = 0.6,
         agent_radius: float = 0.15,
@@ -463,17 +495,18 @@ class ContinuousFourRoomsEnv(ContinuousRoomEnv):
         overlap = 0.05
         
         # Narrow corridors through walls - extended to overlap with rooms
+        # corridor_offset now refers to the CENTER of the corridor from the edge
         # Left side: corridor between bottom-left and top-left (through horizontal wall)
-        left_h_corridor = (wt + offset, wt + rs - overlap, cw, wt + 2 * overlap)
+        left_h_corridor = (wt + offset - cw / 2, wt + rs - overlap, cw, wt + 2 * overlap)
         
         # Right side: corridor between bottom-right and top-right (through horizontal wall)
-        right_h_corridor = (wt + rs + wt + rs - offset - cw, wt + rs - overlap, cw, wt + 2 * overlap)
+        right_h_corridor = (wt + rs + wt + rs - offset - cw / 2, wt + rs - overlap, cw, wt + 2 * overlap)
         
         # Bottom: corridor between bottom-left and bottom-right (through vertical wall)
-        bottom_v_corridor = (wt + rs - overlap, wt + rs - offset - cw, wt + 2 * overlap, cw)
+        bottom_v_corridor = (wt + rs - overlap, wt + rs - offset - cw / 2, wt + 2 * overlap, cw)
         
         # Top: corridor between top-left and top-right (through vertical wall)
-        top_v_corridor = (wt + rs - overlap, wt + rs + wt + offset, wt + 2 * overlap, cw)
+        top_v_corridor = (wt + rs - overlap, wt + rs + wt + offset - cw / 2, wt + 2 * overlap, cw)
         
         self.walkable_areas = [
             r_bl, r_br, r_tl, r_tr,

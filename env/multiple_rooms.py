@@ -169,6 +169,8 @@ gym.register(
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
+    from rooms import BaseRoomEnv
+
     
     print("=" * 60)
     print("Testing MultipleRoomsEnv - Isolated Rooms")
@@ -181,6 +183,7 @@ if __name__ == "__main__":
         num_rooms=3,
         room_size=5,
         corridor_height=1,
+        connector_position=2,
         connector_length=1,
         render_mode="human",
         show_coordinates=True
@@ -214,6 +217,7 @@ if __name__ == "__main__":
         num_rooms=4,
         room_size=4,
         corridor_height=2,
+        connector_position=2,
         connector_length=3,
         render_mode="human",
         show_coordinates=True
@@ -234,6 +238,7 @@ if __name__ == "__main__":
         num_rooms=3,
         room_size=4,
         corridor_height=1,
+        connector_position=2,
         connector_length=2,
         render_mode="human",
         show_coordinates=True
@@ -273,6 +278,7 @@ if __name__ == "__main__":
         num_rooms=5,
         room_size=2,
         corridor_height=1,
+        connector_position=1,
         connector_length=2,
         render_mode="rgb_array",
         show_coordinates=True,
@@ -341,6 +347,7 @@ if __name__ == "__main__":
         num_rooms=3,
         room_size=4,
         corridor_height=1,
+        connector_position=2,
         connector_length=1,
         render_mode="rgb_array",
         show_coordinates=True,

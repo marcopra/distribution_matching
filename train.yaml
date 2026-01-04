@@ -7,7 +7,7 @@ defaults:
 reward_free: false
 # task settings
 domain: gym
-task_name: FourRooms-v0
+task_name:  ${env.name} #FourRooms-v0
 obs_type: discrete_states # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
 action_repeat: 1 # set to 2 for pixels
@@ -53,9 +53,9 @@ experiment: exp
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name} #_${env.goal_position}_${experiment}_${get_filename:${p_path}}
   sweep:
-    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name} #_${env.goal_position}_${experiment}_${get_filename:${p_path}}
     subdir: ${hydra.job.num}
   launcher:
     timeout_min: 4300

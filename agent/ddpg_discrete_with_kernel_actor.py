@@ -8,8 +8,8 @@ from utils import ColorPrint
 import torch.nn.functional as F
 from collections import OrderedDict
 from torch.distributions.categorical import Categorical
-from agent.utils import Encoder, KernelActorDiscrete as Actor, CriticDiscrete as Critic
-from dist_matching_embedding import Encoder as KernelEncoder
+from agent.utils import Encoder, KernelActorDiscrete as KernelActor, CriticDiscrete as Critic
+# from agent.dist_matching_embedding import Encoder as KernelEncoder # TODO decidere il dtype da usare perchè in dist_matching uso float64 ma in tutto il resto float32
 
 
 
@@ -23,6 +23,8 @@ class DDPGAgent:
                  action_shape, # Number of discrete actions
                  device,
                  lr,
+                 dataset_dim,
+                 eta,
                  feature_dim,
                  hidden_dim,
                  critic_target_tau,
@@ -55,6 +57,12 @@ class DDPGAgent:
         self.feature_dim = feature_dim
         self.solved_meta = None
 
+        self.dataset_dim = dataset_dim
+        self.eta = eta
+
+        # raise NotImplementedError("DDPGAgent with Kernel Actor is not fully implemented yet.")
+        # Bisogna modificare l'inizializzazione del kernel actor (al momento lavorare con identità)
+        # e modificare inizializzazione del kernel actor
         # models
         if obs_type == 'pixels':
             raise NotImplementedError("Pixel-based observations are yet not supported in this agent.")
@@ -63,11 +71,11 @@ class DDPGAgent:
             self.obs_dim = self.encoder.repr_dim + meta_dim
         else:
             self.aug = nn.Identity()
-            self.encoder = KernelEncoder(obs_shape).to(device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
+            self.encoder = nn.Identity()  # KernelEncoder(obs_shape).to(device)
+            # self.obs_dim = self.encoder.repr_dim + meta_dim
+            self.obs_dim = self.obs_shape[0] + meta_dim
 
-        self.actor = Actor(obs_type, self.obs_dim, self.action_dim,
-                           feature_dim, hidden_dim, linear=linear_actor).to(device)
+        self.actor = KernelActor(obs_type, self.obs_dim, self.dataset_dim, self.action_dim, self.eta).to(device)
 
         self.critic = Critic(obs_type, self.obs_dim, self.action_dim,
                              feature_dim, hidden_dim).to(device)
@@ -78,7 +86,7 @@ class DDPGAgent:
         # optimizers
 
        
-        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
+        self.encoder_opt = None # torch.optim.Adam(self.encoder.parameters(), lr=lr)
        
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
@@ -132,10 +140,10 @@ class DDPGAgent:
                 f"Expected DDPGAgent or DistMatchingEmbeddingAgent."
             )
         # copy parameters over
-        utils.hard_update_params(other.encoder, self.encoder)
-        utils.hard_update_params(other.actor, self.actor)
-        if self.init_critic:
-            utils.hard_update_params(other.critic.trunk, self.critic.trunk)
+        # utils.hard_update_params(other.encoder, self.encoder)
+        # utils.hard_update_params(other.actor, self.actor)
+        # if self.init_critic:
+        #     utils.hard_update_params(other.critic.trunk, self.critic.trunk)
 
     def get_meta_specs(self):
         return tuple()
@@ -148,6 +156,7 @@ class DDPGAgent:
 
     def act(self, obs, meta, step, eval_mode):
         obs = torch.FloatTensor(obs).to(self.device)
+
         obs = self.encoder(obs.unsqueeze(0))
         inputs = [obs]
         for value in meta.values():
@@ -175,14 +184,17 @@ class DDPGAgent:
         with torch.no_grad():
             next_probs = self.actor(next_obs)
             next_log_probs = torch.log(next_probs + 1e-8)
-            target_Q1, target_Q2 = self.critic_target(next_obs)    
+            target_Q1, target_Q2 = self.critic_target(next_obs)  
             target_V = torch.sum(next_probs * (torch.min(target_Q1,target_Q2) ), dim=1, keepdim=True) # [B,1]
             target_Q = reward + ((discount!=0.0)*0.99 * target_V) # termination is in the discount
+            
+            target_Q = target_Q.to(target_Q1.dtype)  # TODO for the future ensure all models use the same dtype
 
          # get current Q estimates
         Q1_all, Q2_all = self.critic(obs)
         current_q1, current_q2 = Q1_all.gather(1, action.unsqueeze(1)), Q2_all.gather(1, action.unsqueeze(1)) #[b,1]
         critic_loss = F.mse_loss(current_q1, target_Q) + F.mse_loss(current_q2, target_Q)
+
         if self.use_tb or self.use_wandb:
             metrics['critic_target_q'] = target_Q.mean().item()
             metrics['critic_q1'] = current_q1.mean().item()

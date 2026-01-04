@@ -117,6 +117,9 @@ class Workspace:
         if cfg.snapshot_ts > 0:
             pretrained_agent = self.load_snapshot()['agent']
             self.agent.init_from(pretrained_agent)
+            # Re-insert environment after loading
+            if hasattr(self.agent, 'insert_env'):
+                self.agent.insert_env(self.train_env)
         
         if cfg.p_path is not None and cfg.p_path != "none":
             if cfg.p_path.endswith(".npy"):
@@ -124,6 +127,9 @@ class Workspace:
             else:
                 pretrained_agent = self.load_snapshot_from_path(cfg.p_path)['agent']
                 self.agent.init_from(pretrained_agent)
+                # Re-insert environment after loading
+                if hasattr(self.agent, 'insert_env'):
+                    self.agent.insert_env(self.train_env)
 
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
@@ -372,7 +378,8 @@ class Workspace:
         if not snapshot.exists():
             return None
         with snapshot.open('rb') as f:
-            payload = torch.load(f, weights_only=False)
+            payload = torch.load(f, weights_only=False, map_location='cpu')
+            print(f"Loaded snapshot keys: {list(payload.keys())}")
         return payload
 
 

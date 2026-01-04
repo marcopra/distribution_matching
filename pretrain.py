@@ -276,8 +276,29 @@ class Workspace:
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode']
         payload = {k: self.__dict__[k] for k in keys_to_save}
+        
+        # Temporarily remove environment reference before saving
+        env_ref = None
+        if hasattr(payload['agent'], 'env'):
+            env_ref = payload['agent'].env
+            payload['agent'].env = None
+        if hasattr(payload['agent'], 'wrapped_env'):
+            wrapped_env_ref = payload['agent'].wrapped_env
+            payload['agent'].wrapped_env = None
+        if hasattr(payload['agent'], '_discrete_env'):
+            discrete_env_ref = payload['agent']._discrete_env
+            payload['agent']._discrete_env = None
+        
         with snapshot.open('wb') as f:
             torch.save(payload, f)
+        
+        # Restore environment reference after saving
+        if env_ref is not None:
+            payload['agent'].env = env_ref
+        if hasattr(payload['agent'], 'wrapped_env'):
+            payload['agent'].wrapped_env = wrapped_env_ref
+        if hasattr(payload['agent'], '_discrete_env'):
+            payload['agent']._discrete_env = discrete_env_ref
 
 
 @hydra.main(config_path='.', config_name='pretrain')
