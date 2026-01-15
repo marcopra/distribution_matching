@@ -1263,15 +1263,15 @@ class InternalDatasetFIFO:
             log_det =self.spd_logdet_cholesky(kernel_sa)
 
             # if np.random.rand() <= np.exp(log_det - self.max_log_det):
-            if log_det > self.max_log_det:
+            # if log_det > self.max_log_det:
 
-                if self.max_log_det == -np.inf:
-                    ColorPrint.green(f"EDER subsampling with log-det: {log_det.item():.4f}  in {time() - starting_search_time:.2f}s accepted after {i+1} attempts")
-                else:
-                    ColorPrint.green(f"EDER subsampling with log-det: {log_det.item():.4f} (max: {self.max_log_det:.4f}) in {time() - starting_search_time:.2f}s accepted after {i+1} attempts")
-                if log_det > self.max_log_det:
-                    self.max_log_det = log_det.item()
-                return sampled_data
+            #     if self.max_log_det == -np.inf:
+            #         ColorPrint.green(f"EDER subsampling with log-det: {log_det.item():.4f}  in {time() - starting_search_time:.2f}s accepted after {i+1} attempts")
+            #     else:
+            #         ColorPrint.green(f"EDER subsampling with log-det: {log_det.item():.4f} (max: {self.max_log_det:.4f}) in {time() - starting_search_time:.2f}s accepted after {i+1} attempts")
+            #     if log_det > self.max_log_det:
+            #         self.max_log_det = log_det.item()
+            #     return sampled_data
             
             if log_det > tmp_max:
                 tmp_max = log_det.item()
