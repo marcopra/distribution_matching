@@ -2,7 +2,7 @@
 
 horizon="110 200 300"
 eps_greedy="0.4 0.6 0.8"
-sink_schedule="linear('0.0,0.1,1000000')" #0.00179856115
+sink_schedule="linear(0.0,0.1,1000000)" #0.00179856115
 
 
 
