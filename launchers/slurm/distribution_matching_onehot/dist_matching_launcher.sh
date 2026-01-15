@@ -1,13 +1,16 @@
 #!/bin/bash
 
+horizon="110 200 300"
+eps_greedy="0.25 0.4 0.6"
+sink_schedule="linear('0.0, 0.1, 1000000')" #0.00179856115
 
 
 
 
-for seed_frame in $seed_frames; do
-    for seed in $seeds; do   
-        for model_path in "${model_paths[@]}"; do
-            sbatch --export=VAR="${}",VAR2="${seed_frame}",MODEL_PATH="${model_path}" launchers/slurm/sac_discrete/sac_base.sh
+for h in $horizon; do
+    for e in $eps_greedy; do
+        for s in $sink_schedule; do
+            sbatch --export=HORIZON="${h}",EPS_GREEDY="${e}",SINK_SCHEDULE="${s}" launchers/slurm/distribution_matching_onehot/dist_matching.sh
                
         done
     done

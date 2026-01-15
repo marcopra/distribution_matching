@@ -10,14 +10,6 @@
 
 cd $SLURM_SUBMIT_DIR
 
-# Use environment variables passed via sbatch
-SEED=${SEED:-0}
-SEED_FRAMES=${SEED_FRAMES:-4000}
-MODEL_PATH=${MODEL_PATH:-""}
-CFG_ENV=${CFG_ENV:-"four_rooms10_2"}
-
-
-
 # Load environment
 source ~/.bashrc
 conda activate dist_matching
@@ -26,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python train.py agent=sac_discrete use_wandb=true num_seed_frames=${SEED_FRAMES} eval_every_frames=20000 num_train_frames=200000 p_path="${MODEL_PATH}" configs/env=${CFG_ENV} device=cuda seed=${SEED} save_video=false env.render_mode=null wandb_tag="sac_discrete"
+python pretrain.py agent=dist_matching_onehot_augmented env.render_mode=null save_video=false num_train_frames=304000 use_wandb=false agent.T_init_steps=0 configs/env=multiplerooms10_3x3 env.max_steps=${HORIZON} agent.ideal=false agent.data_type=all num_seed_frames=${3*HORIZON} agent.update_actor_every_steps=${3*HORIZON} agent.epsilon_schedule=${EPS_GREEDY} "agent.sink_schedule=${SINK_SCHEDULE}" agent.lr_actor=1 agent.pmd_steps=500 agent.window_size=10 agent.n_subsamples=2200 agent.subsampling_strategy="random"
