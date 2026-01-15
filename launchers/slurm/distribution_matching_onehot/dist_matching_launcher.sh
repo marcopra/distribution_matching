@@ -13,7 +13,7 @@ for h in $horizon; do
         for s in $sink_schedule; do
             for n in $n_subsamples; do
                 sbatch --export=HORIZON=${h},EPS_GREEDY=${e},SINK_SCHEDULE=${s},N_SUBSAMPLES=${n} dist_matching_launcher.sh
-               
+            done
         done
     done
 done
