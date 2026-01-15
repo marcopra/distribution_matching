@@ -440,7 +440,7 @@ class EmbeddingDistributionVisualizer:
         fig = plt.figure(figsize=(5 * max(5, n_action_cols), 12))
         
         # Compute current epsilon value
-        epsilon = utils.schedule(self.agent.epsilon_schedule, step)
+        epsilon = utils.schedule(self.agent.sink_schedule, step)
         
         # Get dataset novelty statistics
         novelty = self.agent._dataset_novelty_stats
@@ -650,7 +650,7 @@ class EmbeddingDistributionVisualizer:
         fig = plt.figure(figsize=(5 * max(5, n_action_cols), 12))
         
         # Compute current epsilon value
-        epsilon = utils.schedule(self.agent.epsilon_schedule, step)
+        epsilon = utils.schedule(self.agent.sink_schedule, step)
         
         # Get dataset novelty statistics
         novelty = self.agent._dataset_novelty_stats
@@ -795,6 +795,7 @@ class DistMatchingEmbeddingAgent:
                  pmd_steps,
                  num_expl_steps,
                  T_init_steps,
+                 sink_schedule,
                  epsilon_schedule,
                  window_size,
                  unique_window,
@@ -827,6 +828,7 @@ class DistMatchingEmbeddingAgent:
         self.ideal = ideal
         self.unique_window = unique_window
 
+        self.sink_schedule = sink_schedule
         self.epsilon_schedule = epsilon_schedule
         self.subsampling_strategy = subsampling_strategy
         assert subsampling_strategy in ['random', 'eder'], "Subsampling strategy must be either 'random' or 'eder'"
@@ -1052,7 +1054,7 @@ class DistMatchingEmbeddingAgent:
 
     
     def act(self, obs, meta, step, eval_mode):
-        if step < self.num_expl_steps:
+        if step < self.num_expl_steps or np.random.rand() < utils.schedule(self.epsilon_schedule, step):
             return np.random.randint(self.n_actions)
         
         # Compute action probabilities
@@ -1113,7 +1115,7 @@ class DistMatchingEmbeddingAgent:
             self.unique_states = torch.eye(self.n_states).double()
             self.K = self._psi_all @ self._psi_all.T  # [n, n]
 
-        epsilon = utils.schedule(self.epsilon_schedule, step)
+        epsilon = utils.schedule(self.sink_schedule, step)
         self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
         M = self.H*(self.E@self.pi.T) 
 

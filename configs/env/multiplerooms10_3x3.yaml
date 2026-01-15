@@ -7,7 +7,7 @@ env:
   room_size: 3
   corridor_height: 1
   connector_length: 1
-  max_steps: 80
+  max_steps: 110
   render_mode: rgb_array
   show_coordinates: false
 
