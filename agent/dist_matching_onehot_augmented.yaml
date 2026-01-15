@@ -21,7 +21,8 @@ pmd_steps: 15000
 data_type: unique # [unique, all]
 window_size: 10
 unique_window: true
-epsilon_schedule: 0.00179856115 #linear(0.0, 10, 1000000)
+epsilon_schedule: linear(0.0, 0.1, 1000000) #0.00179856115 
+subsampling_strategy: eder # [random, eder]
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later

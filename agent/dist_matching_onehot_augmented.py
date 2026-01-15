@@ -798,7 +798,8 @@ class DistMatchingEmbeddingAgent:
                  epsilon_schedule,
                  window_size,
                  unique_window,
-                 n_subsamples: Optional[int],
+                 n_subsamples,
+                 subsampling_strategy,
                  data_type: str = "unique",
                  device: str = "cpu",
                  linear_actor: bool = False,
@@ -827,6 +828,8 @@ class DistMatchingEmbeddingAgent:
         self.unique_window = unique_window
 
         self.epsilon_schedule = epsilon_schedule
+        self.subsampling_strategy = subsampling_strategy
+        assert subsampling_strategy in ['random', 'eder'], "Subsampling strategy must be either 'random' or 'eder'"
 
         self.gradient_coeff = None
 
@@ -873,7 +876,9 @@ class DistMatchingEmbeddingAgent:
             n_actions=self.n_actions, 
             gamma=self.discount, 
             window_size=window_size, 
-            n_subsamples=n_subsamples)
+            n_subsamples=n_subsamples,
+            subsampling_strategy=subsampling_strategy
+        )
         
         # Optimizers
         # self.encoder_optimizer = torch.optim.Adam(

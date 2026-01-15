@@ -8,7 +8,7 @@ from dm_env import StepType, specs
 from copy import deepcopy
 
 import numpy as np
-
+from time import time
 # torch.set_default_tensor_type(torch.FloatTensor)
 float_type = torch.float32
 
@@ -757,7 +757,7 @@ class InternalDatasetFIFO:
     """
     
     def __init__(self, dataset_type: str, n_states: int, n_actions: int, 
-                 gamma: float, window_size: int, n_subsamples: int, device: str = 'cpu'):
+                 gamma: float, window_size: int, n_subsamples: int, subsampling_strategy: str, device: str = 'cpu'):
         """
         Args:
             dataset_type: "unique" or "all"
@@ -766,6 +766,7 @@ class InternalDatasetFIFO:
             gamma: Discount factor for geometric sampling
             window_size: Number of sampling periods to keep in memory
             n_subsamples: Number of samples to return per period (None = all)
+            subsampling_strategy: Strategy for subsampling ("random" or "eder")
             device: torch device
         """
         self.dataset_type = dataset_type
@@ -783,6 +784,8 @@ class InternalDatasetFIFO:
         self._current_period_data = None
         self._current_period_idx = 0
         self._last_period_size = 0  # Track size of last added period
+        self.max_log_det = -np.inf
+        self.subsampling_strategy = subsampling_strategy
         
         self.reset()
     
@@ -1086,7 +1089,10 @@ class InternalDatasetFIFO:
         # Apply subsampling if needed
         if self.n_subsamples is not None and len(aggregated_data['next_observation']) > 0:
             assert unique is False, "Subsampling with unique state-action pairs is not supported."
-            aggregated_data = self._subsample_data(aggregated_data)
+            if self.subsampling_strategy == "random":
+                aggregated_data = self._subsample_data(aggregated_data)
+            elif self.subsampling_strategy == "eder":
+                aggregated_data = self._eder_subsampling(aggregated_data)
         
         self._sampled_data = aggregated_data
         
@@ -1206,3 +1212,73 @@ class InternalDatasetFIFO:
             'next_observation': data['next_observation'][indices],
             'alpha': data['alpha'][indices]
         }
+
+    def spd_logdet_cholesky(self, K, jitter=1e-6):
+        # K: (..., n, n), symmetric PSD/SPD kernel submatrix
+        # K = 0.5 * (K + K.transpose(-1, -2))
+        n = self.n_subsamples
+        I = torch.eye(n, device=K.device, dtype=K.dtype)
+
+        L, info = torch.linalg.cholesky_ex(K + jitter * I, upper=False, check_errors=False)
+        if torch.any(info != 0):
+            raise RuntimeError("Cholesky failed; increase jitter or check kernel definiteness.")
+        d = L.diagonal(dim1=-2, dim2=-1)
+        return 2.0 * d.log().sum(dim=-1)
+
+    def _eder_subsampling(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Subsample data using EDER method (not implemented)."""
+        
+        total_size = len(data['next_observation'])
+        
+        
+        if self.n_subsamples >= total_size:
+            utils.ColorPrint.yellow(f"Requested subsample size {self.n_subsamples} >= total size {total_size}. Returning full data.")
+            return data
+        
+        utils.ColorPrint.green(f"Subsampling {self.n_subsamples} from {total_size} transitions.")
+        
+        starting_search_time = time()
+
+        tmp_max = -np.inf
+
+        for i in range(100):
+            # Random subsampling (can be enhanced with trajectory-aware sampling)
+            indices = np.random.choice(total_size, size=self.n_subsamples, replace=False)
+            
+            sampled_data = {
+                'observation': data['observation'][indices],
+                'action': data['action'][indices],
+                'next_observation': data['next_observation'][indices],
+                'alpha': data['alpha'][indices]
+            }
+
+            # Encoding state-action pairs as unique integers
+            action_onehot = F.one_hot(sampled_data['action'].long(), self.n_actions).double().reshape(-1, self.n_actions)  # [B, |A|]
+            
+            # Outer product: [B, d] ⊗ [B, |A|] -> [B, d*|A|]
+            encoded_sa = torch.einsum('bd,ba->bda', sampled_data['observation'], action_onehot).reshape(self.n_subsamples, -1)
+
+            kernel_sa = encoded_sa@encoded_sa.T # [B, B]
+
+            log_det =self.spd_logdet_cholesky(kernel_sa)
+
+            # if np.random.rand() <= np.exp(log_det - self.max_log_det):
+            if log_det > self.max_log_det:
+
+                if self.max_log_det == -np.inf:
+                    ColorPrint.green(f"EDER subsampling with log-det: {log_det.item():.4f}  in {time() - starting_search_time:.2f}s accepted after {i+1} attempts")
+                else:
+                    ColorPrint.green(f"EDER subsampling with log-det: {log_det.item():.4f} (max: {self.max_log_det:.4f}) in {time() - starting_search_time:.2f}s accepted after {i+1} attempts")
+                if log_det > self.max_log_det:
+                    self.max_log_det = log_det.item()
+                return sampled_data
+            
+            if log_det > tmp_max:
+                tmp_max = log_det.item()
+                best_sampled_data = sampled_data
+
+
+            if log_det > self.max_log_det:
+                self.max_log_det = log_det.item()
+        ColorPrint.red(f"EDER subsampling failed to find better subset; returning best sampled subset, with log-det: {tmp_max:.4f} (max: {self.max_log_det:.4f}) in {time() - starting_search_time:.2f}s")
+        return best_sampled_data
