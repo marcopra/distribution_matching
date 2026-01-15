@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py agent=dist_matching_onehot_augmented env.render_mode=null save_video=false num_train_frames=304000 use_wandb=false agent.T_init_steps=0 configs/env=multiplerooms10_3x3 env.max_steps=${HORIZON} agent.ideal=false agent.data_type=all num_seed_frames=${3*HORIZON} agent.update_actor_every_steps=${3*HORIZON} agent.epsilon_schedule=${EPS_GREEDY} "agent.sink_schedule=${SINK_SCHEDULE}" agent.lr_actor=1 agent.pmd_steps=500 agent.window_size=10 agent.n_subsamples=2200 agent.subsampling_strategy="random"
+python pretrain.py agent=dist_matching_onehot_augmented env.render_mode=null save_video=false num_train_frames=304000 use_wandb=false agent.T_init_steps=0 configs/env=multiplerooms10_3x3 env.max_steps=${HORIZON} agent.ideal=false agent.data_type=all num_seed_frames=$((3*HORIZON)) agent.update_actor_every_steps=$((3*HORIZON)) agent.epsilon_schedule=${EPS_GREEDY} agent.sink_schedule="${SINK_SCHEDULE}" agent.lr_actor=1 agent.pmd_steps=500 agent.window_size=10 agent.n_subsamples=2200 agent.subsampling_strategy="random"
