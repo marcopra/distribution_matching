@@ -573,7 +573,6 @@ def make_kwargs(cfg):
     for key, value in cfg.env.items():
         if key not in ['name']:
             env_kwargs[key] = value
-        print(f"Setting env param: {key} = {value}")
     
     
     if hasattr(cfg.env, 'dense_reward'):

@@ -122,7 +122,7 @@ class KernelActorDiscrete(nn.Module):
         self.kernel_layer = nn.Linear(input_dim, dataset_dim, bias=False)
         
         # Layer 2: Computes logits = H @ C
-        # We want logits = H @ C
+        # We want: logits = H @ C
         # Linear computes z = H @ W^T, so W = C^T
         self.grad_coefficient = nn.Linear(dataset_dim, action_dim, bias=False)
         
@@ -475,7 +475,7 @@ class InternalDataset:
         self._traj_boundaries: Dict[int, Tuple[int, int]] = {}
         self._current_traj_idx = 0
         self._trajectory_active = False
-
+        
     
     @property
     def observation(self) -> Dict[str, torch.Tensor]:
@@ -748,3 +748,461 @@ class InternalDataset:
 
 
         return self._sampled_data
+
+class InternalDatasetFIFO:
+    """
+    FIFO-based internal dataset that maintains only the last N sampling periods.
+    Each call to get_data() marks the end of a sampling period and retrieves
+    data from the last N periods.
+    """
+    
+    def __init__(self, dataset_type: str, n_states: int, n_actions: int, 
+                 gamma: float, window_size: int, n_subsamples: int, device: str = 'cpu'):
+        """
+        Args:
+            dataset_type: "unique" or "all"
+            n_states: Number of states
+            n_actions: Number of actions
+            gamma: Discount factor for geometric sampling
+            window_size: Number of sampling periods to keep in memory
+            n_subsamples: Number of samples to return per period (None = all)
+            device: torch device
+        """
+        self.dataset_type = dataset_type
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.expected_size = n_states * n_actions
+        assert dataset_type in ("unique", "all"), "dataset_type must be 'unique' or 'all'"
+        self.n_subsamples = n_subsamples
+        self.gamma = gamma
+        self.window_size = window_size
+        self.device = torch.device(device)
+        
+        # FIFO queue: list of sampling periods, each period is a dict of tensors
+        self._periods_queue = []
+        self._current_period_data = None
+        self._current_period_idx = 0
+        self._last_period_size = 0  # Track size of last added period
+        
+        self.reset()
+    
+    def reset(self):
+        """Reset the FIFO dataset."""
+        utils.ColorPrint.yellow("Resetting FIFO internal dataset.")
+        self._periods_queue = []
+        self._current_period_idx = 0
+        self._start_new_period()
+    
+    def _start_new_period(self):
+        """Initialize a new sampling period."""
+        self._current_period_data = {
+            'observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+            'action': torch.empty((0,), device=self.device, dtype=torch.long),
+            'next_observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+            'alpha': torch.empty((0,), device=self.device, dtype=torch.double)
+        }
+        self._trajectory_idx = np.array([], dtype=np.int32)
+        self._unique_pairs = set()
+        self._prev_obs = None
+        self._traj_boundaries = {}
+        self._current_traj_idx = 0
+        self._trajectory_active = False
+        self._dummy_transition = None
+        self._dummy_first_state = False
+    
+    @property
+    def data(self) -> Dict[str, torch.Tensor]:
+        """
+        Property for compatibility with existing code that accesses dataset.data.
+        Returns aggregated data from all periods in the FIFO window plus current period.
+        """
+        if hasattr(self, '_sampled_data'):
+            return self._sampled_data
+        
+        # Aggregate data from all periods in queue
+        aggregated = self._aggregate_periods()
+        
+        
+        # Add current period data
+        if len(self._current_period_data['next_observation']) > 0:
+            return {
+                'observation': torch.cat([aggregated['observation'], self._current_period_data['observation']], dim=0),
+                'action': torch.cat([aggregated['action'], self._current_period_data['action']], dim=0),
+                'next_observation': torch.cat([aggregated['next_observation'], self._current_period_data['next_observation']], dim=0),
+                'alpha': torch.cat([aggregated['alpha'], self._current_period_data['alpha']], dim=0)
+            }
+        else:
+            return aggregated
+    
+    @property
+    def current_data_size(self) -> int:
+        """Size of current period data (number of transitions)."""
+        return self.current_period_data_size
+    
+    @property
+    def last_size(self) -> int:
+        """Size of the last period that was added to the queue."""
+        return self._last_period_size
+    
+    @property
+    def size(self) -> int:
+        """Total number of transitions across all periods in window (excluding current period)."""
+        total = sum(len(period['data']['next_observation']) for period in self._periods_queue)
+        return total
+    
+    @property
+    def current_period_data_size(self) -> int:
+        """Size of current period data."""
+        if self._current_period_data is None:
+            return 0
+        return len(self._current_period_data['next_observation'])
+    
+    @property
+    def is_complete(self) -> bool:
+        """Check if current period has all unique state-action pairs."""
+        return self.dataset_type == "unique" and len(self._unique_pairs) == self.expected_size
+    
+    def add_transition(self, time_step):
+        """Add a transition to the current sampling period."""
+        if self.dataset_type == "unique":
+            self._add_unique(time_step)
+        else:
+            self._add_all(time_step)
+    
+    def _add_unique(self, time_step):
+        """Add only unique (s,a) pairs to current period."""
+        if time_step.step_type == StepType.FIRST:
+            self._prev_obs = time_step.observation
+            self._current_traj_idx += 1
+            self._trajectory_active = True
+            return
+        
+        if not self._trajectory_active:
+            return
+        
+        if time_step.step_type in (StepType.MID, StepType.LAST):
+            pair = (np.argmax(self._prev_obs), time_step.action)
+            
+            if pair not in self._unique_pairs:
+                self._unique_pairs.add(pair)
+                
+                self._current_period_data['observation'] = torch.cat([
+                    self._current_period_data['observation'],
+                    torch.tensor(self._prev_obs, device=self.device, dtype=torch.double).unsqueeze(0)
+                ], dim=0)
+                self._current_period_data['action'] = torch.cat([
+                    self._current_period_data['action'],
+                    torch.tensor([time_step.action], device=self.device, dtype=torch.long)
+                ], dim=0)
+                self._current_period_data['next_observation'] = torch.cat([
+                    self._current_period_data['next_observation'],
+                    torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                ], dim=0)
+                
+                alpha_val = 1.0 if len(self._unique_pairs) == 1 else 0.0
+                self._current_period_data['alpha'] = torch.cat([
+                    self._current_period_data['alpha'],
+                    torch.tensor([alpha_val], device=self.device, dtype=torch.double)
+                ], dim=0)
+                
+                self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+                
+                current_idx = len(self._trajectory_idx) - 1
+                if self._current_traj_idx not in self._traj_boundaries:
+                    self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
+                else:
+                    start_idx = self._traj_boundaries[self._current_traj_idx][0]
+                    self._traj_boundaries[self._current_traj_idx] = (start_idx, current_idx)
+            
+            self._prev_obs = time_step.observation
+            if time_step.step_type == StepType.LAST:
+                self._trajectory_active = False
+    
+    def _add_all(self, time_step):
+        """Add all transitions to current period."""
+        if time_step.step_type == StepType.FIRST:
+            self._current_traj_idx += 1
+            self._trajectory_active = True
+            current_idx = len(self._trajectory_idx)
+            self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
+            
+            self._current_period_data['observation'] = torch.cat([
+                self._current_period_data['observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            
+            alpha_val = 1.0 if self._current_period_data['observation'].shape[0] == 1 else 0.0
+            self._current_period_data['alpha'] = torch.cat([
+                self._current_period_data['alpha'],
+                torch.tensor([alpha_val], device=self.device, dtype=torch.double)
+            ], dim=0)
+            
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+        
+        elif time_step.step_type == StepType.MID:
+            if not self._trajectory_active:
+                return
+            
+            self._current_period_data['observation'] = torch.cat([
+                self._current_period_data['observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            self._current_period_data['action'] = torch.cat([
+                self._current_period_data['action'],
+                torch.tensor([time_step.action], device=self.device, dtype=torch.long)
+            ], dim=0)
+            self._current_period_data['next_observation'] = torch.cat([
+                self._current_period_data['next_observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            self._current_period_data['alpha'] = torch.cat([
+                self._current_period_data['alpha'],
+                torch.tensor([0.0], device=self.device, dtype=torch.double)
+            ], dim=0)
+            
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+            start_idx = self._traj_boundaries[self._current_traj_idx][0]
+            self._traj_boundaries[self._current_traj_idx] = (start_idx, len(self._trajectory_idx) - 1)
+        
+        elif time_step.step_type == StepType.LAST:
+            if not self._trajectory_active:
+                return
+            
+            self._current_period_data['action'] = torch.cat([
+                self._current_period_data['action'],
+                torch.tensor([time_step.action], device=self.device, dtype=torch.long)
+            ], dim=0)
+            self._current_period_data['next_observation'] = torch.cat([
+                self._current_period_data['next_observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            self._trajectory_active = False
+    
+    def add_dummy_transition(self):
+        """Add a dummy transition to ensure at least one datapoint."""
+        
+        if not hasattr(self, '_dummy_transition') or self._dummy_first_state is False:
+            self._dummy_first_state = True
+            eye_tensor = torch.eye(self.n_states, device=self.device, dtype=torch.double)
+            indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
+            if indices.shape[0] == 0:
+                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
+                self._dummy_first_state = False
+            # TODO at the moment using second state for alpha not the real first, change this in the future
+            self._dummy_transition = {
+                'observation': self.data['observation'][indices[0]].unsqueeze(0),
+                'action': self.data['action'][indices[0]].unsqueeze(0),
+                'next_observation': self.data['next_observation'][indices[0]].unsqueeze(0),
+                'alpha': self.data['alpha'][indices[0]].unsqueeze(0)
+            }
+        
+        self._sampled_data['observation'] = torch.cat([self._dummy_transition['observation'], self._sampled_data['observation']], dim=0)
+        self._sampled_data['action'] = torch.cat([self._dummy_transition['action'], self._sampled_data['action']], dim=0)
+        self._sampled_data['next_observation'] = torch.cat([self._dummy_transition['next_observation'], self._sampled_data['next_observation']], dim=0)
+        self._sampled_data['alpha'] = torch.cat([self._dummy_transition['alpha'], self._sampled_data['alpha']], dim=0)
+            
+
+    
+    def _aggregate_periods(self) -> Dict[str, torch.Tensor]:
+        """Concatenate data from all periods in the window."""
+        if len(self._periods_queue) == 0:
+            return {
+                'observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+                'action': torch.empty((0,), device=self.device, dtype=torch.long),
+                'next_observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+                'alpha': torch.empty((0,), device=self.device, dtype=torch.double)
+            }
+        
+        all_obs = []
+        all_actions = []
+        all_next_obs = []
+        all_alpha = []
+        
+        for period in self._periods_queue:
+            data = period['data']
+            if len(data['next_observation']) > 0:
+                all_obs.append(data['observation'])
+                all_actions.append(data['action'])
+                all_next_obs.append(data['next_observation'])
+                all_alpha.append(data['alpha'])
+        
+        if len(all_obs) == 0:
+            return {
+                'observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+                'action': torch.empty((0,), device=self.device, dtype=torch.long),
+                'next_observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+                'alpha': torch.empty((0,), device=self.device, dtype=torch.double)
+            }
+        
+        return {
+            'observation': torch.cat(all_obs, dim=0),
+            'action': torch.cat(all_actions, dim=0),
+            'next_observation': torch.cat(all_next_obs, dim=0),
+            'alpha': torch.cat(all_alpha, dim=0)
+        }
+    
+    def get_data(self, unique=False) -> Dict[str, torch.Tensor]:
+        """
+        End current sampling period, clean incomplete trajectories, add to FIFO queue, 
+        maintain window size, and return aggregated data from last N periods.
+        
+        Returns:
+            Dictionary with concatenated data from all periods in window
+        """
+        # Clean incomplete trajectories from current period
+        self._clean_incomplete_trajectories()
+        
+        # Store current period data with metadata
+        period_entry = {
+            'data': deepcopy(self._current_period_data),
+            'trajectory_idx': self._trajectory_idx.copy(),
+            'traj_boundaries': deepcopy(self._traj_boundaries),
+            'period_idx': self._current_period_idx
+        }
+        
+        # Track the size of this period
+        self._last_period_size = len(self._current_period_data['next_observation'])
+        
+        # Add to queue
+        self._periods_queue.append(period_entry)
+        utils.ColorPrint.green(f"Completed sampling period {self._current_period_idx} with {self._last_period_size} transitions.")
+        
+        # Maintain FIFO: remove oldest if exceeds window size
+        if len(self._periods_queue) > self.window_size:
+            removed = self._periods_queue.pop(0)
+            utils.ColorPrint.yellow(f"Removed oldest period {removed['period_idx']} from FIFO queue.")
+        
+        # Aggregate data from all periods in window
+        aggregated_data = self._aggregate_periods()
+        
+        # Start new period
+        self._current_period_idx += 1
+        self._start_new_period()
+        
+        # Filter for unique state-action pairs if requested
+        if unique and len(aggregated_data['next_observation']) > 0:
+            aggregated_data = self._filter_unique_state_action_pairs(aggregated_data)
+        
+        # Apply subsampling if needed
+        if self.n_subsamples is not None and len(aggregated_data['next_observation']) > 0:
+            assert unique is False, "Subsampling with unique state-action pairs is not supported."
+            aggregated_data = self._subsample_data(aggregated_data)
+        
+        self._sampled_data = aggregated_data
+        
+        return aggregated_data
+    
+    def _filter_unique_state_action_pairs(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Filter data to keep only unique state-action pairs.
+        For duplicate (s,a) pairs, keeps the first occurrence.
+        
+        Args:
+            data: Dictionary with observation, action, next_observation, alpha tensors
+            
+        Returns:
+            Filtered dictionary with only unique (s,a) pairs
+        """
+        if len(data['observation']) == 0:
+            return data
+        
+        # Convert observations to state indices (assuming one-hot encoding)
+        state_indices = torch.argmax(data['observation'], dim=1).cpu().numpy()
+        action_indices = data['action'].cpu().numpy()
+        
+        # Track unique (state, action) pairs and their first occurrence indices
+        seen_pairs = set()
+        unique_indices = []
+        
+        for idx in range(len(state_indices)):
+            pair = (int(state_indices[idx]), int(action_indices[idx]))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                unique_indices.append(idx)
+        
+        utils.ColorPrint.green(f"Filtered {len(state_indices)} transitions to {len(unique_indices)} unique state-action pairs.")
+        
+        # Return filtered data
+        return {
+            'observation': data['observation'][unique_indices],
+            'action': data['action'][unique_indices],
+            'next_observation': data['next_observation'][unique_indices],
+            'alpha': data['alpha'][unique_indices]
+        }
+    
+    def _clean_incomplete_trajectories(self):
+        """Remove data from incomplete trajectories in the current period."""
+        if len(self._traj_boundaries) == 0:
+            return
+        
+        # Find incomplete trajectories (where trajectory is still active)
+        incomplete_traj_ids = []
+        for traj_id in self._traj_boundaries.keys():
+            # Check if this trajectory is still active (not properly terminated)
+            if traj_id == self._current_traj_idx and self._trajectory_active:
+                incomplete_traj_ids.append(traj_id)
+        
+        if len(incomplete_traj_ids) == 0:
+            return
+        
+        utils.ColorPrint.yellow(f"Cleaning {len(incomplete_traj_ids)} incomplete trajectory/trajectories from current period.")
+        
+        # Find indices to keep (all indices not belonging to incomplete trajectories)
+        indices_to_keep = []
+        for idx, traj_id in enumerate(self._trajectory_idx):
+            if traj_id not in incomplete_traj_ids:
+                indices_to_keep.append(idx)
+        
+        if len(indices_to_keep) == 0:
+            # All data was from incomplete trajectories, reset current period
+            utils.ColorPrint.yellow("All data in current period was from incomplete trajectories. Resetting period.")
+            self._start_new_period()
+            return
+        
+        # Filter data to keep only complete trajectories
+        self._current_period_data['observation'] = self._current_period_data['observation'][indices_to_keep]
+        self._current_period_data['alpha'] = self._current_period_data['alpha'][indices_to_keep]
+        
+        # For action and next_observation, we need to handle the offset
+        # These arrays may have one less element than observation
+        action_indices = [i for i in indices_to_keep if i < len(self._current_period_data['action'])]
+        self._current_period_data['action'] = self._current_period_data['action'][action_indices]
+        self._current_period_data['next_observation'] = self._current_period_data['next_observation'][action_indices]
+        
+        # Update trajectory_idx
+        self._trajectory_idx = self._trajectory_idx[indices_to_keep]
+        
+        # Remove incomplete trajectories from boundaries
+        for traj_id in incomplete_traj_ids:
+            del self._traj_boundaries[traj_id]
+        
+        # Rebuild trajectory boundaries with new indices
+        new_boundaries = {}
+        for traj_id in self._traj_boundaries.keys():
+            # Find min and max indices for this trajectory in the filtered data
+            traj_indices = [i for i, tid in enumerate(self._trajectory_idx) if tid == traj_id]
+            if len(traj_indices) > 0:
+                new_boundaries[traj_id] = (min(traj_indices), max(traj_indices))
+        
+        self._traj_boundaries = new_boundaries
+        utils.ColorPrint.green(f"Cleaned period now has {len(self._current_period_data['observation'])} observations.")
+    
+    def _subsample_data(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Subsample data using geometric distribution based on gamma."""
+        total_size = len(data['next_observation'])
+        
+        if self.n_subsamples >= total_size:
+            utils.ColorPrint.yellow(f"Requested subsample size {self.n_subsamples} >= total size {total_size}. Returning full data.")
+            return data
+        
+        utils.ColorPrint.green(f"Subsampling {self.n_subsamples} from {total_size} transitions.")
+        
+        # Random subsampling (can be enhanced with trajectory-aware sampling)
+        indices = np.random.choice(total_size, size=self.n_subsamples, replace=False)
+        
+        return {
+            'observation': data['observation'][indices],
+            'action': data['action'][indices],
+            'next_observation': data['next_observation'][indices],
+            'alpha': data['alpha'][indices]
+        }

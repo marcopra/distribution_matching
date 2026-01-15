@@ -2,6 +2,7 @@ from collections import OrderedDict
 import os
 import hydra
 import numpy as np
+import numpy.ma as ma
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,8 +20,9 @@ from matplotlib.patches import Patch, Rectangle
 import utils
 from distribution_matching import DistributionVisualizer
 torch.set_default_dtype(torch.double)
-from agent.utils import InternalDataset
+from agent.utils import InternalDatasetFIFO
 
+SINK_STATE_VALUE = 1
 
 # ============================================================================
 # Neural Network Components
@@ -31,26 +33,22 @@ class Encoder(nn.Module):
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
-        self.temperature = 0.01
 
-        # self.fc = nn.Identity()
+        self.fc = nn.Identity()
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
-        self.fc =  nn.Sequential(
-            nn.Linear(obs_shape[0], hidden_dim, bias=False),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, feature_dim, bias=False),
-            # nn.LayerNorm(feature_dim),
-        )
+        # self.fc =  nn.Sequential(
+        #     nn.Linear(obs_shape[0], hidden_dim, bias=False),
+        #     # nn.ReLU(),
+        #     nn.Linear(hidden_dim, feature_dim, bias=False),
+        #     # nn.LayerNorm(feature_dim),
+        # )
 
-        # nn.init.eye_(self.fc[0].weight)
         self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
-        # h = F.normalize(h, p=2, dim=-1)
-        h = F.softmax(h/self.temperature, dim=-1)
-
+  
         return h
 
 class TransitionModel(nn.Module):
@@ -77,6 +75,7 @@ class TransitionModel(nn.Module):
         T_optimal = phi_next.T @ torch.linalg.solve(gram_matrix, psi)
         return T_optimal
 
+    
 
 # ============================================================================
 # Distribution Matching Mathematics
@@ -115,18 +114,46 @@ class DistributionMatcher:
 
     def compute_nu_pi(
             self, 
-            phi_all_next_obs:torch.Tensor, 
-            BM: torch.Tensor,
-            alpha: torch.Tensor
+            phi_all_next_obs: torch.Tensor, 
+            psi_all_obs_action: torch.Tensor,
+            K: torch.Tensor,
+            M: torch.Tensor,
+            alpha: torch.Tensor,
+            epsilon: float
         ) -> torch.Tensor:
         """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
-        N = BM.shape[0]
-        identity = torch.eye(N, device=self.device)
-        
+       
+        N = K.shape[0]
+       
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
 
-        inv_term = torch.linalg.solve(identity - self.gamma * BM, alpha)
+        # ** COMPUTATION STEP **
+        # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
+        A = K + self.lambda_reg * torch.eye(N, device=self.device)
+        L = torch.linalg.cholesky(A)
+        BM = torch.cholesky_solve(M, L)
         
-        occupancy = (1 - self.gamma) *  phi_all_next_obs.T @ inv_term
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_BM[:-1, :-1] = BM
+        tilde_BM[-1, -1] = 1.0
+
+        inv_term = torch.linalg.solve( torch.eye(N+1, device=self.device) - self.gamma * tilde_BM, tilde_alpha)
+        
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state[-1] = SINK_STATE_VALUE*epsilon
+
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
+        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
+        tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
+        tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_all_next_obs_transposed[-1, -1] = 1.0 # TODO patch 0.1
+
+        occupancy = (1 - self.gamma) *  tilde_phi_all_next_obs_transposed @ inv_term
+        # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
         return occupancy
 
     def compute_BM(
@@ -139,9 +166,6 @@ class DistributionMatcher:
         identity = torch.eye(N, device=self.device)
         gram_matrix = psi @ psi.T + self.lambda_reg * identity
 
-        # s,v,d= torch.linalg.svd(gram_matrix)
-        # print(f"SVD of gram matrix:  {v}, V shape {v.shape}, D shape {d.shape}")
-        # exit()
         
         L = torch.linalg.cholesky(gram_matrix)
         BM = torch.cholesky_solve(M, L)
@@ -150,39 +174,74 @@ class DistributionMatcher:
     def compute_gradient_coefficient(
             self, 
             M: torch.Tensor, 
-            K: torch.Tensor,
             phi_all_next_obs:torch.Tensor, 
             psi_all_obs_action:torch.Tensor, 
-            alpha:torch.Tensor
+            alpha:torch.Tensor,
+            epsilon: float
         ) -> torch.Tensor:
         """Compute gradient coefficient for policy update."""
         # Identity matrix
-        I_n = torch.eye(psi_all_obs_action.shape[0], device=self.device)
+        I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
 
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state[-1] = SINK_STATE_VALUE*epsilon
+
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
+        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
+        tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
+        assert sink_state.shape[0] == upper_left.shape[0], "Sink state and upper left matrix row size mismatch"
+        tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_all_next_obs_transposed[-1, -1] = 1.0
+        tilde_phi_all_next_obs = tilde_phi_all_next_obs_transposed.T
+        assert torch.all(tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] == sink_state), "Last column of tilde_phi_all_next_obs should be sink_state"
+
+        # tilde_psi_all_obs_action = torch.zeros((psi_all_obs_action.shape[0]+1, psi_all_obs_action.shape[1]+1), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)
+        # tilde_psi_all_obs_action[:-1, :-1] = psi_all_obs_action
+        # tilde_psi_all_obs_action[-1, :-1] = 1.0
+        # assert torch.all(tilde_psi_all_obs_action[-1, :-1] == torch.ones((1, tilde_psi_all_obs_action.shape[1]-1), device=tilde_psi_all_obs_action.device, dtype=tilde_psi_all_obs_action.dtype)), "Last row of tilde_psi_all_obs_action should be 1s"
+
+        # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
-        A = psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg * I_n
+        A = psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg * I_n_plus1
+        tilde_A = torch.zeros(A.shape[0] + 1, A.shape[1] + 1, device=A.device, dtype=A.dtype)
+        tilde_A[:-1, :-1] = A
+        tilde_A[-1, -1] = 1.0
 
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
+        tilde_M[:-1, :-1] = M
+        tilde_M[-1, -1] = 1.0
+
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: BM = A⁻¹M
         L = torch.linalg.cholesky(A)
         BM = torch.cholesky_solve(M, L)
+        tilde_B_tilde_M = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_B_tilde_M[:-1, :-1] = BM
+        tilde_B_tilde_M[-1, -1] = 1.0
 
-        # gradient = 2 γ (1 - γ)² A⁻ᵀ (I - γ A⁻¹M)⁻ᵀΦΦᵀ(I - γ A⁻¹M)⁻¹ α
+        # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
         # Using the precomputed terms and solves:
-        # (I - γ A⁻¹M)⁻ᵀΦ = [Φᵀ(I - γ A⁻¹M)⁻¹]ᵀ
-        symmetric_term = torch.linalg.solve((I_n - self.gamma * BM).T, phi_all_next_obs)
+        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
+        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
+        symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_all_next_obs)
 
-        # Left term: A⁻ᵀ(I - γBM)⁻ᵀΦ
-        # Solve A^T x = left_term_without_b using Cholesky
-        L_T = torch.linalg.cholesky(A.T)
+        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
+        # Solve Ãᵀ x = left_term_without_b using Cholesky
+        L_T = torch.linalg.cholesky(tilde_A.T)
         left_term = torch.cholesky_solve(symmetric_term, L_T)
 
-        # Right term: Φᵀ(I - γBM)⁻¹α
-        right_term = symmetric_term.T @ alpha
-
+        
+        # Right term: Φ̃ᵀ(I - γB̃M̃)⁻¹ α̃
+        right_term = symmetric_term.T @ tilde_alpha
         gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
-
+      
         return gradient
-
     
 # ============================================================================
 # Distribution Visualizer
@@ -202,8 +261,6 @@ class EmbeddingDistributionVisualizer:
         self.n_states = agent.n_states
         self.n_actions = agent.n_actions
 
-
-        
         # Get grid dimensions
         valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
         min_x = min(cell[0] for cell in valid_cells)
@@ -214,7 +271,6 @@ class EmbeddingDistributionVisualizer:
         valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
         self.all_state_ids_one_hot = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
 
-        
         if hasattr(self.env, 'lava') and self.env.lava:
             min_x = min(min_x, -1)
             min_y = min(min_y, -1)
@@ -224,10 +280,29 @@ class EmbeddingDistributionVisualizer:
         self.grid_width = max_x - min_x + 1
         self.grid_height = max_y - min_y + 1
         
-        # Action symbols and colors
-        self.action_symbols = {0: '↑', 1: '↓', 2: '←', 3: '→'}
-        self.action_colors = ['red', 'blue', 'green', 'orange']
-        self.action_names = ['up', 'down', 'left', 'right']
+        # Action symbols and colors - support both 4 and 8 actions
+        if self.n_actions == 4:
+            self.action_symbols = {0: '↑', 1: '↓', 2: '←', 3: '→'}
+            self.action_colors = ['red', 'blue', 'green', 'orange']
+            self.action_names = ['up', 'down', 'left', 'right']
+        elif self.n_actions == 8:
+            self.action_symbols = {
+                0: '↑', 1: '↓', 2: '←', 3: '→',
+                4: '↖', 5: '↗', 6: '↙', 7: '↘'
+            }
+            self.action_colors = [
+                'red', 'blue', 'green', 'orange',
+                'purple', 'cyan', 'magenta', 'brown'
+            ]
+            self.action_names = [
+                'up', 'down', 'left', 'right',
+                'up-left', 'up-right', 'down-left', 'down-right'
+            ]
+        else:
+            # Fallback for other action counts
+            self.action_symbols = {i: str(i) for i in range(self.n_actions)}
+            self.action_colors = plt.cm.tab10(np.linspace(0, 1, self.n_actions)).tolist()
+            self.action_names = [f'action_{i}' for i in range(self.n_actions)]
     
     def _state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
         """Convert state distribution vector to 2D grid."""
@@ -248,15 +323,16 @@ class EmbeddingDistributionVisualizer:
             one_hot_unique_states = torch.eye(self.n_states).to(self.agent.device)
             
             phi_states = self.agent.encoder(one_hot_unique_states).cpu()
-        
+            # augment phi_states to account for extra row in phi_all_obs
+            zero_col = torch.zeros((phi_states.shape[0], 1), device=phi_states.device, dtype=phi_states.dtype)
+            phi_states = torch.cat([phi_states, zero_col], dim=-1)  # [n_states, feature_dim + 1]
+            
 
             # Compute distribution: φᵀ @ alpha
-            # H = phi_states @ self.agent._phi_all_obs.cpu().T
-            H = phi_states @ phi_states.T
+            H = phi_states @ self.agent._phi_all_obs.cpu().T
+
             
-            
-            nu_init = H #@ self.agent._alpha
-            utils.ColorPrint.yellow("Kernel matrix insted of 'fake' initial distribution used.")
+            nu_init = H @ self.agent._alpha
         return nu_init.flatten().numpy()
     
     def _compute_current_distribution(self) -> np.ndarray:
@@ -303,59 +379,6 @@ class EmbeddingDistributionVisualizer:
         
         return policy_per_state
     
-    def _compute_state_correlation_matrix(self) -> np.ndarray:
-        """Compute correlation matrix between encoded unique states."""
-        with torch.no_grad():
-            # Get embeddings for all valid states
-            valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
-            valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
-            
-            one_hot_states = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
-            embeddings = self.agent.encoder(one_hot_states).cpu()  # [n_states, feature_dim]
-            
-            # Compute correlation matrix: Φ @ Φᵀ
-            correlation_matrix = embeddings @ embeddings.T
-            
-        return correlation_matrix.numpy()
-    
-    def _compute_state_to_states_correlation(self) -> np.ndarray:
-        """
-        Compute for each state how much it deviates from orthogonality with other states.
-        
-        For orthonormal embeddings we want:
-        - φ(s) · φ(s') ≈ 0 for s ≠ s' (orthogonal)
-        - ||φ(s)|| = 1 (normalized, enforced by encoder)
-        
-        Returns:
-            Array of shape [n_states] with average absolute correlation for each state.
-            Values close to 0.0 indicate good orthogonality.
-            Values close to 1.0 indicate poor orthogonality (states are aligned).
-        """
-        with torch.no_grad():
-            # Get embeddings for all states
-            one_hot_states = torch.eye(self.n_states).to(self.agent.device)
-            embeddings = self.agent.encoder(one_hot_states).cpu()  # [n_states, feature_dim]
-            
-            # Compute Gram matrix (correlation matrix): Φ @ Φᵀ
-            # For normalized embeddings: G[i,j] = cos(angle between φ(i) and φ(j))
-            gram_matrix = embeddings @ embeddings.T  # [n_states, n_states]
-            
-            # For each state, compute average deviation from orthogonality
-            # We want off-diagonal elements to be close to 0
-            state_orthogonality_deviation = torch.zeros(self.n_states)
-            
-            for i in range(self.n_states):
-                # Get correlations with all other states (exclude self)
-                correlations = gram_matrix[i].clone()
-                correlations[i] = 0.0  # Exclude self-correlation
-                
-                # Average absolute correlation (deviation from orthogonality)
-                # |cos(θ)| where θ is angle between embeddings
-                # 0.0 = orthogonal (good), 1.0 = aligned (bad)
-                state_orthogonality_deviation[i] = torch.abs(correlations).sum()#.mean()
-            
-        return state_orthogonality_deviation.numpy()
-    
     def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False):
         """
         Plot 2D projection of state embeddings using PCA or t-SNE.
@@ -371,11 +394,6 @@ class EmbeddingDistributionVisualizer:
             
             one_hot_states = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
             embeddings = self.agent.encoder(one_hot_states).cpu().numpy()
-        
-        # Get states in dataset
-        dataset_dict = self.agent.dataset._sampled_data if hasattr(self.agent.dataset, '_sampled_data') else self.agent.dataset.data
-        dataset_observations = dataset_dict['observation']
-        dataset_state_indices = set(torch.argmax(dataset_observations, dim=1).numpy().tolist())
         
         # Dimensionality reduction
         if use_tsne:
@@ -393,32 +411,16 @@ class EmbeddingDistributionVisualizer:
         # Color code by state ID or grid position
         colors = plt.cm.viridis(np.linspace(0, 1, len(valid_ids)))
         
-        for idx, (cell, embedding_2d, state_id) in enumerate(zip(valid_cells, embeddings_2d, valid_ids)):
-            # Use circle for states in dataset, triangle for states not in dataset
-            if state_id in dataset_state_indices:
-                marker = 'o'  # circle
-            else:
-                marker = '^'  # triangle
-            
+        for idx, (cell, embedding_2d) in enumerate(zip(valid_cells, embeddings_2d)):
             ax.scatter(embedding_2d[0], embedding_2d[1], 
-                      c=[colors[idx]], s=100, edgecolors='black', linewidth=1.5, marker=marker)
+                      c=[colors[idx]], s=100, edgecolors='black', linewidth=1.5)
             ax.annotate(f"{cell}", (embedding_2d[0], embedding_2d[1]), 
-                       fontsize=8, ha='center', va='center', color='darkblue', fontweight='bold')
+                       fontsize=8, ha='center', va='center', color='green', fontweight='bold')
         
         ax.set_xlabel(f'{method_name} Component 1')
         ax.set_ylabel(f'{method_name} Component 2')
         ax.set_title(f'State Embeddings Visualization ({method_name})')
         ax.grid(True, alpha=0.3)
-        
-        # Add legend
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', 
-                   markersize=8, label='In Dataset'),
-            Line2D([0], [0], marker='^', color='w', markerfacecolor='gray', 
-                   markersize=8, label='Not in Dataset')
-        ]
-        ax.legend(handles=legend_elements, loc='upper right')
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -433,147 +435,56 @@ class EmbeddingDistributionVisualizer:
             step: Current training step
             save_path: Path to save figure (optional)
         """
-        fig = plt.figure(figsize=(24, 10))
+        # Adjust figure size based on number of actions
+        n_action_cols = min(self.n_actions, 8)
+        fig = plt.figure(figsize=(5 * max(5, n_action_cols), 12))
         
-        # Add parameter text
+        # Compute current epsilon value
+        epsilon = utils.schedule(self.agent.epsilon_schedule, step)
+        
+        # Get dataset novelty statistics
+        novelty = self.agent._dataset_novelty_stats
+        
+        # Add parameter text with dataset novelty info
         param_text = (
             f"Step: {step}\n"
             f"γ = {self.agent.discount}\n"
             f"η = {self.agent.lr_actor}\n"
             f"λ = {self.agent.lambda_reg}\n"
-            f"PMD steps = {self.agent.pmd_steps}"
+            f"ε = {epsilon:.6f}\n"
+            f"PMD steps = {self.agent.pmd_steps}\n"
+            f"Actions = {self.n_actions}\n"
+            f"\nDataset Novelty:\n"
+            f"Current size: {novelty['total_current']}\n"
+            f"New (s,a): {novelty['new_pairs']} ({novelty['new_percentage']:.1f}%)\n"
+            f"Old (s,a): {novelty['old_pairs']}\n"
+            f"Prev unique: {novelty['total_previous']}\n"
+            f"New s': {novelty['new_next_states']} ({novelty['next_states_new_percentage']:.1f}%)\n"
+            f"Old s': {novelty['old_next_states']}\n"
+            f"Prev unique s': {novelty['total_previous_next_states']}"
         )
         fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        # Create subplot grid: 2x3 layout for the 6 plots
-        ax_correlation = plt.subplot2grid((2, 3), (0, 0), colspan=1)
-        ax_state_corr = plt.subplot2grid((2, 3), (0, 1), colspan=1)  # New plot
-        ax_dataset = plt.subplot2grid((2, 3), (0, 2), colspan=1)
-        ax_arrows = plt.subplot2grid((2, 3), (1, 0), colspan=1)
-        ax_bars = plt.subplot2grid((2, 3), (1, 1), colspan=1)
-        ax_placeholder = plt.subplot2grid((2, 3), (1, 2), colspan=1)  # Placeholder for future use
-        ax_placeholder.axis('off')  # Hide for now
-        
-        # Compute and plot correlation matrix
-        correlation_matrix = self._compute_state_correlation_matrix()
-        self._plot_state_correlations(ax_correlation, correlation_matrix)
-        
-        # Compute and plot state-to-states correlation
-        state_correlations = self._compute_state_to_states_correlation()
-        self._plot_state_to_states_correlation(ax_state_corr, state_correlations)
-        
-        # Plot dataset occupancy
-        self._plot_dataset_occupancy(ax_dataset)
-        
-        # Plot policy
-        policy_per_state = self._get_policy_per_state()
-        self._plot_policy_arrows(ax_arrows, policy_per_state)
-        self._plot_policy_bars(ax_bars, policy_per_state)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"\nVisualization saved to: {save_path}")
-            plt.close(fig)
-    
-    def _plot_state_correlations(self, ax, correlation_matrix):
-        """Plot correlation matrix heatmap for encoded states."""
-        im = ax.imshow(correlation_matrix, cmap='RdBu_r', interpolation='nearest', 
-                      vmin=-1, vmax=1, aspect='auto')
-        ax.set_title('State Embedding Correlations\n(Φ @ Φᵀ)')
-        ax.set_xlabel('State Index')
-        ax.set_ylabel('State Index')
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label('Correlation', rotation=270, labelpad=15)
-        
-        # Add grid for better readability
-        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-    
-    def _plot_state_to_states_correlation(self, ax, state_correlations):
-        """
-        Plot heatmap showing orthogonality quality of each state's embedding.
-        
-        The visualization shows how much each state deviates from being orthogonal
-        to all other states. Lower values (lighter colors) indicate better orthogonality.
-        
-        Color interpretation:
-        - Light yellow: embeddings are nearly orthogonal to others (GOOD)
-        - Dark red: embeddings are aligned with others (BAD - representation collapse)
-        """
-        # Convert to grid matching environment structure
-        normalized_state_correlations = state_correlations #/ max(state_correlations + 1e-10)
-        grid = self._state_dist_to_grid(normalized_state_correlations)
-        
-        # Plot with YlOrRd colormap: yellow (good orthogonality) to red (poor orthogonality)
-        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest', vmin=0)
-        ax.set_title('Orthogonality Quality\n(avg |⟨φ(s), φ(s\')⟩| for s≠s\')\nLower = Better')
-        ax.set_xlabel('x')
-        ax.set_ylabel('y')
-        
-        # Add grid
-        ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
-        ax.grid(which='minor', color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
-        
-        # Highlight dead state if lava enabled
-        if hasattr(self.env, 'lava') and self.env.lava:
-            dead_grid_x = -1 - self.min_x
-            dead_grid_y = -1 - self.min_y
-            dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
-                                 fill=False, edgecolor='#CF1020', linewidth=3)
-            ax.add_patch(dead_rect)
-        
-        # Add colorbar with clear labels
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label('Deviation from Orthogonality', 
-                      rotation=270, labelpad=20)
-        
-
-        
-    
-    def plot_results_old(self, step: int, save_path: str = None):
-        """
-        Create comprehensive visualization of learning progress.
-        
-        Args:
-            step: Current training step
-            save_path: Path to save figure (optional)
-        """
-        fig = plt.figure(figsize=(24, 12))
-        
-        # Add parameter text
-        param_text = (
-            f"Step: {step}\n"
-            f"γ = {self.agent.discount}\n"
-            f"η = {self.agent.lr_actor}\n"
-            f"λ = {self.agent.lambda_reg}\n"
-            f"PMD steps = {self.agent.pmd_steps}"
-        )
-        fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        # Create subplot grid (now 2x5 to include dataset occupancy)
+        # Create subplot grid
         ax_init = plt.subplot2grid((2, 5), (0, 0), colspan=1)
         ax_current = plt.subplot2grid((2, 5), (0, 1), colspan=1)
-        ax_dataset = plt.subplot2grid((2, 5), (0, 2), colspan=1)  # New subplot
+        ax_dataset = plt.subplot2grid((2, 5), (0, 2), colspan=1)
         ax_arrows = plt.subplot2grid((2, 5), (0, 3), colspan=1)
         ax_bars = plt.subplot2grid((2, 5), (0, 4), colspan=1)
         
-        # Second row: action heatmaps
-        ax_actions = [plt.subplot2grid((2, 5), (1, i), colspan=1) for i in range(4)]
+        # Second row: action heatmaps (up to 5, or adjust for 8 actions)
+        n_heatmap_cols = min(5, self.n_actions)
+        ax_actions = [plt.subplot2grid((2, 5), (1, i), colspan=1) for i in range(n_heatmap_cols)]
         
         # Compute distributions
         nu_init = self._compute_initial_distribution()
-        nu_current = np.zeros(self.n_states) # TODO remove
+        nu_current = np.zeros(self.n_states)
         
         # Plot distributions
         self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
         self._plot_distribution(ax_current, nu_current, 'Current Occupancy')
-        self._plot_dataset_occupancy(ax_dataset)  # New plot
+        self._plot_dataset_occupancy(ax_dataset)
         
         # Plot policy
         policy_per_state = self._get_policy_per_state()
@@ -666,9 +577,11 @@ class EmbeddingDistributionVisualizer:
             ax.add_patch(rect)
             
             probs = policy_per_state[s_idx]
-            bar_width = 0.15
-            bar_spacing = 0.2
-            start_x = x - 1.5 * bar_spacing
+            # Adjust bar width and spacing based on number of actions
+            total_width = 0.7
+            bar_width = total_width / self.n_actions * 0.8
+            bar_spacing = total_width / self.n_actions
+            start_x = x - total_width / 2 + bar_spacing / 2
             max_bar_height = 0.7
             
             for a_idx in range(self.n_actions):
@@ -684,13 +597,120 @@ class EmbeddingDistributionVisualizer:
         legend_elements = [Patch(facecolor=self.action_colors[i], 
                                 label=self.action_names[i])
                           for i in range(self.n_actions)]
-        ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=6 if self.n_actions > 4 else 8)
     
     def _plot_action_heatmaps(self, axes_list, policy_per_state):
         """Plot heatmaps for each action's probability distribution."""
-        # Metodo rimosso - non più necessario
-        pass
+        # Only plot up to the number of available axes
+        num_plots = min(len(axes_list), self.n_actions)
+        
+        for a_idx in range(num_plots):
+            ax = axes_list[a_idx]
+            grid_action = np.zeros((self.grid_height, self.grid_width))
+            
+            for s_idx in range(self.n_states):
+                cell = self.env.idx_to_state[s_idx]
+                grid_x = cell[0] - self.min_x
+                grid_y = cell[1] - self.min_y
+                grid_action[grid_y, grid_x] = policy_per_state[s_idx, a_idx]
+            
+            im = ax.imshow(grid_action, cmap='YlOrRd', interpolation='nearest',
+                          vmin=0, vmax=1)
+            ax.set_title(f'π({self.action_names[a_idx]}|s)')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            ax.set_xticks(np.arange(-0.5, self.grid_width, 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, self.grid_height, 1), minor=True)
+            ax.grid(which='minor', color='white', linestyle='-',
+                   linewidth=0.5, alpha=0.5)
+            
+            if hasattr(self.env, 'lava') and self.env.lava:
+                dead_grid_x = -1 - self.min_x
+                dead_grid_y = -1 - self.min_y
+                dead_rect = Rectangle((dead_grid_x - 0.5, dead_grid_y - 0.5), 1, 1,
+                                     fill=False, edgecolor='#CF1020', linewidth=2)
+                ax.add_patch(dead_rect)
+            
+            plt.colorbar(im, ax=ax)
+        
+        # Hide unused axes if n_actions < len(axes_list)
+        for a_idx in range(num_plots, len(axes_list)):
+            axes_list[a_idx].axis('off')
     
+    def plot_results(self, step: int, save_path: str = None):
+        """
+        Create comprehensive visualization of learning progress.
+        
+        Args:
+            step: Current training step
+            save_path: Path to save figure (optional)
+        """
+        # Adjust figure size based on number of actions
+        n_action_cols = min(self.n_actions, 8)
+        fig = plt.figure(figsize=(5 * max(5, n_action_cols), 12))
+        
+        # Compute current epsilon value
+        epsilon = utils.schedule(self.agent.epsilon_schedule, step)
+        
+        # Get dataset novelty statistics
+        novelty = self.agent._dataset_novelty_stats
+        
+        # Add parameter text with dataset novelty info
+        param_text = (
+            f"Step: {step}\n"
+            f"γ = {self.agent.discount}\n"
+            f"η = {self.agent.lr_actor}\n"
+            f"λ = {self.agent.lambda_reg}\n"
+            f"ε = {epsilon:.6f}\n"
+            f"PMD steps = {self.agent.pmd_steps}\n"
+            f"Actions = {self.n_actions}\n"
+            f"\nDataset Novelty:\n"
+            f"Current size: {novelty['total_current']}\n"
+            f"New (s,a): {novelty['new_pairs']} ({novelty['new_percentage']:.1f}%)\n"
+            f"Old (s,a): {novelty['old_pairs']}\n"
+            f"Prev unique: {novelty['total_previous']}\n"
+            f"New s': {novelty['new_next_states']} ({novelty['next_states_new_percentage']:.1f}%)\n"
+            f"Old s': {novelty['old_next_states']}\n"
+            f"Prev unique s': {novelty['total_previous_next_states']}"
+        )
+        fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Create subplot grid
+        ax_init = plt.subplot2grid((2, 5), (0, 0), colspan=1)
+        ax_current = plt.subplot2grid((2, 5), (0, 1), colspan=1)
+        ax_dataset = plt.subplot2grid((2, 5), (0, 2), colspan=1)
+        ax_arrows = plt.subplot2grid((2, 5), (0, 3), colspan=1)
+        ax_bars = plt.subplot2grid((2, 5), (0, 4), colspan=1)
+        
+        # Second row: action heatmaps (up to 5, or adjust for 8 actions)
+        n_heatmap_cols = min(5, self.n_actions)
+        ax_actions = [plt.subplot2grid((2, 5), (1, i), colspan=1) for i in range(n_heatmap_cols)]
+        
+        # Compute distributions
+        nu_init = self._compute_initial_distribution()
+        nu_current = np.zeros(self.n_states)
+        
+        # Plot distributions
+        self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
+        self._plot_distribution(ax_current, nu_current, 'Current Occupancy')
+        self._plot_dataset_occupancy(ax_dataset)
+        
+        # Plot policy
+        policy_per_state = self._get_policy_per_state()
+        self._plot_policy_arrows(ax_arrows, policy_per_state)
+        self._plot_policy_bars(ax_bars, policy_per_state)
+        
+        # Plot action heatmaps
+        self._plot_action_heatmaps(ax_actions, policy_per_state)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"\nVisualization saved to: {save_path}")
+            plt.close(fig)
+
     def _plot_dataset_occupancy(self, ax, title='Dataset State Occupancy'):
         """Plot heatmap of state occupancy in the internal dataset."""
         # Get dataset
@@ -721,8 +741,18 @@ class EmbeddingDistributionVisualizer:
         # Convert to grid
         grid = self._state_dist_to_grid(state_occupancy)
         
-        # Plot
-        im = ax.imshow(grid, cmap='Blues', interpolation='nearest', vmin=0)
+        # Create a masked array to handle zero values differently
+        masked_grid = ma.masked_where(grid == 0, grid)
+        
+        # Plot with Blues colormap for positive values
+        im = ax.imshow(masked_grid, cmap='Blues', interpolation='nearest', vmin=0)
+        
+        # Fill zero values with light gray
+        zero_mask = (grid == 0)
+        if np.any(zero_mask):
+            ax.imshow(np.where(zero_mask, 1, np.nan), cmap='gray', 
+                     interpolation='nearest', vmin=0, vmax=1, alpha=0.3)
+        
         ax.set_title(f'{title}\n(Total: {int(total)} samples)')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
@@ -740,7 +770,6 @@ class EmbeddingDistributionVisualizer:
             ax.add_patch(dead_rect)
         
         plt.colorbar(im, ax=ax)
-
 # ============================================================================
 # Main Agent
 # ============================================================================
@@ -766,6 +795,9 @@ class DistMatchingEmbeddingAgent:
                  pmd_steps,
                  num_expl_steps,
                  T_init_steps,
+                 epsilon_schedule,
+                 window_size,
+                 unique_window,
                  n_subsamples: Optional[int],
                  data_type: str = "unique",
                  device: str = "cpu",
@@ -792,11 +824,30 @@ class DistMatchingEmbeddingAgent:
         self.data_type = data_type
         self.pmd_steps = pmd_steps
         self.ideal = ideal
+        self.unique_window = unique_window
+
+        self.epsilon_schedule = epsilon_schedule
 
         self.gradient_coeff = None
 
         self.num_expl_steps = num_expl_steps
         self.lambda_reg = lambda_reg
+        
+        # Track unique state-action pairs from previous dataset
+        self._previous_unique_pairs = set()
+        self._previous_unique_next_states = set()
+        self._dataset_novelty_stats = {
+            'total_current': 0,
+            'new_pairs': 0,
+            'old_pairs': 0,
+            'new_percentage': 0.0,
+            'total_previous': 0,
+            'new_next_states': 0,
+            'old_next_states': 0,
+            'next_states_new_percentage': 0.0,
+            'total_previous_next_states': 0
+        }
+        
         # Components
         self.encoder = Encoder(
             obs_shape, 
@@ -804,7 +855,6 @@ class DistMatchingEmbeddingAgent:
             self.feature_dim
         ).to(self.device)
         
-        # self.transition_model = torch.nn.Parameter(torch.randn(self.feature_dim * self.n_actions, self.feature_dim, device=self.device))
         self.transition_model = TransitionModel(
             self.feature_dim * self.n_actions,
             self.feature_dim
@@ -814,22 +864,26 @@ class DistMatchingEmbeddingAgent:
             gamma=self.discount,
             eta=self.lr_actor,
             lambda_reg=self.lambda_reg,
-            device='cpu' #self.device #At the moment forcing computatiosn on cpu, to save gpu memory
+            device='cpu' #self.device At the moment forcing computatiosn on cpu, to save gpu memory
         )
         
-        self.dataset = InternalDataset(self.data_type, self.n_states, self.n_actions, self.discount, n_subsamples)
+        self.dataset = InternalDatasetFIFO(
+            dataset_type=self.data_type, 
+            n_states=self.n_states, 
+            n_actions=self.n_actions, 
+            gamma=self.discount, 
+            window_size=window_size, 
+            n_subsamples=n_subsamples)
         
         # Optimizers
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(), 
-            lr=lr_encoder,
-        )
-
+        # self.encoder_optimizer = torch.optim.Adam(
+        #     self.encoder.parameters(), 
+        #     lr=lr_encoder
+        # )
         self.transition_optimizer = torch.optim.Adam(
             self.transition_model.parameters(),
-            lr=lr_T,
+            lr=lr_T
         )
-        self.cross_entropy_loss = nn.CrossEntropyLoss()
         
         self.training = False
         # Initialize visualizer (will be properly set after env is inserted)
@@ -842,18 +896,53 @@ class DistMatchingEmbeddingAgent:
         self.transition_model.train(training)
     
     def insert_env(self, env):
-        self.env = env.unwrapped # This is needed just for visualization
+        # Find the discretized environment (could be the env itself or a wrapper)
+        self.wrapped_env = env  # Keep reference to full wrapped env
+        
+        # Find the discrete environment interface (either native or discretized wrapper)
+        self._discrete_env = self._find_discrete_env(env)
+        
+        # For compatibility, also keep unwrapped reference
+        self.env = self._discrete_env
+        
         timestep = env.reset()
         self.first_state = torch.tensor(timestep.observation).double()
-        self.second_state = torch.eye(self.n_states)[1] # TODO at the moment using second state for alpha not the real first, change this in the future
+      
+        self.second_state = torch.eye(self.n_states)[1]
         
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self)
-        
+
         # If ideal mode, pre-populate the dataset
         if self.ideal and not self._ideal_dataset_filled:
             self._populate_ideal_dataset()
     
+    def _find_discrete_env(self, env):
+        """
+        Find the discrete environment interface by traversing the wrapper chain.
+        Returns the first environment that has 'cells' attribute (either native discrete
+        or DiscretizedContinuousEnv wrapper).
+        """
+        current = env
+        while current is not None:
+            # Check if this level has the discrete interface (cells, state_to_idx, etc.)
+            if hasattr(current, 'cells') and hasattr(current, 'state_to_idx'):
+                return current
+            
+            # Move to next wrapper level
+            if hasattr(current, 'env'):
+                current = current.env
+            elif hasattr(current, 'unwrapped') and current.unwrapped is not current:
+                current = current.unwrapped
+            else:
+                break
+        
+        raise AttributeError(
+            "Could not find discrete environment interface. "
+            "Ensure the environment has 'cells' and 'state_to_idx' attributes "
+            "(either native discrete env or wrapped with DiscretizedContinuousEnv)."
+        )
+
     def _populate_ideal_dataset(self):
         """Pre-populate the dataset with all state-action pairs in ideal mode."""
         print("=== Populating ideal dataset with all state-action pairs ===")
@@ -945,9 +1034,13 @@ class DistMatchingEmbeddingAgent:
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
             
-            H = enc_obs @ self._phi_all_obs.T  # [1, num_unique]
-            logits = -self.lr_actor * H @ self.gradient_coeff  # [1, n_actions]
-            probs = torch.softmax(logits, dim=1) # [1, n_actions]
+            # Add a zero to enc_obs to account for the extra row in H
+            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), dtype=torch.double)], dim=1)  # [1, feature_dim + 1]
+            H = enc_obs_augmented @ self._phi_all_obs.T  # [1, num_unique]
+
+            probs = torch.softmax(-self.lr_actor * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [1, n_actions]
+
+            
             if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
                 raise ValueError("action_probs sum to zero or NaN")
             return probs.numpy().flatten()
@@ -957,8 +1050,6 @@ class DistMatchingEmbeddingAgent:
         if step < self.num_expl_steps:
             return np.random.randint(self.n_actions)
         
-        if np.random.random() < 0.1 and not eval_mode:
-            return np.random.randint(self.n_actions)
         # Compute action probabilities
         action_probs = self.compute_action_probs(obs)
         
@@ -991,60 +1082,43 @@ class DistMatchingEmbeddingAgent:
         predicted_next = self.transition_model(encoded_state_action)
         
         # Compute loss
-        # 1. Contrastive loss:
-        logits = predicted_next @ encoded_next.T  # [B, B]
-        logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        contrastive_loss = self.cross_entropy_loss(logits, labels)
-
-        # 2. Compute Feature Correlation Matrix (Z x Z)
-        #    Shape: [Feature_Dim, Feature_Dim]
-        #    We want this to be close to Identity (uncorrelated features)
-        # remove duplicates from encoded_obs
-        unique_obs = torch.unique(obs, dim=0)
-        encoded_obs = self.encoder(unique_obs.double())
-        cov_matrix = (encoded_obs.T @ encoded_obs) / (encoded_obs.shape[0] - 1)
-
-        # 3. Decorrelation Loss (Push off-diagonals to 0)
-        #    This forces each dimension to represent independent information, 
-        #    preventing "feature collapse" where all dimensions encode the same thing.
-        off_diagonal_mask = ~torch.eye(cov_matrix.shape[0], dtype=torch.bool, device=self.device)
-        decorrelation_loss = torch.abs(cov_matrix[off_diagonal_mask]).sum()
-        
-        loss =  1*contrastive_loss + 0.1*decorrelation_loss 
+        loss = F.mse_loss(predicted_next, encoded_next) #+ 0.2*F.mse_loss(encoded_obs, encoded_next)
         
         # Optimize
-        self.encoder_optimizer.zero_grad()
+        # self.encoder_optimizer.zero_grad()
         self.transition_optimizer.zero_grad()
         loss.backward()
-        self.encoder_optimizer.step()
+        # self.encoder_optimizer.step()
         self.transition_optimizer.step()
 
-        print(f"transition_loss: {loss.item()}, deco_loss: {decorrelation_loss.item()}, contrastive_loss: {contrastive_loss.item()}")
+        print(f"transition_loss: {loss.item()}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
 
-    def update_actor(self, obs):
+    def update_actor(self, obs, step):
         """Update policy using Projected Mirror Descent."""
         metrics = dict()
         # Compute features for internal dataset
         if not hasattr(self, '_features_cached'):
             self._cache_features()
             # if self.gradient_coeff is None or (self.gradient_coeff is not None and self.gradient_coeff.shape[0] != self.dataset.size):
-            self.gradient_coeff = torch.zeros((self.dataset.size, self.n_actions))
-            self.H = self._phi_all_obs @ self._phi_all_next.T  # [num_unique, num_unique]
-            self.K = self._phi_all_next @ self._phi_all_next.T  # [num_unique, num_unique]
+            self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1))
+            self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
             self.unique_states = torch.eye(self.n_states).double()
+            self.K = self._psi_all @ self._psi_all.T  # [n, n]
 
-        self.pi = torch.softmax(-self.lr_actor * self.H.T@self.gradient_coeff, dim=1, dtype=torch.double)  # [num_unique, n_actions]
-
-        M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
+        epsilon = utils.schedule(self.epsilon_schedule, step)
+        self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
+        M = self.H*(self.E@self.pi.T) 
 
         nu_pi = self.distribution_matcher.compute_nu_pi(
                 phi_all_next_obs = self._phi_all_next,
-                BM = self.distribution_matcher.compute_BM(M, self._psi_all),
-                alpha=self._alpha
+                psi_all_obs_action= self._psi_all,
+                K= self.K,
+                M = M,
+                alpha=self._alpha,
+                epsilon=epsilon 
         )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
@@ -1054,21 +1128,27 @@ class DistMatchingEmbeddingAgent:
         for iteration in range(self.pmd_steps):
             self.gradient_coeff += self.distribution_matcher.compute_gradient_coefficient(
                 M, 
-                self.K,
                 phi_all_next_obs = self._phi_all_next, 
                 psi_all_obs_action = self._psi_all, 
-                alpha = self._alpha) * self.E
+                alpha = self._alpha,
+                epsilon=epsilon
+            ) 
             
-            # print(self.lr_actor * self.H.T@self.gradient_coeff)
-            self.pi = torch.softmax(-self.lr_actor * self.H.T@self.gradient_coeff, dim=1, dtype=torch.double)
+            # print("Gradient last term:", self.gradient_coeff[-1].item())
+            
+            self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
 
             M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
+
 
             if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
                 nu_pi = self.distribution_matcher.compute_nu_pi(
                         phi_all_next_obs = self._phi_all_next,
-                        BM = self.distribution_matcher.compute_BM(M, self._psi_all),
-                        alpha=self._alpha
+                        psi_all_obs_action= self._psi_all,
+                        K= self.K,
+                        M = M,
+                        alpha=self._alpha,
+                        epsilon=epsilon
                 )
                 actor_loss = torch.linalg.norm(nu_pi)**2
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}")
@@ -1079,9 +1159,99 @@ class DistMatchingEmbeddingAgent:
    
         return metrics
     
+    def _compute_dataset_novelty(self, tensors):
+        """Compute how many pairs in current dataset are new vs. in previous unique set."""
+        
+        if len(tensors['observation']) == 0:
+            self._dataset_novelty_stats = {
+                'total_current': 0,
+                'new_pairs': 0,
+                'old_pairs': 0,
+                'new_percentage': 0.0,
+                'total_previous': len(self._previous_unique_pairs),
+                'new_next_states': 0,
+                'old_next_states': 0,
+                'next_states_new_percentage': 0.0,
+                'total_previous_next_states': len(self._previous_unique_next_states)
+            }
+            return
+        
+        # Get all state-action pairs from current dataset
+        obs = tensors['observation']
+        actions = tensors['action']
+        next_obs = tensors['next_observation']
+        
+        new_count = 0
+        old_count = 0
+        new_next_states_count = 0
+        old_next_states_count = 0
+        
+        for i in range(len(obs)):
+            # Convert observation to state index
+            state_idx = torch.argmax(obs[i]).item()
+            action_idx = actions[i].item()
+            next_state_idx = torch.argmax(next_obs[i]).item()
+            
+            pair = (state_idx, action_idx)
+            
+            # Check (s,a) pair novelty
+            if pair in self._previous_unique_pairs:
+                old_count += 1
+            else:
+                new_count += 1
+            
+            # Check s' novelty
+            if next_state_idx in self._previous_unique_next_states:
+                old_next_states_count += 1
+            else:
+                new_next_states_count += 1
+        
+        total_current = len(obs)
+        
+        self._dataset_novelty_stats = {
+            'total_current': total_current,
+            'new_pairs': new_count,
+            'old_pairs': old_count,
+            'new_percentage': (new_count / total_current * 100) if total_current > 0 else 0.0,
+            'total_previous': len(self._previous_unique_pairs),
+            'new_next_states': new_next_states_count,
+            'old_next_states': old_next_states_count,
+            'next_states_new_percentage': (new_next_states_count / total_current * 100) if total_current > 0 else 0.0,
+            'total_previous_next_states': len(self._previous_unique_next_states)
+        }
+    
+    def _update_previous_unique_pairs(self, tensors):
+        """Update the set of unique pairs from current dataset for next comparison."""
+        
+        if len(tensors['observation']) == 0:
+            return
+        
+        current_unique_pairs = set()
+        current_unique_next_states = set()
+        obs = tensors['observation']
+        actions = tensors['action']
+        next_obs = tensors['next_observation']
+        
+        for i in range(len(obs)):
+            state_idx = torch.argmax(obs[i]).item()
+            action_idx = actions[i].item()
+            next_state_idx = torch.argmax(next_obs[i]).item()
+            
+            current_unique_pairs.add((state_idx, action_idx))
+            current_unique_next_states.add(next_state_idx)
+        
+        # Update previous unique pairs and next states for next iteration
+        self._previous_unique_pairs = current_unique_pairs
+        self._previous_unique_next_states = current_unique_next_states
+    
     def _cache_features(self):
         """Pre-compute and cache dataset features."""
-        tensors = self.dataset.get_data()
+        # Compute dataset novelty before caching (compares current with previous)
+        
+        tensors = self.dataset.get_data(unique=self.unique_window)  # Set to True if you want unique (s,a) pairs
+        
+        self._compute_dataset_novelty(tensors)
+        
         print("Caching features from dataset of size:", len(tensors['observation']))
         with torch.no_grad():
             obs = tensors['observation'][:len(tensors['next_observation'])].double()
@@ -1094,29 +1264,42 @@ class DistMatchingEmbeddingAgent:
             indices = torch.where(torch.all(next_obs == self.first_state, dim=1))[0]
             if indices.shape[0] == 0:
                 indices = torch.where(torch.all(next_obs == self.second_state, dim=1))[0]
-            
+            print("Found indices for second state:", indices)
+
             self._psi_all = self._encode_state_action(self._phi_all_obs, actions).cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1)).double()
-
-            print("DEBUG: setting alpha for index", indices[0].item(), len(self._alpha))
+            # print("DEBUG: setting alpha for index", indices[0].item(), len(self._alpha))
             self._alpha[indices[0]] = 1.0  # set alpha to 1.0 for the first state
             self.E = F.one_hot(
                 actions, 
                 self.n_actions
             ).double().reshape(-1, self.n_actions)
 
+            # ** AUGMENTATION STEP **
+            # ψ and Φ are augmented with an additional zero dimension
+            zeros_col = torch.zeros(*self._psi_all.shape[:-1], 1, device=self._psi_all.device, dtype=self._psi_all.dtype)
+            self._psi_all = torch.cat([self._psi_all, zeros_col], dim=-1)
+
+            zero_col = torch.zeros(*self._phi_all_next.shape[:-1], 1, device=self._phi_all_next.device, dtype=self._phi_all_next.dtype)
+            self._phi_all_next = torch.cat([self._phi_all_next, zero_col], dim=-1)
+
+            zero_col = torch.zeros(*self._phi_all_obs.shape[:-1], 1, device=self._phi_all_obs.device, dtype=self._phi_all_obs.dtype)
+            self._phi_all_obs = torch.cat([self._phi_all_obs, zero_col], dim=-1)
+
             print(f"all shapes: phi_all_obs: {self._phi_all_obs.shape}, phi_all_next: {self._phi_all_next.shape}, psi_all: {self._psi_all.shape}, alpha: {self._alpha.shape}, E: {self.E.shape}")
             optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
             print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
-        # print(optimal_T)
-        # print(torch.sum(optimal_T, dim=0))
+
+        # After caching, update the previous unique pairs for next comparison
+        self._update_previous_unique_pairs(tensors)
+
         if not self.dataset.is_complete:
             return
         print("=================================Features cached=================================")
 
         self._features_cached = True
-    
+        
 
     def aug_and_encode(self, obs):
         pass
@@ -1144,11 +1327,10 @@ class DistMatchingEmbeddingAgent:
             else:
                 metrics['batch_reward'] = 0.0  # placeholder
         
-        # if step < self.num_expl_steps + self.T_init_steps and not self.ideal:
-        metrics.update(self.update_transition_matrix(obs, action, next_obs))
+        # metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
-        print(self.dataset.is_complete, "dataset complete or ideal mode, size:", self.dataset.size)
-        print("Real dataeset size:", self.dataset.data_size)
+        print(f"last dataset size: {self.dataset.last_size}")
+        print(f"current dataset size: {self.dataset.size}, current periodo size {self.dataset.current_data_size}")
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value
@@ -1157,19 +1339,18 @@ class DistMatchingEmbeddingAgent:
 
         # In ideal mode, we can update actor immediately
         if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
-            # metrics.update(self.update_transition_matrix(obs, action, next_obs))
             # update actor
             if not self.ideal:
-                metrics.update(self.update_actor(obs))
+                metrics.update(self.update_actor(obs, step))
             else:
                 # Pass dummy obs, not used in update_actor
-                metrics.update(self.update_actor(None))
+                metrics.update(self.update_actor(None, step))
         
             if self.visualizer is not None:
                 save_path = os.path.join(os.getcwd(), f"plot_step_{step}.png")
                 self.visualizer.plot_results(step, save_path=save_path)
-                save_path = os.path.join(os.getcwd(), f"features_step_{step}.png")
-                self.visualizer.plot_embeddings_2d(save_path=save_path, use_tsne=True)
+                # save_path = os.path.join(os.getcwd(), f"features_step_{step}.png")
+                # self.visualizer.plot_embeddings_2d(save_path=save_path, use_tsne=True)
                 print(f"Visualization saved to: {save_path}")
         return metrics
 

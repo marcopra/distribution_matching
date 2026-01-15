@@ -1,17 +1,17 @@
 # @package agent
-_target_: agent.dist_matching_embedding_continuous.DistMatchingEmbeddingAgent
+_target_: agent.dist_matching_onehot_augmented.DistMatchingEmbeddingAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 lr_actor: 0.05 # eta
 discount: ${discount} # gamma
-lambda_reg: 1e-6
+lambda_reg: 1e-8
 lr_T: 1e-3
 batch_size: 1024
 nstep: 1
 lr_encoder: 1e-3
-hidden_dim: 1024
+hidden_dim: 256
 feature_dim: null
 T_init_steps: 300
 update_every_steps: 1
@@ -19,6 +19,9 @@ update_actor_every_steps: 960
 n_subsamples: null
 pmd_steps: 15000
 data_type: unique # [unique, all]
+window_size: 10
+unique_window: true
+epsilon_schedule: 0.00179856115 #linear(0.0, 10, 1000000)
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later

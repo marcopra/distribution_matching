@@ -33,20 +33,21 @@ class Encoder(nn.Module):
         self.repr_dim = feature_dim
 
         self.fc = nn.Identity()
+        self.feature_dim = obs_shape[0]
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
-        self.fc =  nn.Sequential(
-            nn.Linear(obs_shape[0], hidden_dim, bias=False),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, feature_dim, bias=False),
-            # nn.LayerNorm(feature_dim),
-        )
+        # self.fc =  nn.Sequential(
+        #     nn.Linear(obs_shape[0], hidden_dim, bias=False),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, feature_dim, bias=False),
+        #     # nn.LayerNorm(feature_dim),
+        # )
 
         self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
-        h = F.normalize(h, dim=-1)
+        # h = F.normalize(h, dim=-1)
   
         return h
 
@@ -509,8 +510,8 @@ class DistMatchingEmbeddingAgent:
         ).to(self.device)
         
         self.transition_model = TransitionModel(
-            self.feature_dim * self.n_actions,
-            self.feature_dim
+            self.encoder.feature_dim * self.n_actions,
+            self.encoder.feature_dim
         ).to(self.device)
         
         self.distribution_matcher = DistributionMatcher(
@@ -523,10 +524,10 @@ class DistMatchingEmbeddingAgent:
         self.dataset = InternalDataset(self.data_type, self.n_states, self.n_actions, self.discount, n_subsamples, self.device)
         
         # Optimizers
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(), 
-            lr=lr_encoder
-        )
+        self.encoder_optimizer = None  # torch.optim.Adam(
+        #     self.encoder.parameters(), 
+        #     lr=lr_encoder
+        # )
         self.transition_optimizer = torch.optim.Adam(
             self.transition_model.parameters(),
             lr=lr_T
@@ -798,7 +799,7 @@ class DistMatchingEmbeddingAgent:
             else:
                 metrics['batch_reward'] = 0.0  # placeholder
         
-        metrics.update(self.update_transition_matrix(obs, action, next_obs))
+        # metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
         print(self.dataset.is_complete, "dataset complete or ideal mode, size:", self.dataset.size)
         # If T is not sufficiently initialized, skip actor update
@@ -806,7 +807,6 @@ class DistMatchingEmbeddingAgent:
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
         
-
         # In ideal mode, we can update actor immediately
         if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
             if not self.ideal:
