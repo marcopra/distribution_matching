@@ -12,7 +12,7 @@ for h in $horizon; do
     for e in $eps_greedy; do
         for s in $sink_schedule; do
             for n in $n_subsamples; do
-                sbatch --export=HORIZON="${h}",EPS_GREEDY="${e}",SINK_SCHEDULE="${s}",N_SUBSAMPLES="${n}" launchers/slurm/distribution_matching_onehot/dist_matching.sh
+                sbatch --export=ALL,HORIZON="${h}",EPS_GREEDY="${e}",SINK_SCHEDULE="${s}",N_SUBSAMPLES="${n}" launchers/slurm/distribution_matching_onehot/dist_matching.sh
             done
         done
     done
