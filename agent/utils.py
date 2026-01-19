@@ -9,6 +9,11 @@ from copy import deepcopy
 
 import numpy as np
 from time import time
+import os
+import matplotlib
+matplotlib.use('Agg')  # Backend non-interattivo per salvare senza display
+import matplotlib.pyplot as plt
+
 # torch.set_default_tensor_type(torch.FloatTensor)
 float_type = torch.float32
 
@@ -473,7 +478,7 @@ class InternalDataset:
         self._prev_obs: Optional[np.ndarray] = None
         
         self._traj_boundaries: Dict[int, Tuple[int, int]] = {}
-        self._current_traj_idx = 0
+        self._current_dataset_idx = 0
         self._trajectory_active = False
         
     
@@ -540,7 +545,7 @@ class InternalDataset:
    
         if time_step.step_type == StepType.FIRST:
             self._prev_obs = time_step.observation
-            self._current_traj_idx += 1
+            self._current_dataset_idx += 1
             self._trajectory_active = True
             return
         # Skipping adding data if no active trajectory (e.g., after reset mid-trajectory)
@@ -578,15 +583,15 @@ class InternalDataset:
                     ], dim=0)
                 
                 # Add trajectory index
-                self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+                self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
                 
                 # Update trajectory boundaries
                 current_idx = len(self._trajectory_idx) - 1
-                if self._current_traj_idx not in self._traj_boundaries:
-                    self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
+                if self._current_dataset_idx not in self._traj_boundaries:
+                    self._traj_boundaries[self._current_dataset_idx] = (current_idx, current_idx)
                 else:
-                    start_idx = self._traj_boundaries[self._current_traj_idx][0]
-                    self._traj_boundaries[self._current_traj_idx] = (start_idx, current_idx)
+                    start_idx = self._traj_boundaries[self._current_dataset_idx][0]
+                    self._traj_boundaries[self._current_dataset_idx] = (start_idx, current_idx)
             
             self._prev_obs = time_step.observation
             # Mark trajectory as inactive if LAST step
@@ -598,10 +603,10 @@ class InternalDataset:
     def _add_all(self, time_step):
         """Add all transitions."""
         if time_step.step_type == StepType.FIRST:
-            self._current_traj_idx += 1
+            self._current_dataset_idx += 1
             self._trajectory_active = True
             current_idx = len(self._trajectory_idx)
-            self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
+            self._traj_boundaries[self._current_dataset_idx] = (current_idx, current_idx)
             
             self.data['observation'] = torch.cat([
                 self.data['observation'],
@@ -619,7 +624,7 @@ class InternalDataset:
                     torch.tensor([0.0], device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
             
-            self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
 
         elif time_step.step_type == StepType.MID:
             # Skip adding data if no active trajectory (e.g., after reset mid-trajectory)
@@ -643,9 +648,9 @@ class InternalDataset:
                     torch.tensor([0.0], device=self.device, dtype=torch.double).unsqueeze(0)
                 ], dim=0)
             
-            self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
-            start_idx = self._traj_boundaries[self._current_traj_idx][0]
-            self._traj_boundaries[self._current_traj_idx] = (start_idx, len(self._trajectory_idx) - 1)
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
+            start_idx = self._traj_boundaries[self._current_dataset_idx][0]
+            self._traj_boundaries[self._current_dataset_idx] = (start_idx, len(self._trajectory_idx) - 1)
             
         elif time_step.step_type == StepType.LAST:
             # Skip adding data if no active trajectory
@@ -757,7 +762,9 @@ class InternalDatasetFIFO:
     """
     
     def __init__(self, dataset_type: str, n_states: int, n_actions: int, 
-                 gamma: float, window_size: int, n_subsamples: int, subsampling_strategy: str, device: str = 'cpu'):
+                 gamma: float, window_size: int, n_subsamples: int, 
+                 subsampling_strategy: str, dynamic_horizon: bool = False,
+                 device: str = 'cpu'):
         """
         Args:
             dataset_type: "unique" or "all"
@@ -767,7 +774,8 @@ class InternalDatasetFIFO:
             window_size: Number of sampling periods to keep in memory
             n_subsamples: Number of samples to return per period (None = all)
             subsampling_strategy: Strategy for subsampling ("random" or "eder")
-            device: torch device
+            dynamic_horizon: Whether to use a dynamic horizon
+            device: Torch device
         """
         self.dataset_type = dataset_type
         self.n_states = n_states
@@ -778,6 +786,7 @@ class InternalDatasetFIFO:
         self.gamma = gamma
         self.window_size = window_size
         self.device = torch.device(device)
+        self.dynamic_horizon = dynamic_horizon
         
         # FIFO queue: list of sampling periods, each period is a dict of tensors
         self._periods_queue = []
@@ -786,6 +795,10 @@ class InternalDatasetFIFO:
         self._last_period_size = 0  # Track size of last added period
         self.max_log_det = -np.inf
         self.subsampling_strategy = subsampling_strategy
+        
+        # Track horizons for dynamic horizon mode
+        self._horizon_history = []
+        self._plot_counter = 0
         
         self.reset()
     
@@ -808,7 +821,7 @@ class InternalDatasetFIFO:
         self._unique_pairs = set()
         self._prev_obs = None
         self._traj_boundaries = {}
-        self._current_traj_idx = 0
+        self._current_dataset_idx = 0
         self._trajectory_active = False
         self._dummy_transition = None
         self._dummy_first_state = False
@@ -860,23 +873,48 @@ class InternalDatasetFIFO:
             return 0
         return len(self._current_period_data['next_observation'])
     
+    def add_pairs(self, state, action):
+        """Track unique state-action pairs (for compatibility with ideal mode)."""
+        pair = (np.argmax(state), action)
+        self._unique_pairs.add(pair)
+        return
+    
     @property
     def is_complete(self) -> bool:
         """Check if current period has all unique state-action pairs."""
         return self.dataset_type == "unique" and len(self._unique_pairs) == self.expected_size
+    
+    @property
+    def greater_equal_target_horizon(self) -> bool:
+        """Check if current traj exceeds expected horizon size."""
+        if not hasattr(self, 'current_target_horizon') or  len(self._traj_boundaries) == 0: #self._current_dataset_idx > len(self._traj_boundaries) or
+            return False
+        return (self._traj_boundaries[self._current_dataset_idx][1] - self._traj_boundaries[self._current_dataset_idx][0]) >= self.current_target_horizon
+    
+    @property
+    def reset_episode(self) -> bool:
+        """Check if current traj exceeds expected horizon size."""
+        if not hasattr(self, 'current_target_horizon') or  len(self._traj_boundaries) == 0: #self._current_dataset_idx > len(self._traj_boundaries) or
+            return False
+        if (self._traj_boundaries[self._current_dataset_idx][1] - self._traj_boundaries[self._current_dataset_idx][0]) >= self.current_target_horizon+1:
+            utils.ColorPrint.red("Resetting due to exceeding target horizon")
+        return (self._traj_boundaries[self._current_dataset_idx][1] - self._traj_boundaries[self._current_dataset_idx][0]) >= self.current_target_horizon+1
     
     def add_transition(self, time_step):
         """Add a transition to the current sampling period."""
         if self.dataset_type == "unique":
             self._add_unique(time_step)
         else:
-            self._add_all(time_step)
+            if self.dynamic_horizon== True:
+                self._add_dynamic_horizon(time_step)
+            else:
+                self._add_all(time_step)
     
     def _add_unique(self, time_step):
         """Add only unique (s,a) pairs to current period."""
         if time_step.step_type == StepType.FIRST:
             self._prev_obs = time_step.observation
-            self._current_traj_idx += 1
+            self._current_dataset_idx += 1
             self._trajectory_active = True
             return
         
@@ -908,14 +946,14 @@ class InternalDatasetFIFO:
                     torch.tensor([alpha_val], device=self.device, dtype=torch.double)
                 ], dim=0)
                 
-                self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+                self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
                 
                 current_idx = len(self._trajectory_idx) - 1
-                if self._current_traj_idx not in self._traj_boundaries:
-                    self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
+                if self._current_dataset_idx not in self._traj_boundaries:
+                    self._traj_boundaries[self._current_dataset_idx] = (current_idx, current_idx)
                 else:
-                    start_idx = self._traj_boundaries[self._current_traj_idx][0]
-                    self._traj_boundaries[self._current_traj_idx] = (start_idx, current_idx)
+                    start_idx = self._traj_boundaries[self._current_dataset_idx][0]
+                    self._traj_boundaries[self._current_dataset_idx] = (start_idx, current_idx)
             
             self._prev_obs = time_step.observation
             if time_step.step_type == StepType.LAST:
@@ -924,10 +962,10 @@ class InternalDatasetFIFO:
     def _add_all(self, time_step):
         """Add all transitions to current period."""
         if time_step.step_type == StepType.FIRST:
-            self._current_traj_idx += 1
+            self._current_dataset_idx += 1
             self._trajectory_active = True
             current_idx = len(self._trajectory_idx)
-            self._traj_boundaries[self._current_traj_idx] = (current_idx, current_idx)
+            self._traj_boundaries[self._current_dataset_idx] = (current_idx, current_idx)
             
             self._current_period_data['observation'] = torch.cat([
                 self._current_period_data['observation'],
@@ -940,7 +978,7 @@ class InternalDatasetFIFO:
                 torch.tensor([alpha_val], device=self.device, dtype=torch.double)
             ], dim=0)
             
-            self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
         
         elif time_step.step_type == StepType.MID:
             if not self._trajectory_active:
@@ -963,14 +1001,92 @@ class InternalDatasetFIFO:
                 torch.tensor([0.0], device=self.device, dtype=torch.double)
             ], dim=0)
             
-            self._trajectory_idx = np.append(self._trajectory_idx, self._current_traj_idx)
-            start_idx = self._traj_boundaries[self._current_traj_idx][0]
-            self._traj_boundaries[self._current_traj_idx] = (start_idx, len(self._trajectory_idx) - 1)
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
+            start_idx = self._traj_boundaries[self._current_dataset_idx][0]
+            self._traj_boundaries[self._current_dataset_idx] = (start_idx, len(self._trajectory_idx) - 1)
         
         elif time_step.step_type == StepType.LAST:
             if not self._trajectory_active:
                 return
             
+            self._current_period_data['action'] = torch.cat([
+                self._current_period_data['action'],
+                torch.tensor([time_step.action], device=self.device, dtype=torch.long)
+            ], dim=0)
+            self._current_period_data['next_observation'] = torch.cat([
+                self._current_period_data['next_observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            self._trajectory_active = False
+        
+    def _add_dynamic_horizon(self, time_step):
+        """Add all transitions to current period."""
+        if time_step.step_type == StepType.FIRST:
+            # Horizon Computation
+
+            prob = np.random.rand()
+            horizon = np.log(1 - prob) / np.log(self.gamma) - 1
+            self.current_target_horizon = int(np.round(horizon))
+            
+            # Track horizon for plotting
+            if self.dynamic_horizon:
+                self._horizon_history.append(self.current_target_horizon)
+            
+            ColorPrint.green(f"New trajectory with target horizon: {self.current_target_horizon}")
+            # --------------------------------
+            
+            self._current_dataset_idx += 1
+            self._trajectory_active = True
+            current_idx = len(self._trajectory_idx)
+            self._traj_boundaries[self._current_dataset_idx] = (current_idx, current_idx)
+            
+            self._current_period_data['observation'] = torch.cat([
+                self._current_period_data['observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            
+            alpha_val = 1.0 if self._current_period_data['observation'].shape[0] == 1 else 0.0
+            self._current_period_data['alpha'] = torch.cat([
+                self._current_period_data['alpha'],
+                torch.tensor([alpha_val], device=self.device, dtype=torch.double)
+            ], dim=0)
+            
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
+        
+        elif time_step.step_type == StepType.MID:
+            if not self._trajectory_active:
+                return
+            
+            if not self.reset_episode:
+                self._current_period_data['observation'] = torch.cat([
+                    self._current_period_data['observation'],
+                    torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                ], dim=0)
+                self._current_period_data['alpha'] = torch.cat([
+                    self._current_period_data['alpha'],
+                    torch.tensor([0.0], device=self.device, dtype=torch.double)
+                ], dim=0)
+            else:
+                self._trajectory_active = False
+            
+            # ColorPrint.green(f"saving the action")
+            self._current_period_data['action'] = torch.cat([
+                self._current_period_data['action'],
+                torch.tensor([time_step.action], device=self.device, dtype=torch.long)
+            ], dim=0)
+            self._current_period_data['next_observation'] = torch.cat([
+                self._current_period_data['next_observation'],
+                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+            ], dim=0)
+            
+            self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
+            start_idx = self._traj_boundaries[self._current_dataset_idx][0]
+            self._traj_boundaries[self._current_dataset_idx] = (start_idx, len(self._trajectory_idx) - 1)
+  
+        elif time_step.step_type == StepType.LAST:
+            if not self._trajectory_active:
+                return
+    
             self._current_period_data['action'] = torch.cat([
                 self._current_period_data['action'],
                 torch.tensor([time_step.action], device=self.device, dtype=torch.long)
@@ -1052,8 +1168,12 @@ class InternalDatasetFIFO:
         Returns:
             Dictionary with concatenated data from all periods in window
         """
-        # Clean incomplete trajectories from current period
-        self._clean_incomplete_trajectories()
+        # Plot horizon histogram before resetting
+        if self.dynamic_horizon:
+            self._plot_horizon_histogram()
+        else:
+            # Clean incomplete trajectories from current period
+            self._clean_incomplete_trajectories()
         
         # Store current period data with metadata
         period_entry = {
@@ -1082,6 +1202,10 @@ class InternalDatasetFIFO:
         self._current_period_idx += 1
         self._start_new_period()
         
+        # Reset horizon history after plotting
+        if self.dynamic_horizon:
+            self._horizon_history = []
+        
         # Filter for unique state-action pairs if requested
         if unique and len(aggregated_data['next_observation']) > 0:
             aggregated_data = self._filter_unique_state_action_pairs(aggregated_data)
@@ -1097,6 +1221,7 @@ class InternalDatasetFIFO:
         self._sampled_data = aggregated_data
         
         return aggregated_data
+
     
     def _filter_unique_state_action_pairs(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
@@ -1145,7 +1270,7 @@ class InternalDatasetFIFO:
         incomplete_traj_ids = []
         for traj_id in self._traj_boundaries.keys():
             # Check if this trajectory is still active (not properly terminated)
-            if traj_id == self._current_traj_idx and self._trajectory_active:
+            if traj_id == self._current_dataset_idx and self._trajectory_active:
                 incomplete_traj_ids.append(traj_id)
         
         if len(incomplete_traj_ids) == 0:
@@ -1282,3 +1407,42 @@ class InternalDatasetFIFO:
                 self.max_log_det = log_det.item()
         ColorPrint.red(f"EDER subsampling failed to find better subset; returning best sampled subset, with log-det: {tmp_max:.4f} (max: {self.max_log_det:.4f}) in {time() - starting_search_time:.2f}s")
         return best_sampled_data
+    
+    def _plot_horizon_histogram(self):
+        """Plot histogram of dynamic horizons and save to file."""
+        if not self.dynamic_horizon or len(self._horizon_history) == 0:
+            return
+        
+        save_dir = os.path.join(os.getcwd(), "horizon_plots")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"horizon_histogram_period_{self._plot_counter}.png")
+        
+        # Get range of horizons
+        min_horizon = min(self._horizon_history)
+        max_horizon = max(self._horizon_history)
+        
+        # Create bins that include all integer values from min to max
+        bins = np.arange(min_horizon - 0.5, max_horizon + 1.5, 1)
+        
+        plt.figure(figsize=(10, 6))
+        plt.hist(self._horizon_history, bins=bins, edgecolor='black', alpha=0.7, align='mid')
+        
+        # Set x-axis ticks to show each integer horizon value
+        plt.xticks(range(min_horizon, max_horizon + 1))
+        
+        plt.xlabel('Target Horizon')
+        plt.ylabel('Frequency')
+        plt.title(f'Dynamic Horizon Distribution - Period {self._plot_counter}\n'
+                  f'Total trajectories: {len(self._horizon_history)}, '
+                  f'Mean: {np.mean(self._horizon_history):.2f}, '
+                  f'Std: {np.std(self._horizon_history):.2f}')
+        plt.grid(True, alpha=0.3, axis='y')
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        ColorPrint.green(f"Saved horizon histogram to {save_path}")
+        
+        # Increment counter for next plot
+        self._plot_counter += 1
+

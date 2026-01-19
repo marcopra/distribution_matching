@@ -205,7 +205,8 @@ class Workspace:
         self.train_video_recorder.init(time_step.image_observation)
         metrics = None
         while train_until_step(self.global_step):
-            if time_step.last():
+            # if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
+            if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
                 self._global_episode += 1
                 self.train_video_recorder.save(f'{self.global_frame}.mp4')
                 # wait until all the metrics schema is populated
