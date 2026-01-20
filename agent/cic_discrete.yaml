@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.cic.CICAgent
+_target_: agent.cic_discrete.CICAgent
 name: cic
 reward_free: ${reward_free}
 obs_type: ??? # to be specified later

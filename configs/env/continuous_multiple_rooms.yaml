@@ -1,0 +1,33 @@
+# @package _global_
+# Continuous Multiple Rooms Environment Configuration
+
+env:
+  name: "ContinuousMultipleRooms-v0"
+  num_rooms: 8
+  room_size: 3.0
+  main_corridor_height: 1.5
+  connector_width: 1.0
+  connector_length: 1.0
+  max_steps: 400
+  render_mode: rgb_array
+  show_coordinates: false
+  
+  # Continuous movement parameters
+  move_delta: 0.3
+  goal_threshold: 0.4
+  wall_thickness: 0.3
+  agent_radius: 0.15
+  
+  num_actions: 4
+  
+  # Reward parameters
+  dense_reward: false
+  wall_penalty: 0.0
+  
+  # Goal position (optional, null for random at each episode)
+  goal_position: null
+  
+  # Start position (optional, null for random at each episode)
+  start_position: [0.8, 0.8] 
+  
+ 

@@ -4,7 +4,7 @@
 env:
   name: "ContinuousFourRooms-v0"
   room_size: 5.0
-  max_steps: 100
+  max_steps: 300
   render_mode: rgb_array
   show_coordinates: false
   
