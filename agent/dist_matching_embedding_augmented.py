@@ -33,7 +33,7 @@ class Encoder(nn.Module):
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
-        self.temperature = 0.1
+        self.temperature = 0.05
 
         # self.fc = nn.Identity()
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
@@ -51,6 +51,7 @@ class Encoder(nn.Module):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
+        # h = F.normalize(h, p=2, dim=-1)
         # h = F.softmax(h/self.temperature, dim=-1)
 
         return h
@@ -392,9 +393,10 @@ class EmbeddingDistributionVisualizer:
             
             one_hot_states = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
             embeddings = self.agent.encoder(one_hot_states).cpu()  # [n_states, feature_dim]
+            normalized_embeddings = F.normalize(embeddings, p=2, dim=-1)
             
             # Compute correlation matrix: Φ @ Φᵀ
-            correlation_matrix = embeddings @ embeddings.T
+            correlation_matrix = normalized_embeddings @ normalized_embeddings.T
             
         return correlation_matrix.numpy()
     
@@ -415,10 +417,10 @@ class EmbeddingDistributionVisualizer:
             # Get embeddings for all states
             one_hot_states = torch.eye(self.n_states).to(self.agent.device)
             embeddings = self.agent.encoder(one_hot_states).cpu()  # [n_states, feature_dim]
-            
+            normalized_embeddings = F.normalize(embeddings, p=2, dim=-1)
             # Compute Gram matrix (correlation matrix): Φ @ Φᵀ
             # For normalized embeddings: G[i,j] = cos(angle between φ(i) and φ(j))
-            gram_matrix = embeddings @ embeddings.T  # [n_states, n_states]
+            gram_matrix = normalized_embeddings @ normalized_embeddings.T  # [n_states, n_states]
             
             # For each state, compute average deviation from orthogonality
             # We want off-diagonal elements to be close to 0
@@ -1146,30 +1148,20 @@ class DistMatchingEmbeddingAgent:
         predicted_next = self.transition_model(encoded_state_action)
         
         # Compute loss
-        # 1. Contrastive loss:
-        logits = predicted_next @ encoded_next.T  # [B, B]
+        # 1. Contrastive loss: 
+        logits = predicted_next/torch.norm(predicted_next, p=2, dim=1, keepdim=True) @ (encoded_next/torch.norm(encoded_next, p=2, dim=1, keepdim=True)).T  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
-
-        # 2. Compute Feature Correlation Matrix (Z x Z)
-        #    Shape: [Feature_Dim, Feature_Dim]
-        #    We want this to be close to Identity (uncorrelated features)
-        # remove duplicates from encoded_obs
-        unique_obs = torch.unique(obs, dim=0)
-        encoded_obs = self.encoder(unique_obs.double())
-        cov_matrix = (encoded_obs.T @ encoded_obs) / (encoded_obs.shape[0] - 1)
-
-        # 3. Decorrelation Loss (Push off-diagonals to 0)
-        #    This forces each dimension to represent independent information, 
-        #    preventing "feature collapse" where all dimensions encode the same thing.
-        off_diagonal_mask = ~torch.eye(cov_matrix.shape[0], dtype=torch.bool, device=self.device)
-        decorrelation_loss = torch.abs(cov_matrix[off_diagonal_mask]).sum()
+        # contrastive_loss = torch.norm(predicted_next - encoded_next, p=2, dim=1).mean()
         
         # 4. Loss embeddings must sum to 1
         embedding_sum_loss = torch.abs(torch.sum(encoded_obs, dim=-1) - 1).sum()
+        beta = 1 
+        # 5. \phi(s) and \phi(s') must be close in L2 norm
+        l2_loss = torch.norm(encoded_obs - encoded_next, p=2, dim=1).mean()
 
-        loss =  contrastive_loss + 0*decorrelation_loss + embedding_sum_loss
+        loss =  1000*contrastive_loss + beta*embedding_sum_loss + 1*l2_loss
         
         # Optimize
         self.encoder_optimizer.zero_grad()
@@ -1177,9 +1169,9 @@ class DistMatchingEmbeddingAgent:
         loss.backward()
         self.encoder_optimizer.step()
         self.transition_optimizer.step()
-
-        # Print losses  
-        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, Decorrelation={decorrelation_loss.item():.4f}, EmbeddingSum={embedding_sum_loss.item():.4f}, Total={loss.item():.4f}")
+        # Print losses
+        print(f"Embeddings L2 norm mean : {torch.norm(encoded_obs, p=2, dim=1).mean().item():.4f}")
+        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, EmbeddingSum={embedding_sum_loss.item():.4f}, L2={l2_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
@@ -1210,7 +1202,6 @@ class DistMatchingEmbeddingAgent:
         )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
-        # print("Gradient coeff norm:", torch.linalg.norm(self.gradient_coeff))
         # print("Policy matrix sample (first 5 states):", self.pi[:5, :])
 
         for iteration in range(self.pmd_steps):
@@ -1222,6 +1213,7 @@ class DistMatchingEmbeddingAgent:
                 epsilon=epsilon
             ) 
             
+            # print("Gradient coeff norm:", torch.linalg.norm(self.gradient_coeff))
             # print("Gradient last term:", self.gradient_coeff[-1].item())
             
             self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
