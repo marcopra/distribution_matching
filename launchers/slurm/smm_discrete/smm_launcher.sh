@@ -6,7 +6,7 @@ envs=(
 # "four_rooms10_2" 
 # "two_rooms15_0"
 "four_rooms5_0" 
-"two_rooms10_0"
+"two_rooms7_0"
 )
 
 
