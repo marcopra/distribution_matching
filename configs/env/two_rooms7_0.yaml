@@ -1,0 +1,17 @@
+# @package _global_
+# Two Rooms Environment Configuration
+
+env:
+  name: "TwoRooms-v0"
+  room_size: 10
+  corridor_length: 1
+  corridor_y: 2  # Y-coordinate of the corridor
+  max_steps: 300
+  render_mode: rgb_array
+  show_coordinates: false
+  
+  # Goal position (optional, null for random at each episode)
+  goal_position: [16, 8]  # Can be [x, y] or null for random
+  
+  # Start position (optional, null for random at each episode)
+  start_position:  [0, 0]  # Can be [x, y] or null for random
