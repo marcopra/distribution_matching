@@ -17,7 +17,7 @@ random_init: true
 random_goal: true
 
 agent:
-  linear_actor: true # whether to use a linear actor or not WARNING: only works with discrete_sac agent
+  linear_actor: falsee # whether to use a linear actor or not WARNING: only works with discrete_sac agent
 # train settings
 num_train_frames: 50000
 num_seed_frames: 4000

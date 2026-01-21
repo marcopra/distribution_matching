@@ -31,10 +31,9 @@ use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
 hidden_dim: 1024
 feature_dim: 50
-stddev_schedule: 0.2
-stddev_clip: 0.3
+eps_schedule: 0.25
 nstep: 3
 batch_size: 1024
 init_critic: true
 update_encoder: ${update_encoder}
-linear_actor: true
+linear_actor: false
