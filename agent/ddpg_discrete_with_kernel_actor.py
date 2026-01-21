@@ -1,4 +1,3 @@
-
 import hydra
 import utils
 import torch
@@ -8,9 +7,37 @@ from utils import ColorPrint
 import torch.nn.functional as F
 from collections import OrderedDict
 from torch.distributions.categorical import Categorical
-from agent.utils import Encoder, KernelActorDiscrete as KernelActor, CriticDiscrete as Critic
+from agent.utils import KernelActorDiscrete as KernelActor, CriticDiscrete as Critic
 # from agent.dist_matching_embedding import Encoder as KernelEncoder # TODO decidere il dtype da usare perchè in dist_matching uso float64 ma in tutto il resto float32
 
+class Encoder(nn.Module):
+    def __init__(self, obs_shape, hidden_dim, feature_dim):
+        super(Encoder, self).__init__()
+        self.obs_shape = obs_shape
+        self.feature_dim = feature_dim
+        self.repr_dim = feature_dim
+        self.temperature = 0.05
+
+        # self.fc = nn.Identity()
+        # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
+        self.fc =  nn.Sequential(
+            nn.Linear(obs_shape[0], hidden_dim, bias=False),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, feature_dim, bias=False),
+            # nn.LayerNorm(feature_dim),
+        )
+
+        # nn.init.eye_(self.fc[0].weight)
+        self.apply(utils.weight_init)
+
+    def forward(self, obs):
+        obs = obs.view(obs.shape[0], -1)
+        h = self.fc(obs)
+        h = F.normalize(h, p=1, dim=-1)
+        # h = F.normalize(h, p=2, dim=-1)
+        # h = F.softmax(h/self.temperature, dim=-1)
+
+        return h
 
 
     
@@ -22,7 +49,8 @@ class DDPGAgent:
                  obs_shape,
                  action_shape, # Number of discrete actions
                  device,
-                 lr,
+                 actor_lr,
+                 critic_lr,
                  dataset_dim,
                  eta,
                  feature_dim,
@@ -30,6 +58,7 @@ class DDPGAgent:
                  critic_target_tau,
                  num_expl_steps,
                  update_every_steps,
+                 update_actor_after_critic_steps,
                  stddev_schedule,
                  nstep,
                  batch_size,
@@ -44,7 +73,8 @@ class DDPGAgent:
         self.obs_shape = obs_shape
         self.action_dim = action_shape[0]
         self.hidden_dim = hidden_dim
-        self.lr = lr
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -56,7 +86,7 @@ class DDPGAgent:
         self.init_critic = init_critic
         self.feature_dim = feature_dim
         self.solved_meta = None
-
+        self.update_actor_after_critic_steps = num_expl_steps + update_actor_after_critic_steps
         self.dataset_dim = dataset_dim
         self.eta = eta
 
@@ -71,9 +101,13 @@ class DDPGAgent:
             self.obs_dim = self.encoder.repr_dim + meta_dim
         else:
             self.aug = nn.Identity()
-            self.encoder = nn.Identity()  # KernelEncoder(obs_shape).to(device)
-            # self.obs_dim = self.encoder.repr_dim + meta_dim
-            self.obs_dim = self.obs_shape[0] + meta_dim
+            self.encoder = Encoder(
+                obs_shape, 
+                hidden_dim, 
+                self.feature_dim
+            ).to(self.device) # KernelEncoder(obs_shape).to(device)
+            self.obs_dim = self.encoder.repr_dim + meta_dim
+            # self.obs_dim = self.obs_shape[0] + meta_dim
 
         self.actor = KernelActor(obs_type, self.obs_dim, self.dataset_dim, self.action_dim, self.eta).to(device)
 
@@ -84,13 +118,10 @@ class DDPGAgent:
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         # optimizers
-
+        self.encoder_opt = None #torch.optim.Adam(self.encoder.parameters(), lr=lr)
        
-        self.encoder_opt = None # torch.optim.Adam(self.encoder.parameters(), lr=lr)
-       
-        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
-
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=self.critic_lr)
         self.train()
         self.critic_target.train()
 
@@ -124,15 +155,21 @@ class DDPGAgent:
                     "Make sure the agent completed at least one policy update."
                 )
             
+            # Extract E matrix (action one-hot encoding)
+            # E shape: [num_unique, n_actions]
+            E = other.E  # This should be available from the cached features
+            
             self.actor.initialize_from_pretrained(
                 phi_dataset=other._phi_all_obs.to(self.device),
                 gradient_coeff=other.gradient_coeff.to(self.device),
-                eta=other.lr_actor
+                eta=other.lr_actor,
+                E=E.to(self.device)  # Pass E matrix for proper initialization
             )
             print("✓ KernelActorDiscrete initialized from pretrained weights")
             print(f"  Dataset size: {other.dataset.size}")
             print(f"  Feature dim: {other.feature_dim}")
             print(f"  Eta: {other.lr_actor}")
+            print(f"  E matrix shape: {E.shape}")
                   
         else:
             raise ValueError(
@@ -244,10 +281,9 @@ class DDPGAgent:
     def update(self, replay_iter, step):
         metrics = dict()
         #import ipdb; ipdb.set_trace()
-
         if step % self.update_every_steps != 0:
             return metrics
-
+        
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch, self.device)
@@ -264,8 +300,10 @@ class DDPGAgent:
         metrics.update(
             self.update_critic(obs, action, reward, discount, next_obs, step))
 
-        # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

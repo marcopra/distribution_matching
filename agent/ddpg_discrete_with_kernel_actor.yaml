@@ -6,12 +6,14 @@ obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 device: ${device}
-lr: 1e-4
+critic_lr: 1e-4
+actor_lr: 1e-4
 critic_target_tau: 0.01
 update_every_steps: 2
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
+update_actor_after_critic_steps: 10000
 hidden_dim: 1024
 dataset_dim: 556
 eta: 0.5

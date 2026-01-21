@@ -101,8 +101,12 @@ class ActorDiscrete(nn.Module):
 
 class KernelActorDiscrete(nn.Module):
     """
-    Kernel-based actor that computes: π(a|s) = softmax(-η · H^T · C)
-    where H = φ(s) @ φ_dataset^T
+    Kernel-based actor that computes: π(a|s) = softmax(-η · (H^T · C_actions ⊙ E + C_bias))
+    where:
+    - H = [φ(s); 0] @ Φ_dataset^T  (augmented kernel similarities)
+    - C_actions: gradient coefficients for state-action pairs [dataset_dim, n_actions]
+    - C_bias: bias term for each action (last row of original gradient_coeff)
+    - E: action one-hot encoding matrix [dataset_dim, n_actions]
     
     This architecture allows loading pretrained kernel weights and
     optionally finetuning them with RL algorithms.
@@ -112,29 +116,29 @@ class KernelActorDiscrete(nn.Module):
         """
         Args:
             obs_type: Type of observation ('states' or 'pixels')
+            input_dim: Dimension of input features (d)
             dataset_dim: Number of dataset examples (n)
             action_dim: Number of actions
-            feature_dim: Dimension of feature space (d)
             eta: Scalar scaling factor (learning rate)
             trainable: If True, allows weights to be updated during finetuning
         """
         super().__init__()
         
-        # Layer 1: Kernel layer computes H = φ(x) @ φ_dataset^T
-        # Linear layer computes y = x @ W^T
-        # We want H = φ(x) @ φ_dataset^T
-        # Therefore W = φ_dataset
-        self.kernel_layer = nn.Linear(input_dim, dataset_dim, bias=False)
+        # Layer 1: Kernel layer computes H = [φ(x); 0] @ Φ_dataset^T
+        # We need input_dim+1 to account for the augmented zero
+        self.kernel_layer = nn.Linear(input_dim + 1, dataset_dim, bias=False, dtype=float_type)
         
-        # Layer 2: Computes logits = H @ C
-        # We want: logits = H @ C
-        # Linear computes z = H @ W^T, so W = C^T
-        self.grad_coefficient = nn.Linear(dataset_dim, action_dim, bias=False)
+        # Layer 2: Action-specific gradient coefficients
+        # Shape: [dataset_dim, n_actions] corresponding to C[:-1] ⊙ E in original formulation
+        self.action_coeffs = nn.Linear(dataset_dim, action_dim, bias=False, dtype=float_type)
         
-        self.eta = nn.Parameter(torch.tensor(eta), requires_grad=trainable)
+        # Bias term: corresponds to C[-1] in original formulation
+        # This is added uniformly to all actions
+        self.bias_coeff = nn.Parameter(torch.zeros(action_dim, dtype=float_type))
+        
+        self.eta = nn.Parameter(torch.tensor(eta, dtype=float_type), requires_grad=trainable)
         self.softmax = nn.Softmax(dim=1)
         
-       
         # Control whether weights are trainable
         if not trainable:
             for param in self.parameters():
@@ -142,36 +146,62 @@ class KernelActorDiscrete(nn.Module):
         
         self.apply(utils.weight_init)
 
-    def initialize_from_pretrained(self, phi_dataset, gradient_coeff, eta):
+    def initialize_from_pretrained(self, phi_dataset, gradient_coeff, eta, E=None):
         """
         Initialize weights from pretrained kernel policy.
         
         Args:
-            phi_dataset: [num_unique, feature_dim] - dataset feature matrix
-            gradient_coeff: [num_unique, n_actions] - learned coefficients
+            phi_dataset: [num_unique, feature_dim+1] - augmented dataset feature matrix
+            gradient_coeff: [num_unique+1, 1] - learned coefficients (last element is bias)
             eta: scalar - learning rate / temperature
+            E: [num_unique, n_actions] - action one-hot encoding matrix (optional)
         """
-        # kernel_layer.weight shape: [dataset_dim, feature_dim]
-        # We want: H = φ(x) @ φ_dataset^T = φ(x) @ W^T
-        # So W = φ_dataset
+        # 1. Initialize kernel layer: W = Φ_dataset (augmented with zeros)
         self.kernel_layer.weight.data.copy_(phi_dataset)
         
-        # grad_coefficient.weight shape: [n_actions, dataset_dim]
-        # We want: logits = H @ C = H @ W^T
-        # So W^T = C, hence W = C^T
-        self.grad_coefficient.weight.data.copy_(gradient_coeff.T)
+        # 2. Split gradient_coeff into action coeffs and bias
+        # gradient_coeff shape: [num_unique+1, 1]
+        # C[:-1] are action-specific coefficients, C[-1] is the bias
+        action_grad = gradient_coeff[:-1].squeeze(-1)  # [num_unique]
+        bias_grad = gradient_coeff[-1].item()  # scalar
         
-        # Set eta
+        # 3. Initialize action_coeffs layer
+        # We need to account for element-wise multiplication with E
+        # Original: H @ (C[:-1] ⊙ E) where ⊙ is element-wise product
+        # If E is provided, we can pre-compute C[:-1] ⊙ E
+        
+        # E shape: [num_unique, n_actions]
+        # C[:-1] shape: [num_unique]
+        # Broadcasting: C[:-1].unsqueeze(1) * E → [num_unique, n_actions]
+        weighted_E = action_grad.unsqueeze(1) * E  # [num_unique, n_actions]
+        # action_coeffs.weight shape: [n_actions, num_unique]
+        # We want: logits = H @ weighted_E = H @ W^T, so W^T = weighted_E
+        self.action_coeffs.weight.data.copy_(weighted_E.T)
+    
+        
+        # 4. Initialize bias term
+        self.bias_coeff.data.fill_(bias_grad)
+        
+        # 5. Set eta
         self.eta.data.copy_(torch.tensor(eta))
-        
+        print("all dtypes:", self.kernel_layer.weight.dtype, self.action_coeffs.weight.dtype, self.bias_coeff.dtype, self.eta.dtype)
         print(f"Kernel actor initialized from pretrained weights:")
         print(f"  - Kernel layer: {self.kernel_layer.weight.shape}")
-        print(f"  - Grad coeff: {self.grad_coefficient.weight.shape}")
+        print(f"  - Action coeffs: {self.action_coeffs.weight.shape}")
+        print(f"  - Bias: {self.bias_coeff.shape}")
         print(f"  - Eta: {self.eta.item()}")
 
     def forward(self, phi_x):
         """
-        Forward pass: π(a|s) = softmax(-η · φ(s)^T φ_dataset^T C)
+        Forward pass matching dist_matching_embedding_augmented.py structure:
+        
+        1. Augment φ(x) with zero: [φ(x); 0]
+        2. Compute kernel similarities: H = [φ(x); 0] @ Φ_dataset^T
+        3. Apply gradient coefficients: 
+           - action_logits = H @ (C[:-1] ⊙ E)  [via action_coeffs layer]
+           - bias_logits = 1 * C[-1]             [via bias_coeff parameter]
+        4. Combine: logits = action_logits + bias_logits
+        5. Apply softmax: π(a|s) = softmax(-η * logits)
         
         Args:
             phi_x: [batch_size, feature_dim] - encoded observations
@@ -179,24 +209,58 @@ class KernelActorDiscrete(nn.Module):
         Returns:
             probs: [batch_size, n_actions] - action probabilities
         """
-        # 1. Compute kernel similarities: H = φ(x) @ φ_dataset^T
+        batch_size = phi_x.shape[0]
+        
+        # Step 1: Augment φ(x) con zero nell'ultima dimensione
+        # Original: enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1))], dim=1)
+        phi_x_aug = torch.cat([phi_x, torch.zeros(batch_size, 1, device=phi_x.device)], dim=1)
+        phi_x_aug = phi_x_aug.to(dtype=float_type)
+        # Shape: [batch_size, feature_dim + 1]
+        
+        # Step 2: Calcola le similarità del kernel H = [φ(x); 0] @ Φ_dataset^T
+        # kernel_layer computes: H = phi_x_aug @ kernel_layer.weight^T
+        h = self.kernel_layer(phi_x_aug)
         # Shape: [batch_size, dataset_dim]
-        h = self.kernel_layer(phi_x)
         
-        # 2. Apply gradient coefficients: logits = H @ C
+        # Step 3a: Applica i coefficienti del gradiente specifici per azione
+        # Original: H @ (self.gradient_coeff[:-1] * self.E)
+        # action_coeffs.weight già contiene (C[:-1] ⊙ E)^T
+        action_logits = self.action_coeffs(h)
         # Shape: [batch_size, n_actions]
-        logits = self.grad_coefficient(h)
         
-        # 3. Scale by -eta and apply softmax
-        # Note: negative sign because we minimize in the original formulation
+        # Step 3b: Aggiungi il termine di bias (corrisponde a C[-1] nella formulazione originale)
+        # Original: + torch.ones(1, self.E.shape[1]) * self.gradient_coeff[-1]
+        bias_logits = self.bias_coeff.unsqueeze(0).expand(batch_size, -1)
+        # Shape: [batch_size, n_actions]
+        
+        # Step 4: Combina i logit delle azioni e il bias
+        logits = action_logits + bias_logits
+        
+        # Step 5: Scala per -eta e applica softmax
+        # Original: torch.softmax(-self.lr_actor * (...), dim=1)
         probs = self.softmax(-self.eta * logits)
         
         return probs
 
     def _logits(self, phi_x):
-        """Get logits without softmax (useful for some RL algorithms)."""
-        h = self.kernel_layer(phi_x)
-        logits = self.grad_coefficient(h)
+        """
+        Ottieni i logit senza softmax (utile per alcuni algoritmi RL).
+        Segue lo stesso calcolo di forward() ma restituisce i logit grezzi.
+        """
+        batch_size = phi_x.shape[0]
+        
+        # Augmenta con zero
+        phi_x_aug = torch.cat([phi_x, torch.zeros(batch_size, 1, device=phi_x.device)], dim=1)
+        
+        # Similarità del kernel
+        h = self.kernel_layer(phi_x_aug)
+        
+        # Logit specifici per azione + bias
+        action_logits = self.action_coeffs(h)
+        bias_logits = self.bias_coeff.unsqueeze(0).expand(batch_size, -1)
+        logits = action_logits + bias_logits
+        
+        # Scala per -eta (senza softmax)
         return -self.eta * logits
 
     def get_log_p(self, phi_x, actions):

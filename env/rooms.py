@@ -247,10 +247,10 @@ class BaseRoomEnv(gym.Env, ABC):
         
         # Reward: 1 - 0.9 * (step_count / max_steps) for success, 0 for failure
         if terminated:
-            reward = 1.0 - 0.9 * (self._step_count / self.max_steps)
+            reward = 0 #1.0 - 0.9 * (self._step_count / self.max_steps)
             # terminated =  False  
         else:
-            reward = 0 #- 1.0
+            reward = - 1.0
         
         observation = self._get_obs()
         info = self._get_info()

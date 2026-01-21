@@ -8,8 +8,10 @@ and multiple rooms attached below it via single-cell connectors.
 from typing import Optional, Tuple, Dict
 import numpy as np
 import gymnasium as gym
-from env.rooms import BaseRoomEnv
-
+try:
+    from env.rooms import BaseRoomEnv
+except:
+    from rooms import BaseRoomEnv
 
 class MultipleRoomsEnv(BaseRoomEnv):
     """
@@ -186,7 +188,7 @@ if __name__ == "__main__":
         connector_position=2,
         connector_length=1,
         render_mode="human",
-        show_coordinates=True
+        show_coordinates=True, goal_position=(1,0), start_position=(0,0)
     )
     
     obs, info = env.reset(seed=42)
