@@ -134,7 +134,7 @@ class MetersGroup(object):
         if self.use_wandb:
             wandb_data = {prefix + '/' + key: val for key, val in data.items()}
             self._dump_to_wandb(data=wandb_data)
-        self._dump_to_csv(data)
+        # self._dump_to_csv(data)
         # if (prefix == 'train' and step % 100 == 0) or prefix != 'train':
         self._dump_to_console(data, prefix)
         self._meters.clear()
