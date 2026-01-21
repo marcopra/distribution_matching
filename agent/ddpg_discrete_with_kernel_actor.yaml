@@ -18,8 +18,7 @@ hidden_dim: 1024
 dataset_dim: 556
 eta: 0.5
 feature_dim: 50
-stddev_schedule: 0.2
-stddev_clip: 0.3
+eps_schedule: linear(0.3, 0.01, 200000)
 nstep: 1
 batch_size: 1024 # 256 for pixels
 init_critic: true

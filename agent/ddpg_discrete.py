@@ -26,10 +26,9 @@ class DDPGAgent:
                  critic_target_tau,
                  num_expl_steps,
                  update_every_steps,
-                 stddev_schedule,
+                 eps_schedule,
                  nstep,
                  batch_size,
-                 stddev_clip,
                  init_critic,
                  use_tb,
                  use_wandb,
@@ -47,8 +46,7 @@ class DDPGAgent:
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.num_expl_steps = num_expl_steps
-        self.stddev_schedule = stddev_schedule
-        self.stddev_clip = stddev_clip
+        self.eps_schedule = eps_schedule
         self.init_critic = init_critic
         self.feature_dim = feature_dim
         self.solved_meta = None
@@ -121,7 +119,11 @@ class DDPGAgent:
             if eval_mode:
                 action = probs.argmax(dim=-1).cpu().numpy()[0]
             else:
-                action = Categorical(probs).sample().item()
+                eps = utils.schedule(self.eps_schedule, step)
+                if np.random.rand() < eps:
+                    action = np.random.randint(self.action_dim)
+                else:
+                    action = Categorical(probs).sample().item()
                 if step < self.num_expl_steps and self.reward_free:
                     if step % 1000 == 0 and step > 0:
                         ColorPrint.yellow("DDPG Discrete: using random action for exploration")
