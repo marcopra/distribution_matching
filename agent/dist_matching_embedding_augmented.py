@@ -1157,7 +1157,7 @@ class DistMatchingEmbeddingAgent:
         
         # 4. Loss embeddings must sum to 1
         embedding_sum_loss = torch.abs(torch.sum(encoded_obs, dim=-1) - 1).sum()
-        beta = 0.1 
+        beta = 1 
         # 5. \phi(s) and \phi(s') must be close in L2 norm
         l2_loss = torch.norm(encoded_obs - encoded_next, p=2, dim=1).mean()
 
