@@ -51,7 +51,6 @@ class Encoder(nn.Module):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
-        # h = F.softmax(h/self.temperature, dim=-1)
 
         return h
 
@@ -293,17 +292,9 @@ class EmbeddingDistributionVisualizer:
             trajectory = [obs.copy()]
             actions = []
             
-            if traj_idx == 0:
-                print(f"Starting trajectory from initial observation: {obs}")
-            
             for i in range(self.traj_length):
                 action = self.agent.act(obs, None, self.agent.num_expl_steps + 1, eval_mode=True)
                 obs, reward, terminated, truncated, _ = self.env.step(action)
-                
-                if traj_idx == 0 and i < 5:
-                    print(f"  Step {i}: action={action} -> obs={obs}")
-                # else:
-                #     exit()
                 
                 trajectory.append(obs.copy())
                 actions.append(action)
@@ -316,10 +307,159 @@ class EmbeddingDistributionVisualizer:
         
         return trajectories, action_sequences
     
+    def _sample_equidistributed_walkable_states(self, n_samples: int = 16):
+        """
+        Sample states equidistributed in the walkable areas.
+        Creates a grid within each walkable area and samples valid positions.
+        
+        Args:
+            n_samples: Target number of samples (actual number may vary)
+            
+        Returns:
+            np.ndarray: Array of sampled states [n_actual_samples, obs_dim]
+        """
+        if not hasattr(self.env, 'walkable_areas'):
+            # Fallback: uniform grid over entire observation space
+            grid_size = int(np.ceil(np.sqrt(n_samples)))
+            x_coords = np.linspace(self.obs_low[0] + 0.2, self.obs_high[0] - 0.2, grid_size)
+            y_coords = np.linspace(self.obs_low[1] + 0.2, self.obs_high[1] - 0.2, grid_size)
+            
+            sampled_states = []
+            for x in x_coords:
+                for y in y_coords:
+                    sampled_states.append([x, y])
+            
+            return np.array(sampled_states[:n_samples])
+        
+        # Sample from walkable areas
+        sampled_states = []
+        agent_radius = self.env.agent_radius
+        
+        # Calculate samples per area proportional to area size
+        total_area = sum(area[2] * area[3] for area in self.env.walkable_areas)
+        
+        for area in self.env.walkable_areas:
+            ax, ay, aw, ah = area
+            area_size = aw * ah
+            n_samples_area = max(1, int(n_samples * area_size / total_area))
+            
+            # Create grid within this area
+            grid_size = int(np.ceil(np.sqrt(n_samples_area)))
+            
+            # Add margin for agent radius
+            margin = agent_radius + 0.05
+            x_coords = np.linspace(ax + margin, ax + aw - margin, grid_size)
+            y_coords = np.linspace(ay + margin, ay + ah - margin, grid_size)
+            
+            for x in x_coords:
+                for y in y_coords:
+                    # Verify position is valid with agent radius
+                    if self.env._is_position_valid_with_radius(x, y):
+                        sampled_states.append([x, y])
+        
+        return np.array(sampled_states)
+    
+    def _plot_action_probabilities_grid(self, ax, n_samples: int = 16):
+        """
+        Plot action probabilities for equidistributed states in walkable areas.
+        Similar style to discrete version with squares and bars.
+        
+        Args:
+            ax: Matplotlib axis
+            n_samples: Number of states to sample
+        """
+        sampled_states = self._sample_equidistributed_walkable_states(n_samples)
+        
+        # Set axis limits matching environment
+        ax.set_xlim(self.obs_low[0], self.obs_high[0])
+        ax.set_ylim(self.obs_low[1], self.obs_high[1])
+        ax.set_aspect('equal')
+        ax.set_title(f'Action Probabilities\n({len(sampled_states)} sampled states)')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.grid(True, alpha=0.3)
+        
+        # Draw environment structure if available
+        if hasattr(self.env, 'walkable_areas'):
+            for area in self.env.walkable_areas:
+                rect = Rectangle((area[0], area[1]), area[2], area[3],
+                               fill=False, edgecolor='gray', linewidth=1, linestyle='--', alpha=0.5)
+                ax.add_patch(rect)
+        
+        # For each sampled state, draw a square with bars
+        square_size = 0.3
+        
+        for state in sampled_states:
+            x, y = state
+            
+            # Draw background square
+            rect = Rectangle((x - square_size/2, y - square_size/2), square_size, square_size,
+                           facecolor='lightgray', edgecolor='black', linewidth=0.5)
+            ax.add_patch(rect)
+            
+            # Compute action probabilities
+            action_probs = self.agent.compute_action_probs(state)
+            
+            # Draw bars for each action
+            bar_width = square_size / (self.n_actions + 1)
+            bar_spacing = square_size / self.n_actions
+            start_x = x - square_size/2 + bar_width/2
+            max_bar_height = square_size * 0.8
+            
+            for a_idx in range(self.n_actions):
+                bar_x = start_x + a_idx * bar_spacing
+                bar_height = action_probs[a_idx] * max_bar_height
+                
+                bar_rect = Rectangle((bar_x - bar_width/2, y - square_size/2 + 0.1),
+                                    bar_width, bar_height,
+                                    facecolor=self.action_colors[a_idx],
+                                    edgecolor='black', linewidth=0.3)
+                ax.add_patch(bar_rect)
+        
+        # Add legend
+        legend_elements = [Patch(facecolor=self.action_colors[i], 
+                                label=self.action_names[i])
+                          for i in range(self.n_actions)]
+        ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1, 1), fontsize=8)
+
+    def _plot_action_probabilities_bars(self, ax, n_samples: int = 6):
+        """
+        Plot action probabilities as grouped bar charts for selected states.
+        
+        Args:
+            ax: Matplotlib axis
+            n_samples: Number of states to display (max 10 for readability)
+        """
+        sampled_states = self._sample_representative_states(min(n_samples, 10))
+        
+        # Compute action probabilities
+        action_probs = np.zeros((len(sampled_states), self.n_actions))
+        for i, state in enumerate(sampled_states):
+            action_probs[i] = self.agent.compute_action_probs(state)
+        
+        # Create grouped bar chart
+        x = np.arange(len(sampled_states))
+        width = 0.8 / self.n_actions
+        
+        for action_idx in range(self.n_actions):
+            offset = (action_idx - self.n_actions/2 + 0.5) * width
+            ax.bar(x + offset, action_probs[:, action_idx], 
+                   width, label=self.action_names[action_idx],
+                   color=self.action_colors[action_idx], alpha=0.8)
+        
+        ax.set_xlabel('State Sample')
+        ax.set_ylabel('Probability')
+        ax.set_title(f'Action Probabilities per State\n({len(sampled_states)} samples)')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'S{i}' for i in range(len(sampled_states))])
+        ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=8)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_ylim([0, 1])
+
     def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False):
         """
         Plot 2D projection of state embeddings using PCA or t-SNE.
-        Samples states from trajectories.
+        Creates two subplots: one with trajectories, one with equidistributed states.
         
         Args:
             save_path: Path to save the figure
@@ -328,19 +468,25 @@ class EmbeddingDistributionVisualizer:
         # Sample trajectories to get states
         trajectories, _ = self._sample_trajectories()
         
-        # Collect all observations
-        all_obs = []
+        # Collect all observations from trajectories
+        all_obs_traj = []
         for traj in trajectories:
-            all_obs.extend(traj)
-        all_obs = np.array(all_obs)
+            all_obs_traj.extend(traj)
+        all_obs_traj = np.array(all_obs_traj)
+        
+        # Get equidistributed states
+        equidist_states = self._sample_equidistributed_walkable_states(n_samples=200)
+        
+        # Combine all observations for dimensionality reduction
+        all_obs_combined = np.vstack([all_obs_traj, equidist_states])
         
         with torch.no_grad():
-            obs_tensor = torch.from_numpy(all_obs).double().to(self.agent.device)
+            obs_tensor = torch.from_numpy(all_obs_combined).double().to(self.agent.device)
             embeddings = self.agent.encoder(obs_tensor).cpu().numpy()
         
         # Dimensionality reduction
         if use_tsne:
-            reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_obs)-1))
+            reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_obs_combined)-1))
             method_name = "t-SNE"
         else:
             reducer = PCA(n_components=2)
@@ -348,34 +494,62 @@ class EmbeddingDistributionVisualizer:
         
         embeddings_2d = reducer.fit_transform(embeddings)
         
-        # Create visualization
-        fig, ax = plt.subplots(figsize=(10, 8))
+        # Split embeddings back
+        n_traj_obs = len(all_obs_traj)
+        embeddings_traj = embeddings_2d[:n_traj_obs]
+        embeddings_equidist = embeddings_2d[n_traj_obs:]
         
-        # Color by trajectory
-        colors = plt.cm.viridis(np.linspace(0, 1, self.n_trajectories))
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+        
+        # === LEFT PLOT: Trajectories ===
+        # Create colormap for trajectory progression (light to dark)
+        cmap = plt.cm.viridis
         
         idx = 0
         for traj_idx, traj in enumerate(trajectories):
             traj_len = len(traj)
-            traj_embeddings = embeddings_2d[idx:idx+traj_len]
+            traj_embeddings = embeddings_traj[idx:idx+traj_len]
             
-            # Plot trajectory as connected line
-            ax.scatter(traj_embeddings[:, 0], traj_embeddings[:, 1], 
-                   c=colors[traj_idx], alpha=0.6, linewidth=1.5, marker="1", s=100)
-            # Mark start and end
-            ax.scatter(traj_embeddings[0, 0], traj_embeddings[0, 1],
-                      c=[colors[traj_idx]], s=100, marker='o', edgecolors='black', linewidth=2, label=f'Start {traj_idx}' if traj_idx < 3 else '')
-            ax.scatter(traj_embeddings[-1, 0], traj_embeddings[-1, 1],
-                      c=[colors[traj_idx]], s=100, marker='*', edgecolors='black', linewidth=2)
+            # Color gradient from light (start) to dark (end)
+            colors = cmap(np.linspace(0.3, 0.9, traj_len))
+            
+            # Plot middle points
+            if traj_len > 2:
+                ax1.scatter(traj_embeddings[1:-1, 0], traj_embeddings[1:-1, 1],
+                          c=colors[1:-1], alpha=0.6, s=20, marker='o')
+            
+            # Mark start (star) and end (triangle)
+            ax1.scatter(traj_embeddings[0, 0], traj_embeddings[0, 1],
+                      c=[colors[0]], s=150, marker='*', edgecolors='black', 
+                      linewidth=1.5, label='Start' if traj_idx == 0 else '')
+            ax1.scatter(traj_embeddings[-1, 0], traj_embeddings[-1, 1],
+                      c=[colors[-1]], s=100, marker='^', edgecolors='black',
+                      linewidth=1.5, label='End' if traj_idx == 0 else '')
             
             idx += traj_len
         
-        ax.set_xlabel(f'{method_name} Component 1')
-        ax.set_ylabel(f'{method_name} Component 2')
-        ax.set_title(f'State Embeddings from {self.n_trajectories} Trajectories ({method_name})')
-        ax.grid(True, alpha=0.3)
-        if self.n_trajectories <= 3:
-            ax.legend()
+        ax1.set_xlabel(f'{method_name} Component 1')
+        ax1.set_ylabel(f'{method_name} Component 2')
+        ax1.set_title(f'Trajectory Embeddings ({self.n_trajectories} trajectories)\nLight→Dark: Start→End')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        # === RIGHT PLOT: Equidistributed states ===
+        scatter = ax2.scatter(embeddings_equidist[:, 0], embeddings_equidist[:, 1],
+                             c=range(len(embeddings_equidist)), cmap='coolwarm',
+                             s=100, edgecolors='black', linewidth=1.5)
+        
+        # Annotate with state coordinates
+        for i, (emb, state) in enumerate(zip(embeddings_equidist, equidist_states)):
+            ax2.annotate(f"({state[0]:.1f},{state[1]:.1f})", 
+                        (emb[0], emb[1]), fontsize=7, ha='right', va='bottom')
+        
+        ax2.set_xlabel(f'{method_name} Component 1')
+        ax2.set_ylabel(f'{method_name} Component 2')
+        ax2.set_title(f'Equidistributed State Embeddings ({len(equidist_states)} states)')
+        ax2.grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=ax2, label='State Index')
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -385,6 +559,10 @@ class EmbeddingDistributionVisualizer:
     def plot_results(self, step: int, save_path: str = None):
         """
         Create visualization of trajectories and their embeddings.
+        Layout:
+        - Left (2 rows): Main trajectory plot
+        - Right top row: Dataset distribution
+        - Right bottom row: Action probabilities grid (larger)
         
         Args:
             step: Current training step
@@ -392,9 +570,7 @@ class EmbeddingDistributionVisualizer:
         """
         trajectories, action_sequences = self._sample_trajectories()
         
-        fig = plt.figure(figsize=(20, 10))
-        
-        # Add parameter text
+        # Parameter text
         param_text = (
             f"Step: {step}\n"
             f"γ = {self.agent.discount}\n"
@@ -403,22 +579,25 @@ class EmbeddingDistributionVisualizer:
             f"PMD steps = {self.agent.pmd_steps}\n"
             f"Trajectories: {self.n_trajectories}"
         )
+        
+        # Create figure with 2x3 grid
+        fig = plt.figure(figsize=(24, 12))
         fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        # Create subplot grid
+        # 2 rows x 3 columns
         ax_trajectories = plt.subplot2grid((2, 3), (0, 0), colspan=2, rowspan=2)
         ax_dataset = plt.subplot2grid((2, 3), (0, 2), colspan=1)
-        ax_embeddings = plt.subplot2grid((2, 3), (1, 2), colspan=1)
+        ax_action_grid = plt.subplot2grid((2, 3), (1, 2), colspan=1)
         
         # Plot trajectories in observation space
         self._plot_trajectories(ax_trajectories, trajectories)
         
-        # Plot dataset occupancy
+        # Plot dataset occupancy with smart bins
         self._plot_dataset_occupancy(ax_dataset)
         
-        # Plot embedding distribution
-        self._plot_embedding_distribution(ax_embeddings, trajectories)
+        # Plot action probabilities grid (with bars in squares) - larger now
+        self._plot_action_probabilities_grid(ax_action_grid, n_samples=150)
         
         plt.tight_layout()
         
@@ -457,7 +636,7 @@ class EmbeddingDistributionVisualizer:
                 ax.add_patch(rect)
     
     def _plot_dataset_occupancy(self, ax, title='Dataset Observation Distribution'):
-        """Plot 2D histogram of observations in the dataset."""
+        """Plot 2D histogram of observations in the dataset with smart binning."""
         dataset_dict = self.agent.dataset._sampled_data if hasattr(self.agent.dataset, '_sampled_data') else self.agent.dataset.data
         observations = dataset_dict['observation']
         
@@ -469,17 +648,46 @@ class EmbeddingDistributionVisualizer:
         
         obs_np = observations.cpu().numpy()
         
-        # Create 2D histogram
-        ax.hist2d(obs_np[:, 0], obs_np[:, 1], bins=30, cmap='Blues', 
+        # Smart binning based on move_delta
+        # Calculate expected discrete positions based on move_delta
+        x_range = self.obs_high[0] - self.obs_low[0]
+        y_range = self.obs_high[1] - self.obs_low[1]
+        
+        # Number of bins should capture discrete positions if agent moves in grid-like fashion
+        # For 4 actions, positions align to move_delta increments
+        if self.agent.n_actions == 4:
+            # Estimate number of discrete positions
+            n_bins_x = max(10, int(np.ceil(x_range / self.env.move_delta)) + 1)
+            n_bins_y = max(10, int(np.ceil(y_range / self.env.move_delta)) + 1)
+        else:
+            # For 8 actions, use finer binning
+            n_bins_x = max(15, int(np.ceil(x_range / (self.env.move_delta * 0.7))) + 1)
+            n_bins_y = max(15, int(np.ceil(y_range / (self.env.move_delta * 0.7))) + 1)
+        
+        # Create custom bin edges aligned to potential discrete positions
+        x_bins = np.linspace(self.obs_low[0], self.obs_high[0], n_bins_x)
+        y_bins = np.linspace(self.obs_low[1], self.obs_high[1], n_bins_y)
+        
+        # Create 2D histogram with custom bins
+        ax.hist2d(obs_np[:, 0], obs_np[:, 1], 
+                 bins=[x_bins, y_bins], 
+                 cmap='Blues',
                  range=[[self.obs_low[0], self.obs_high[0]], 
                         [self.obs_low[1], self.obs_high[1]]])
         
         ax.set_xlim(self.obs_low[0], self.obs_high[0])
         ax.set_ylim(self.obs_low[1], self.obs_high[1])
-        ax.set_title(f'{title}\n(Total: {observations.shape[0]} samples)')
+        ax.set_title(f'{title}\n(Total: {observations.shape[0]} samples)\nBins: {n_bins_x}x{n_bins_y}')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         ax.grid(True, alpha=0.3)
+        
+        # Draw environment structure if available
+        if hasattr(self.env, 'walkable_areas'):
+            for area in self.env.walkable_areas:
+                rect = Rectangle((area[0], area[1]), area[2], area[3],
+                               fill=False, edgecolor='red', linewidth=1.5, linestyle='--', alpha=0.7)
+                ax.add_patch(rect)
     
     def _plot_embedding_distribution(self, ax, trajectories):
         """Plot distribution of embeddings using PCA projection."""
@@ -662,7 +870,7 @@ class DistMatchingEmbeddingAgent:
         # For continuous spaces, we don't use second_state indexing
         
         # Initialize visualizer now that we have the environment
-        self.visualizer = EmbeddingDistributionVisualizer(self, n_trajectories=30, traj_length=100)
+        self.visualizer = EmbeddingDistributionVisualizer(self, n_trajectories=5, traj_length=300)
         
         # Ideal mode not supported for continuous spaces
         if self.ideal:
@@ -717,8 +925,6 @@ class DistMatchingEmbeddingAgent:
         """Encode (s,a) pairs as ψ(s,a) = φ(s) ⊗ e_a."""
         action_onehot = F.one_hot(actions.long(), self.n_actions).double().reshape(-1, self.n_actions)  # [B, |A|]
         
-        # print dimensions for debugging
-        print(f"encoded_obs shape: {encoded_obs.shape}, action_onehot shape: {action_onehot.shape}")
         # Outer product: [B, d] ⊗ [B, |A|] -> [B, d*|A|]
         encoded_sa = torch.einsum('bd,ba->bda', encoded_obs, action_onehot)
         return encoded_sa.reshape(encoded_obs.shape[0], -1)
@@ -728,21 +934,20 @@ class DistMatchingEmbeddingAgent:
         """Compute π(·|s) for given observation."""
         with torch.no_grad():
             obs_tensor = torch.tensor(obs).unsqueeze(0).double().to(self.device)  # [1, obs_dim]
-            enc_obs = self.encoder(obs_tensor).cpu()  # [1, feature_dim]
+            enc_obs = self.encoder(obs_tensor)  # [1, feature_dim]
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
             
             # Add a zero to enc_obs to account for the extra row in H
-            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), dtype=torch.double)], dim=1)  # [1, feature_dim + 1]
+            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), dtype=torch.double, device=self.device)], dim=1)  # [1, feature_dim + 1]
             H = enc_obs_augmented @ self._phi_all_obs.T  # [1, num_unique]
 
-            probs = torch.softmax(-self.lr_actor * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [1, n_actions]
-
+            probs = torch.softmax(-self.lr_actor * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [1, n_actions]
             
             if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
                 raise ValueError("action_probs sum to zero or NaN")
-            return probs.numpy().flatten()
+            return probs.cpu().numpy().flatten()
 
     
     def act(self, obs, meta, step, eval_mode):
@@ -787,29 +992,18 @@ class DistMatchingEmbeddingAgent:
         
         # Compute loss
         # 1. Contrastive loss:
-        logits = predicted_next @ encoded_next.T  # [B, B]
+        logits = predicted_next/torch.norm(predicted_next, p=2, dim=1, keepdim=True) @ (encoded_next/torch.norm(encoded_next, p=2, dim=1, keepdim=True)).T  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
 
-        # 2. Compute Feature Correlation Matrix (Z x Z)
-        #    Shape: [Feature_Dim, Feature_Dim]
-        #    We want this to be close to Identity (uncorrelated features)
-        # remove duplicates from encoded_obs
-        unique_obs = torch.unique(obs, dim=0)
-        encoded_obs = self.encoder(unique_obs.double())
-        cov_matrix = (encoded_obs.T @ encoded_obs) / (encoded_obs.shape[0] - 1)
-
-        # 3. Decorrelation Loss (Push off-diagonals to 0)
-        #    This forces each dimension to represent independent information, 
-        #    preventing "feature collapse" where all dimensions encode the same thing.
-        off_diagonal_mask = ~torch.eye(cov_matrix.shape[0], dtype=torch.bool, device=self.device)
-        decorrelation_loss = torch.abs(cov_matrix[off_diagonal_mask]).sum()
-        
         # 4. Loss embeddings must sum to 1
         embedding_sum_loss = torch.abs(torch.sum(encoded_obs, dim=-1) - 1).sum()
+        beta = 1 
+        # 5. \phi(s) and \phi(s') must be close in L2 norm
+        l2_loss = torch.norm(encoded_obs - encoded_next, p=2, dim=1).mean()
 
-        loss =  contrastive_loss + 0*decorrelation_loss + embedding_sum_loss
+        loss = 1000*contrastive_loss + beta*embedding_sum_loss + 1*l2_loss        
         
         # Optimize
         self.encoder_optimizer.zero_grad()
@@ -818,9 +1012,12 @@ class DistMatchingEmbeddingAgent:
         self.encoder_optimizer.step()
         self.transition_optimizer.step()
 
-        print(f"transition_loss: {loss.item()}, deco_loss: {decorrelation_loss.item()}, contrastive_loss: {contrastive_loss.item()}")
+        # Print losses
+        
+        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, EmbeddingSum={embedding_sum_loss.item():.4f}, L2={l2_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
+
         return metrics
 
     def update_actor(self, obs, step):
@@ -896,6 +1093,7 @@ class DistMatchingEmbeddingAgent:
             actions = tensors['action'].to(self.device)
             next_obs = tensors['next_observation'].to(self.device, dtype=torch.double)
             
+            print(f"Encoding {obs.shape} observations and next observations on device {self.device}...")
             self._phi_all_obs = self.encoder(obs)
             self._phi_all_next = self.encoder(next_obs)
          
@@ -971,8 +1169,6 @@ class DistMatchingEmbeddingAgent:
         
         metrics.update(self.update_transition_matrix(obs, action, next_obs))
 
-        print(f"last dataset size: {self.dataset.last_size}")
-        print(f"current dataset size: {self.dataset.size}, current periodo size {self.dataset.current_data_size}")
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value

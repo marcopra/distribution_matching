@@ -14,7 +14,7 @@ env:
   wall_thickness: 0.3
   agent_radius: 0.15
   
-  num_actions: 8  # 4 cardinal directions + 4 diagonal directions
+  num_actions: 4  # 4 cardinal directions + ( 4 diagonal directions if n action = 8)
   
   # Reward parameters
   dense_reward: false
@@ -24,7 +24,7 @@ env:
   goal_position: null
   
   # Start position (optional, null for random at each episode)
-  start_position: null
+  start_position:  [0.8, 0.8] 
   
   # Rendering
   render_resolution: 512

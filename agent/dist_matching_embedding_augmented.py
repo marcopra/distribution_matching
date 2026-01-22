@@ -35,24 +35,20 @@ class Encoder(nn.Module):
         self.repr_dim = feature_dim
         self.temperature = 0.05
 
-        # self.fc = nn.Identity()
-        # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
+
         self.fc =  nn.Sequential(
             nn.Linear(obs_shape[0], hidden_dim, bias=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, feature_dim, bias=False),
-            # nn.LayerNorm(feature_dim),
         )
 
-        # nn.init.eye_(self.fc[0].weight)
         self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
-        # h = F.normalize(h, p=2, dim=-1)
-        # h = F.softmax(h/self.temperature, dim=-1)
+
 
         return h
 
@@ -1153,7 +1149,6 @@ class DistMatchingEmbeddingAgent:
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
-        # contrastive_loss = torch.norm(predicted_next - encoded_next, p=2, dim=1).mean()
         
         # 4. Loss embeddings must sum to 1
         embedding_sum_loss = torch.abs(torch.sum(encoded_obs, dim=-1) - 1).sum()

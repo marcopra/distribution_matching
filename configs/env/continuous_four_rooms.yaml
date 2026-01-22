@@ -9,10 +9,16 @@ env:
   show_coordinates: false
   
   # Continuous movement parameters
-  move_delta: 0.5  # Distance moved per action
-  goal_threshold: 0.5  # Distance to goal to consider it reached
+  move_delta: 0.3
+  goal_threshold: 0.4
+  wall_thickness: 0.3
+  agent_radius: 0.15
   
-  num_actions: 4  # Up, Down, Left, Right
+  num_actions: 4
+  
+  # Reward parameters
+  dense_reward: false
+  wall_penalty: 0.0
   
   # Goal position (optional, null for random at each episode)
   goal_position: null  # Can be [x, y] or null for random
