@@ -16,8 +16,8 @@ resolution: 224
 random_init: true
 random_goal: true
 
-# agent:
-#   linear_actor: false # whether to use a linear actor or not WARNING: only works with discrete_sac agent
+
+update_actor_after_critic_steps: 0
 
 # train settings
 num_train_frames: 2000010

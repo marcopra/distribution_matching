@@ -20,6 +20,7 @@ class DDPGAgent:
                  obs_shape,
                  action_shape, # Number of discrete actions
                  device,
+                 lr, # deprectaed
                  actor_lr,
                  critic_lr,
                  feature_dim,
