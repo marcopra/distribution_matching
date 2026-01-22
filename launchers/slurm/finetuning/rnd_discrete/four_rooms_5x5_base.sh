@@ -19,5 +19,5 @@ export HYDRA_FULL_ERROR=1
 
 
 
-python train.py agent=rnd_discrete eval_every_frames=5000 num_train_frames=200000 configs/env=${ENV} device=cuda seed=${SEED} save_video=false p_path=${MODEL_PATH} use_wandb=true save_train_video=false env.render_mode=null agent.feature_dim=200 agent.actor_lr=1e-4 agent.init_critic=false num_seed_frames=2000 reward_free=false
+python train.py agent=rnd_discrete eval_every_frames=5000 num_train_frames=200000 configs/env=${ENV} device=cuda seed=${SEED} save_video=false p_path=${MODEL_PATH} use_wandb=true save_train_video=false env.render_mode=null agent.feature_dim=200 agent.actor_lr=1e-7 agent.init_critic=false num_seed_frames=2000 reward_free=false
 
