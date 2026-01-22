@@ -38,3 +38,4 @@ batch_size: 1024
 init_critic: true
 update_encoder: ${update_encoder}
 linear_actor: false
+update_actor_after_critic_steps: ${update_actor_after_critic_steps}

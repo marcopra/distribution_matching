@@ -56,7 +56,7 @@ class RND(nn.Module):
 
 
 class RNDAgent(DDPGAgent):
-    def __init__(self, rnd_rep_dim, update_encoder, rnd_scale=1., **kwargs):
+    def __init__(self, rnd_rep_dim, update_encoder, rnd_lr, rnd_scale=1., **kwargs):
         super().__init__(**kwargs)
         self.rnd_scale = rnd_scale
         self.update_encoder = update_encoder
@@ -67,7 +67,7 @@ class RNDAgent(DDPGAgent):
         self.intrinsic_reward_rms = utils.RMS(device=self.device)
 
         # optimizers
-        self.rnd_opt = torch.optim.Adam(self.rnd.parameters(), lr=self.lr)
+        self.rnd_opt = torch.optim.Adam(self.rnd.parameters(), lr=rnd_lr)
 
         self.rnd.train()
 
