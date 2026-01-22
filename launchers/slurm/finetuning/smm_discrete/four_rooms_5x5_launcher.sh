@@ -1,6 +1,6 @@
 #!/bin/bash
 
-seeds="0 1"
+seeds="0 1 2"
 envs=("four_rooms5_0" 
        "four_rooms5_1" 
        "four_rooms5_2" )
