@@ -569,7 +569,9 @@ class EmbeddingDistributionVisualizer:
             save_path: Path to save figure (optional)
         """
         trajectories, action_sequences = self._sample_trajectories()
-        
+        # Compute current epsilon value
+        epsilon = utils.schedule(self.agent.sink_schedule, step)
+
         # Parameter text
         param_text = (
             f"Step: {step}\n"
@@ -577,7 +579,8 @@ class EmbeddingDistributionVisualizer:
             f"η = {self.agent.lr_actor}\n"
             f"λ = {self.agent.lambda_reg}\n"
             f"PMD steps = {self.agent.pmd_steps}\n"
-            f"Trajectories: {self.n_trajectories}"
+            f"Trajectories: {self.n_trajectories}\n"
+            f"ε = {epsilon:.6f}\n"
         )
         
         # Create figure with 2x3 grid
