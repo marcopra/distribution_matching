@@ -11,8 +11,8 @@ lr_T: 1e-3
 batch_size: 1024
 nstep: 1
 lr_encoder: 1e-3
-hidden_dim: 256
-feature_dim: null
+hidden_dim: 2048
+feature_dim: 1024
 T_init_steps: 300
 update_every_steps: 1
 update_actor_every_steps: 960

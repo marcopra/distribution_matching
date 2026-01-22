@@ -35,45 +35,48 @@ class Encoder(nn.Module):
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
         
-        self.linear = nn.Linear(
-            obs_shape[0],
-            feature_dim,
-            bias=True
-        )
+        # self.linear = nn.Linear(
+        #     obs_shape[0],
+        #     feature_dim,
+        #     bias=True
+        # )
 
-        # --- inizializzazione random features ---
-        nn.init.normal_(self.linear.weight, mean=0.0, std=1.0)
-        nn.init.uniform_(self.linear.bias, 0.0, 2 * math.pi)
+        # # --- inizializzazione random features ---
+        # nn.init.normal_(self.linear.weight, mean=0.0, std=1.0)
+        # nn.init.uniform_(self.linear.bias, 0.0, 2 * math.pi)
 
-        # congela i parametri
-        for p in self.parameters():
-            p.requires_grad = False
+        # # congela i parametri
+        # for p in self.parameters():
+        #     p.requires_grad = False
 
         # self.fc = nn.Identity()
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
         self.fc =  nn.Sequential(
             nn.Linear(obs_shape[0], hidden_dim, bias=False),
             nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
+            nn.ReLU(),
             nn.Linear(hidden_dim, feature_dim, bias=False),
+
             # nn.LayerNorm(feature_dim),
         )
 
         # nn.init.eye_(self.fc[0].weight)
-        # self.apply(utils.weight_init)
+        self.apply(utils.weight_init)
 
     def forward(self, obs):
          # Random Fourier Features
-        h = self.linear(obs)
-        h = torch.cos(h)
+        # h = self.linear(obs)
+        # h = torch.cos(h)
 
-        # opzionale ma spesso utile
-        h = F.normalize(h, p=2, dim=-1)
+        # # opzionale ma spesso utile
+        # h = F.normalize(h, p=2, dim=-1)
 
-        # obs = obs.view(obs.shape[0], -1)
+        obs = obs.view(obs.shape[0], -1)
 
 
-        # h = self.fc(obs)
-        # h = F.normalize(h, p=1, dim=-1)
+        h = self.fc(obs)
+        h = F.normalize(h, p=1, dim=-1)
 
         return h
 
@@ -152,28 +155,28 @@ class DistributionMatcher:
         N = K.shape[0]
        
         # α̃ augmented to be [α; 1]
-        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), dtype=alpha.dtype)
         tilde_alpha[:-1] = alpha
 
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
-        A = K + self.lambda_reg * torch.eye(N, device=self.device)
+        A = K + self.lambda_reg * torch.eye(N)
         L = torch.linalg.cholesky(A)
         BM = torch.cholesky_solve(M, L)
         
         # M̃ augmented to be [M 0; 0 1]
-        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, dtype=BM.dtype)
         tilde_BM[:-1, :-1] = BM
         tilde_BM[-1, -1] = 1.0
 
-        inv_term = torch.linalg.solve( torch.eye(N+1, device=self.device) - self.gamma * tilde_BM, tilde_alpha)
+        inv_term = torch.linalg.solve( torch.eye(N+1) - self.gamma * tilde_BM, tilde_alpha)
         
-        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), dtype=phi_all_next_obs.dtype)
         sink_state[-1] = SINK_STATE_VALUE*epsilon
 
         # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
-        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
+        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
+        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), dtype=phi_all_next_obs.dtype)
         tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
         tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
         # tilde_phi_all_next_obs_transposed[-1, -1] = 1.0 # TODO patch 0.1
@@ -207,14 +210,14 @@ class DistributionMatcher:
         ) -> torch.Tensor:
         """Compute gradient coefficient for policy update."""
         # Identity matrix
-        I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
+        I_n_plus1 = torch.eye(psi_all_obs_action.shape[0])
 
-        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), dtype=phi_all_next_obs.dtype)
         sink_state[-1] = SINK_STATE_VALUE*epsilon
 
         # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
-        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
+        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
+        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), dtype=phi_all_next_obs.dtype)
         tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
         assert sink_state.shape[0] == upper_left.shape[0], "Sink state and upper left matrix row size mismatch"
         tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
@@ -230,31 +233,31 @@ class DistributionMatcher:
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
         A = psi_all_obs_action @ psi_all_obs_action.T + self.lambda_reg * I_n_plus1
-        tilde_A = torch.zeros(A.shape[0] + 1, A.shape[1] + 1, device=A.device, dtype=A.dtype)
+        tilde_A = torch.zeros(A.shape[0] + 1, A.shape[1] + 1, dtype=A.dtype)
         tilde_A[:-1, :-1] = A
         tilde_A[-1, -1] = 1.0
 
         # M̃ augmented to be [M 0; 0 1]
-        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
+        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, dtype=M.dtype)
         tilde_M[:-1, :-1] = M
         tilde_M[-1, -1] = 1.0
 
         # α̃ augmented to be [α; 1]
-        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), dtype=alpha.dtype)
         tilde_alpha[:-1] = alpha
 
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: BM = A⁻¹M
         L = torch.linalg.cholesky(A)
         BM = torch.cholesky_solve(M, L)
-        tilde_B_tilde_M = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_B_tilde_M = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, dtype=BM.dtype)
         tilde_B_tilde_M[:-1, :-1] = BM
         tilde_B_tilde_M[-1, -1] = 1.0
 
         # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
         # Using the precomputed terms and solves:
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
-        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
+        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], dtype=tilde_B_tilde_M.dtype)
         symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_all_next_obs)
 
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
@@ -906,11 +909,11 @@ class DistMatchingEmbeddingAgent:
     def insert_env(self, env):
         self.env = env.unwrapped
         timestep = env.reset()
-        self.first_state = torch.tensor(timestep.observation, device=self.device, dtype=torch.double)
+        self.first_state = torch.tensor(timestep.observation, dtype=torch.double)
         self.second_states = []
         for action in range(self.n_actions):
             next_timestep = env.step(action)
-            self.second_states.append(torch.tensor(next_timestep.observation, device=self.device, dtype=torch.double))
+            self.second_states.append(torch.tensor(next_timestep.observation, dtype=torch.double))
             env.reset()
             
         # For continuous spaces, we don't use second_state indexing
@@ -1090,20 +1093,20 @@ class DistMatchingEmbeddingAgent:
         """Compute π(·|s) for given observation."""
         with torch.no_grad():
             obs_tensor = torch.tensor(obs).unsqueeze(0).double().to(self.device)  # [1, obs_dim]
-            enc_obs = self.encoder(obs_tensor)  # [1, feature_dim]
+            enc_obs = self.encoder(obs_tensor).cpu()  # [1, feature_dim]
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
             
             # Add a zero to enc_obs to account for the extra row in H
-            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), dtype=torch.double, device=self.device)], dim=1)  # [1, feature_dim + 1]
+            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), dtype=torch.double)], dim=1)  # [1, feature_dim + 1]
             H = enc_obs_augmented @ self._phi_all_obs.T  # [1, num_unique]
 
-            probs = torch.softmax(-self.lr_actor * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [1, n_actions]
+            probs = torch.softmax(-self.lr_actor * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [1, n_actions]
             
             if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
                 raise ValueError("action_probs sum to zero or NaN")
-            return probs.cpu().numpy().flatten()
+            return probs.numpy().flatten()
 
     
     def act(self, obs, meta, step, eval_mode):
@@ -1183,13 +1186,13 @@ class DistMatchingEmbeddingAgent:
         if not hasattr(self, '_features_cached'):
             self._cache_features()
             # if self.gradient_coeff is None or (self.gradient_coeff is not None and self.gradient_coeff.shape[0] != self.dataset.size):
-            self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=torch.double)  # [n+1, 1]
+            self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), dtype=torch.double)  # [n+1, 1]
             self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
-            self.unique_states = torch.eye(self.n_states, device=self.device).double()
+            self.unique_states = torch.eye(self.n_states).double()
             self.K = self._psi_all @ self._psi_all.T  # [n, n]
 
         epsilon = utils.schedule(self.sink_schedule, step)
-        self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
+        self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
         M = self.H*(self.E@self.pi.T) 
 
         nu_pi = self.distribution_matcher.compute_nu_pi(
@@ -1216,7 +1219,7 @@ class DistMatchingEmbeddingAgent:
             
             # print("Gradient last term:", self.gradient_coeff[-1].item())
             
-            self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
+            self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1])*self.gradient_coeff[-1]), dim=1, dtype=torch.double)  # [z_x+1, n_actions]
 
             M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
 
@@ -1245,34 +1248,32 @@ class DistMatchingEmbeddingAgent:
         tensors = self.dataset.get_data()
         print("Caching features from dataset of size:", len(tensors['observation']))
         with torch.no_grad():
-            obs = tensors['observation'][:len(tensors['next_observation'])].to(self.device, dtype=torch.double)
-            actions = tensors['action'].to(self.device)
-            next_obs = tensors['next_observation'].to(self.device, dtype=torch.double)
+            obs = tensors['observation'][:len(tensors['next_observation'])].to(dtype=torch.double)
+            actions = tensors['action']
+            next_obs = tensors['next_observation']
             
             print(f"Encoding {obs.shape} observations and next observations on device {self.device}...")
-            self._phi_all_obs = self.encoder(obs)
-            self._phi_all_next = self.encoder(next_obs)
+            self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
+            self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
          
             # Transfer first_state to GPU for comparison
-            first_state_gpu = self.first_state.to(self.device)
-            indices = torch.where(torch.all(next_obs == first_state_gpu, dim=1))[0]
+            indices = torch.where(torch.all(next_obs.cpu() == self.first_state, dim=1))[0]
             if indices.shape[0] == 0:
                 for second_state in self.second_states:
-                    second_state_gpu = second_state.to(self.device)
-                    indices = torch.where(torch.all(next_obs == second_state_gpu, dim=1))[0]
+                    indices = torch.where(torch.all(next_obs.cpu() == second_state, dim=1))[0]
                     print("DEBUG: looking for second_state, found indices:", indices)
                     if indices.shape[0] > 0:
                         break
             
             self._psi_all = self._encode_state_action(self._phi_all_obs, actions)
            
-            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=torch.double)
+            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), dtype=torch.double)
             print("DEBUG: setting alpha for index", indices[0].item(), len(self._alpha))
             self._alpha[indices[0]] = 1.0
             self.E = F.one_hot(
                 actions.long(), 
                 self.n_actions
-            ).to(self.device, dtype=torch.double).reshape(-1, self.n_actions)
+            ).to(dtype=torch.double).reshape(-1, self.n_actions)
 
             # ** AUGMENTATION STEP **
             # ψ and Φ are augmented with an additional zero dimension
@@ -1286,8 +1287,8 @@ class DistMatchingEmbeddingAgent:
             self._phi_all_obs = torch.cat([self._phi_all_obs, zero_col], dim=-1)
 
             print(f"all shapes: phi_all_obs: {self._phi_all_obs.shape}, phi_all_next: {self._phi_all_next.shape}, psi_all: {self._psi_all.shape}, alpha: {self._alpha.shape}, E: {self.E.shape}")
-            optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
-            print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
+            # optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
+            # print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
         # print(optimal_T)
         # print(torch.sum(optimal_T, dim=0))
         if not self.dataset.is_complete:

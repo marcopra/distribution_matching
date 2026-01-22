@@ -24,4 +24,4 @@ env:
   goal_position: null  # Can be [x, y] or null for random
   
   # Start position (optional, null for random at each episode)
-  start_position: [2.8, 2.8]  # Adjusted to be inside walkable area (wall_thickness=0.3, so min is 0.3)
+  start_position: [0.5, 0.5]  # Adjusted to be inside walkable area (wall_thickness=0.3, so min is 0.3)
