@@ -1,9 +1,9 @@
 #!/bin/bash
 
 seeds="0 1 2"
-envs=("two_rooms7_0" 
-       "two_rooms7_1" 
-       "two_rooms7_2" )
+envs=("multiplerooms10_3x3_0" 
+       "multiplerooms10_3x3_1" 
+       "multiplerooms10_3x3_2")
 model_path=(
   "/home/mprattico/distribution_matching/models/boost/multiplerooms10_3x3/snapshot.pt"
   )
