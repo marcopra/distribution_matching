@@ -212,3 +212,5 @@ models
 exp_local
 results
 .vscode
+*.out
+*.err

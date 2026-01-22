@@ -2,9 +2,7 @@
 
 seeds="0"
 envs=(
-# "multiplerooms10_3x3" 
-# "four_rooms10_2" 
-# "two_rooms15_0"
+"multiplerooms10_3x3" 
 "four_rooms5_0" 
 "two_rooms7_0"
 )

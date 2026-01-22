@@ -278,13 +278,12 @@ class Workspace:
                                         self.global_step,
                                         eval_mode=False)
 
-            if self.global_step > self.cfg.num_seed_frames + (self.cfg.agent.update_actor_after_critic_steps if hasattr(self.cfg.agent, "update_actor_after_critic_steps") else 0):
+            if self.global_step > self.cfg.num_seed_frames + (self.cfg.agent.update_actor_after_critic_steps if hasattr(self.cfg.agent, "update_actor_after_critic_steps") else self.cfg.update_actor_after_critic_steps):
                 if not self.INITIAL_HEATMAP:
                         self.visualize_dataset_heatmap("dataset_heatmap.png")
                         self.INITIAL_HEATMAP = True
             # try to update the agent
             if not seed_until_step(self.global_step):
-                
                 for _ in range(self.cfg.num_agent_updates_per_env_step):
                     metrics = self.agent.update(self.replay_iter, self.global_step)
                     self.logger.log_metrics(metrics, self.global_frame, ty='train')

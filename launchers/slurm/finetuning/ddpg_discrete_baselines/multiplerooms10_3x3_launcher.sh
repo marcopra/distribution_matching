@@ -1,12 +1,15 @@
 #!/bin/bash
 
-seeds="0 1 2"
+seeds="1 2"
 envs=("multiplerooms10_3x3_0" 
        "multiplerooms10_3x3_1" 
-       "multiplerooms10_3x3_2" )
+       "multiplerooms10_3x3_2" 
+    )
 model_path=(
-    "/home/mprattico/distribution_matching/models/rnd/multiplerooms10_3x3/snapshot.pt"
-    "none")
+    "/home/mprattico/distribution_matching/models/smm/multiplerooms10_3x3/snapshot.pt"
+    # "/home/mprattico/distribution_matching/models/rnd/multiplerooms10_3x3/snapshot.pt"
+    # "none"
+    )
 
 
 for seed in $seeds; do   

@@ -26,6 +26,7 @@ class DDPGAgent:
                  critic_target_tau,
                  num_expl_steps,
                  update_every_steps,
+                 update_actor_after_critic_steps,
                  eps_schedule,
                  nstep,
                  batch_size,
@@ -46,6 +47,7 @@ class DDPGAgent:
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.num_expl_steps = num_expl_steps
+        self.update_actor_after_critic_steps = update_actor_after_critic_steps
         self.eps_schedule = eps_schedule
         self.init_critic = init_critic
         self.feature_dim = feature_dim
@@ -216,8 +218,9 @@ class DDPGAgent:
         metrics.update(
             self.update_critic(obs, action, reward, discount, next_obs, step))
 
-        # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

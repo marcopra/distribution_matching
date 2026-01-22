@@ -13,7 +13,7 @@ update_every_steps: 2
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
-update_actor_after_critic_steps: 10000
+update_actor_after_critic_steps: ${update_actor_after_critic_steps}
 hidden_dim: 1024
 dataset_dim: 556
 eta: 0.5

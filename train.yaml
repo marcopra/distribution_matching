@@ -19,6 +19,7 @@ random_goal: true
 # train settings
 num_train_frames: 50000
 num_seed_frames: 4000
+update_actor_after_critic_steps: 7999
 num_agent_updates_per_env_step: 1
 # eval
 eval_every_frames: 4000
