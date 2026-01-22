@@ -20,7 +20,8 @@ class DDPGAgent:
                  obs_shape,
                  action_shape, # Number of discrete actions
                  device,
-                 lr,
+                 actor_lr,
+                 critic_lr,
                  feature_dim,
                  hidden_dim,
                  critic_target_tau,
@@ -40,7 +41,8 @@ class DDPGAgent:
         self.obs_shape = obs_shape
         self.action_dim = action_shape[0]
         self.hidden_dim = hidden_dim
-        self.lr = lr
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -72,15 +74,15 @@ class DDPGAgent:
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        # optimizers
+        # optimizers            
 
         if obs_type == 'pixels':
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(),
-                                                lr=lr)
+                                                lr=self.actor_lr)
         else:
             self.encoder_opt = None
-        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=self.critic_lr)
 
         self.train()
         self.critic_target.train()
