@@ -5,8 +5,8 @@ envs=("four_rooms5_0"
        "four_rooms5_1" 
        "four_rooms5_2" )
 model_path=(
-    # "/home/mprattico/distribution_matching/models/smm/four_rooms_5x5/snapshot.pt"
-    # "/home/mprattico/distribution_matching/models/rnd/four_rooms_5x5/snapshot.pt"
+    "/home/mprattico/distribution_matching/models/smm/four_rooms_5x5/snapshot.pt"
+    "/home/mprattico/distribution_matching/models/rnd/four_rooms_5x5/snapshot.pt"
     "none"
     )
 

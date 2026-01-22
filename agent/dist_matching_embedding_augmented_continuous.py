@@ -21,6 +21,7 @@ import utils
 from distribution_matching import DistributionVisualizer
 torch.set_default_dtype(torch.double)
 from agent.utils import InternalDatasetFIFO
+import math
 
 SINK_STATE_VALUE = 1
 
@@ -33,7 +34,20 @@ class Encoder(nn.Module):
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
-        self.temperature = 0.1
+        
+        self.linear = nn.Linear(
+            obs_shape[0],
+            feature_dim,
+            bias=True
+        )
+
+        # --- inizializzazione random features ---
+        nn.init.normal_(self.linear.weight, mean=0.0, std=1.0)
+        nn.init.uniform_(self.linear.bias, 0.0, 2 * math.pi)
+
+        # congela i parametri
+        for p in self.parameters():
+            p.requires_grad = False
 
         # self.fc = nn.Identity()
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
@@ -45,12 +59,21 @@ class Encoder(nn.Module):
         )
 
         # nn.init.eye_(self.fc[0].weight)
-        self.apply(utils.weight_init)
+        # self.apply(utils.weight_init)
 
     def forward(self, obs):
-        obs = obs.view(obs.shape[0], -1)
-        h = self.fc(obs)
-        h = F.normalize(h, p=1, dim=-1)
+         # Random Fourier Features
+        h = self.linear(obs)
+        h = torch.cos(h)
+
+        # opzionale ma spesso utile
+        h = F.normalize(h, p=2, dim=-1)
+
+        # obs = obs.view(obs.shape[0], -1)
+
+
+        # h = self.fc(obs)
+        # h = F.normalize(h, p=1, dim=-1)
 
         return h
 
@@ -651,45 +674,65 @@ class EmbeddingDistributionVisualizer:
         
         obs_np = observations.cpu().numpy()
         
-        # Smart binning based on move_delta
-        # Calculate expected discrete positions based on move_delta
+        # Smart binning based on move_delta and number of actions
         x_range = self.obs_high[0] - self.obs_low[0]
         y_range = self.obs_high[1] - self.obs_low[1]
         
+        # Get move_delta from environment (safely)
+        move_delta = getattr(self.env, 'move_delta', 0.3)
+        
         # Number of bins should capture discrete positions if agent moves in grid-like fashion
-        # For 4 actions, positions align to move_delta increments
         if self.agent.n_actions == 4:
-            # Estimate number of discrete positions
-            n_bins_x = max(10, int(np.ceil(x_range / self.env.move_delta)) + 1)
-            n_bins_y = max(10, int(np.ceil(y_range / self.env.move_delta)) + 1)
+            # For 4 actions (cardinal directions), positions align to move_delta increments
+            # Calculate expected number of discrete positions along each axis
+            n_bins_x = max(10, int(np.ceil(x_range / move_delta)) + 1)
+            n_bins_y = max(10, int(np.ceil(y_range / move_delta)) + 1)
         else:
-            # For 8 actions, use finer binning
-            n_bins_x = max(15, int(np.ceil(x_range / (self.env.move_delta * 0.7))) + 1)
-            n_bins_y = max(15, int(np.ceil(y_range / (self.env.move_delta * 0.7))) + 1)
+            # For 8 actions (including diagonals), diagonal moves are sqrt(2) smaller
+            # Use finer binning to capture diagonal movement precision
+            diagonal_delta = move_delta / np.sqrt(2)
+            n_bins_x = max(15, int(np.ceil(x_range / diagonal_delta)) + 1)
+            n_bins_y = max(15, int(np.ceil(y_range / diagonal_delta)) + 1)
+        
+        # Cap maximum number of bins for visualization clarity
+        n_bins_x = min(n_bins_x, 50)
+        n_bins_y = min(n_bins_y, 50)
         
         # Create custom bin edges aligned to potential discrete positions
+        # Start bins from actual observation space bounds
         x_bins = np.linspace(self.obs_low[0], self.obs_high[0], n_bins_x)
         y_bins = np.linspace(self.obs_low[1], self.obs_high[1], n_bins_y)
         
         # Create 2D histogram with custom bins
-        ax.hist2d(obs_np[:, 0], obs_np[:, 1], 
-                 bins=[x_bins, y_bins], 
-                 cmap='Blues',
-                 range=[[self.obs_low[0], self.obs_high[0]], 
-                        [self.obs_low[1], self.obs_high[1]]])
+        h, xedges, yedges = np.histogram2d(
+            obs_np[:, 0], obs_np[:, 1], 
+            bins=[x_bins, y_bins]
+        )
+        
+        # Plot histogram
+        im = ax.imshow(h.T, origin='lower', cmap='Blues', 
+                      extent=[self.obs_low[0], self.obs_high[0], 
+                             self.obs_low[1], self.obs_high[1]],
+                      aspect='auto', interpolation='nearest')
         
         ax.set_xlim(self.obs_low[0], self.obs_high[0])
         ax.set_ylim(self.obs_low[1], self.obs_high[1])
-        ax.set_title(f'{title}\n(Total: {observations.shape[0]} samples)\nBins: {n_bins_x}x{n_bins_y}')
+        ax.set_title(f'{title}\n(Total: {observations.shape[0]} samples)\n'
+                    f'Bins: {n_bins_x}x{n_bins_y} (Δ={move_delta:.2f})')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         ax.grid(True, alpha=0.3)
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Count', rotation=270, labelpad=15)
         
         # Draw environment structure if available
         if hasattr(self.env, 'walkable_areas'):
             for area in self.env.walkable_areas:
                 rect = Rectangle((area[0], area[1]), area[2], area[3],
-                               fill=False, edgecolor='red', linewidth=1.5, linestyle='--', alpha=0.7)
+                               fill=False, edgecolor='red', linewidth=1.5, 
+                               linestyle='--', alpha=0.7)
                 ax.add_patch(rect)
     
     def _plot_embedding_distribution(self, ax, trajectories):
@@ -875,9 +918,10 @@ class DistMatchingEmbeddingAgent:
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self, n_trajectories=5, traj_length=300)
         
-        # Ideal mode not supported for continuous spaces
-        if self.ideal:
-            raise NotImplementedError("Ideal mode not supported for continuous state spaces")
+        # If ideal mode, pre-populate the dataset
+        if self.ideal and not self._ideal_dataset_filled:
+            self._populate_ideal_dataset()
+
     
     def _find_discrete_env(self, env):
         """
@@ -906,10 +950,116 @@ class DistMatchingEmbeddingAgent:
         )
 
     def _populate_ideal_dataset(self):
-        """Not supported for continuous spaces."""
-        raise NotImplementedError("Ideal dataset population not supported for continuous state spaces")
+        """
+        Pre-populate the dataset with all reachable state-action pairs in ideal mode.
+        For continuous environments, we discretize the space by sampling equidistributed
+        positions in walkable areas and apply all actions from each position.
+        """
+        print("=== Populating ideal dataset with all reachable state-action pairs ===")
+        
+        # Get discretized positions from walkable areas
+        # Use a fine grid based on move_delta
+        sampled_positions = self._sample_grid_positions()
+        
+        print(f"Sampled {len(sampled_positions)} grid positions from walkable areas")
+        
+        # Get the dataset device to ensure consistency
+        dataset_device = self.dataset.device
+        
+        # For each position, try all actions
+        for pos_idx, position in enumerate(sampled_positions):
+            for action in range(self.n_actions):
+                # Use step_from_position to get next state without changing env state
+                next_position, reward, terminated, truncated, info = self.env.step_from_position(
+                    position, action
+                )
+                
+                # Convert positions to tensors on the correct device
+                obs_tensor = torch.tensor(position, device=dataset_device, dtype=torch.double)
+                next_obs_tensor = torch.tensor(next_position, device=dataset_device, dtype=torch.double)
+                
+                # Add to current period data
+                self.dataset._current_period_data['observation'] = torch.cat([
+                    self.dataset._current_period_data['observation'],
+                    obs_tensor.unsqueeze(0)
+                ], dim=0)
+                
+                self.dataset._current_period_data['action'] = torch.cat([
+                    self.dataset._current_period_data['action'],
+                    torch.tensor([action], device=dataset_device, dtype=torch.long)
+                ], dim=0)
+                
+                self.dataset._current_period_data['next_observation'] = torch.cat([
+                    self.dataset._current_period_data['next_observation'],
+                    next_obs_tensor.unsqueeze(0)
+                ], dim=0)
+                
+                # Set alpha: 1.0 for the first entry (start state), 0.0 for others
+                if self.dataset._current_period_data['alpha'].shape[0] == 0:
+                    alpha_val = 1.0
+                else:
+                    alpha_val = 0.0
+                
+                self.dataset._current_period_data['alpha'] = torch.cat([
+                    self.dataset._current_period_data['alpha'],
+                    torch.tensor([alpha_val], device=dataset_device, dtype=torch.double)
+                ], dim=0)
+        
+        self._ideal_dataset_filled = True
+        dataset_size = len(self.dataset._current_period_data['observation'])
+        expected_size = len(sampled_positions) * self.n_actions
+        
+        print(f"Ideal dataset populated with {dataset_size} state-action pairs")
+        print(f"Expected size: {expected_size} (positions: {len(sampled_positions)}, actions: {self.n_actions})")
+        
+        if dataset_size != expected_size:
+            utils.ColorPrint.yellow(
+                f"Warning: Dataset size {dataset_size} differs from expected {expected_size}. "
+                "Some transitions may have been filtered or duplicated."
+            )
     
-    
+    def _sample_grid_positions(self) -> np.ndarray:
+        """
+        Sample positions on a regular grid within walkable areas.
+        Grid spacing is based on move_delta to capture all reachable discrete positions.
+        
+        Returns:
+            np.ndarray: Array of positions [n_positions, 2]
+        """
+        if not hasattr(self.env, 'walkable_areas'):
+            raise ValueError(
+                "Environment must have 'walkable_areas' attribute for ideal mode. "
+                "Make sure you're using a continuous room environment."
+            )
+        
+        positions = []
+        grid_spacing = self.env.move_delta
+        
+        # Add margin for agent radius to ensure positions are valid
+        margin = self.env.agent_radius + 0.05
+        
+        for area in self.env.walkable_areas:
+            ax, ay, aw, ah = area
+            
+            # Create grid within this area
+            x = ax + margin
+            while x <= ax + aw - margin:
+                y = ay + margin
+                while y <= ay + ah - margin:
+                    # Verify position is valid with agent radius
+                    if self.env._is_position_valid_with_radius(x, y):
+                        positions.append([x, y])
+                    y += grid_spacing
+                x += grid_spacing
+        
+        if len(positions) == 0:
+            raise ValueError(
+                "No valid grid positions found. Check walkable_areas and agent_radius."
+            )
+        
+        print(f"Generated grid with {len(positions)} positions (spacing={grid_spacing:.3f})")
+        return np.array(positions, dtype=np.float32)
+
     def init_meta(self):
         return OrderedDict()
 
@@ -917,6 +1067,9 @@ class DistMatchingEmbeddingAgent:
         return tuple()
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
+        if self.ideal:
+            # In ideal mode, we do not update the dataset during training
+            return meta
         self.dataset.add_transition(time_step)
         return meta
     

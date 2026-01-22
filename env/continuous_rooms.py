@@ -349,6 +349,56 @@ class ContinuousRoomEnv(gym.Env, ABC):
         }
         return self.position.astype(np.float32).copy(), reward, terminated, truncated, info
     
+    def step_from_position(self, position: np.ndarray, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        """
+        Simulate a step from an arbitrary position without changing environment state.
+        Useful for ideal dataset population.
+        
+        Args:
+            position: Starting position [x, y]
+            action: Action to take
+            
+        Returns:
+            Tuple of (next_position, reward, terminated, truncated, info)
+        """
+        # Save current state
+        original_position = self.position.copy()
+        original_steps = self.steps
+        
+        # Set to desired position
+        self.position = position.astype(np.float32)
+        
+        # Execute step
+        new_position, wall_collision = self._move(action)
+        
+        # Compute reward and termination (simplified for ideal case)
+        terminated = self._is_goal_reached()
+        truncated = False
+        
+        if self.dense_reward:
+            distance = self._distance_to_goal()
+            reward = np.exp(-distance)
+            if terminated:
+                reward += 1000.0
+            if wall_collision and self.wall_penalty > 0.0:
+                reward -= self.wall_penalty
+        else:
+            reward = 0.0 if terminated else -1.0
+        
+        info = {
+            "position": new_position.copy(),
+            "goal": self.goal.copy(),
+            "distance_to_goal": float(np.linalg.norm(new_position - self.goal)),
+            "success": terminated,
+            "wall_collision": wall_collision
+        }
+        
+        # Restore original state
+        self.position = original_position
+        self.steps = original_steps
+        
+        return new_position, reward, terminated, truncated, info
+    
     def render(self) -> Optional[np.ndarray]:
         if self.render_mode is None:
             return None

@@ -1066,6 +1066,9 @@ class DistMatchingEmbeddingAgent:
         return tuple()
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
+        if self.ideal:
+            # In ideal mode, we do not update the dataset during training
+            return meta
         self.dataset.add_transition(time_step)
         return meta
     
@@ -1132,6 +1135,7 @@ class DistMatchingEmbeddingAgent:
             obs = self.dataset.data['observation'].to(self.device)
             action = self.dataset.data['action'].to(self.device)
             next_obs = self.dataset.data['next_observation'].to(self.device)
+            print
             assert obs.shape[0] == action.shape[0] == next_obs.shape[0], f"Ideal dataset tensors have mismatched sizes, received obs: {obs.shape}, action: {action.shape}, next_obs: {next_obs.shape}"
         
         # Encode
