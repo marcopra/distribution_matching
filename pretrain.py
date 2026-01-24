@@ -102,6 +102,7 @@ class Workspace:
 
     
         if hasattr(self.agent, 'insert_env'):
+            # Pass the wrapped train_env, not unwrapped
             self.agent.insert_env(self.train_env)
     
 
@@ -205,6 +206,7 @@ class Workspace:
         self.train_video_recorder.init(time_step.image_observation)
         metrics = None
         while train_until_step(self.global_step):
+            print(f"Starting training step {self.global_step}", end='\r')
             # if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
             if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
                 self._global_episode += 1
@@ -278,8 +280,12 @@ class Workspace:
         keys_to_save = ['agent', '_global_step', '_global_episode']
         payload = {k: self.__dict__[k] for k in keys_to_save}
         
-        # Temporarily remove environment reference before saving
+        # Temporarily remove all environment references before saving
         env_ref = None
+        wrapped_env_ref = None
+        discrete_env_ref = None
+        visualizer_ref = None
+        
         if hasattr(payload['agent'], 'env'):
             env_ref = payload['agent'].env
             payload['agent'].env = None
@@ -289,17 +295,22 @@ class Workspace:
         if hasattr(payload['agent'], '_discrete_env'):
             discrete_env_ref = payload['agent']._discrete_env
             payload['agent']._discrete_env = None
-        
+        if hasattr(payload['agent'], 'visualizer'):
+            visualizer_ref = payload['agent'].visualizer
+            payload['agent'].visualizer = None
+            
         with snapshot.open('wb') as f:
             torch.save(payload, f)
         
-        # Restore environment reference after saving
+        # Restore all references after saving
         if env_ref is not None:
             payload['agent'].env = env_ref
-        if hasattr(payload['agent'], 'wrapped_env'):
+        if wrapped_env_ref is not None:
             payload['agent'].wrapped_env = wrapped_env_ref
-        if hasattr(payload['agent'], '_discrete_env'):
+        if discrete_env_ref is not None:
             payload['agent']._discrete_env = discrete_env_ref
+        if visualizer_ref is not None:
+            payload['agent'].visualizer = visualizer_ref
 
 
 @hydra.main(config_path='.', config_name='pretrain')

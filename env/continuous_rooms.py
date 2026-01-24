@@ -77,7 +77,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.show_coordinates = show_coordinates
-        self.render_resolution = render_resolution
+        self.render_resolution = render_resolution  # Store resolution
         self.wall_thickness = wall_thickness
         self.agent_radius = agent_radius
         self.dense_reward = dense_reward
@@ -399,6 +399,39 @@ class ContinuousRoomEnv(gym.Env, ABC):
         
         return new_position, reward, terminated, truncated, info
     
+    def render_from_position(self, position: np.ndarray, goal: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Render the environment from a specific position without changing state.
+        
+        Args:
+            position: Agent position [x, y]
+            goal: Optional goal position [x, y]. If None, uses current goal.
+            
+        Returns:
+            RGB array of the rendered image [H, W, C]
+        """
+        if self.render_mode != "rgb_array":
+            raise ValueError("render_from_position requires render_mode='rgb_array'")
+        
+        # Save current state
+        original_position = self.position.copy()
+        original_goal = self.goal.copy() if goal is not None else None
+        
+        # Set temporary state
+        self.position = position.astype(np.float32)
+        if goal is not None:
+            self.goal = goal.astype(np.float32)
+        
+        # Render
+        image = self.render()
+        
+        # Restore original state
+        self.position = original_position
+        if original_goal is not None:
+            self.goal = original_goal
+        
+        return image
+    
     def render(self) -> Optional[np.ndarray]:
         if self.render_mode is None:
             return None
@@ -429,10 +462,11 @@ class ContinuousRoomEnv(gym.Env, ABC):
             pygame.draw.rect(surface, COLORS['floor'], rect)
         
         # Draw goal (green)
-        goal_screen = to_screen(self.goal[0], self.goal[1])
-        goal_radius = int(self.goal_threshold * scale)
-        pygame.draw.circle(surface, COLORS['goal'], goal_screen, goal_radius)
-        pygame.draw.circle(surface, COLORS['goal_border'], goal_screen, goal_radius, 3)
+        if self._fixed_goal_position is not None:
+            goal_screen = to_screen(self.goal[0], self.goal[1])
+            goal_radius = int(self.goal_threshold * scale)
+            pygame.draw.circle(surface, COLORS['goal'], goal_screen, goal_radius)
+            pygame.draw.circle(surface, COLORS['goal_border'], goal_screen, goal_radius, 3)
         
         # Draw agent (red) - using actual agent_radius for visual consistency
         agent_screen = to_screen(self.position[0], self.position[1])

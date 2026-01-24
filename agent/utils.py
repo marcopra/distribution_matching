@@ -742,12 +742,17 @@ class InternalDataset:
         
         if not hasattr(self, '_dummy_transition') or self._dummy_first_state is False:
             self._dummy_first_state = True
-            eye_tensor = torch.eye(self.n_states, device=self.device, dtype=torch.double)
-            indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
-            if indices.shape[0] == 0:
-                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
-                self._dummy_first_state = False
-            # TODO at the moment using second state for alpha not the real first, change this in the future
+            # For image observations, compare using first channel or flattened comparison
+            if len(self.obs_shape) > 1:  # Image observations
+                # Use first observation as dummy
+                indices = torch.tensor([0])
+            else:
+                eye_tensor = torch.eye(self.n_states, device=self.device, dtype=torch.double)
+                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
+                if indices.shape[0] == 0:
+                    indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
+                    self._dummy_first_state = False
+            
             self._dummy_transition = {
                 'observation': self.data['observation'][indices[0]].unsqueeze(0),
                 'action': self.data['action'][indices[0]].unsqueeze(0),
@@ -828,7 +833,8 @@ class InternalDatasetFIFO:
     def __init__(self, dataset_type: str, n_states: int, n_actions: int, 
                  gamma: float, window_size: int, n_subsamples: int, 
                  subsampling_strategy: str, dynamic_horizon: bool = False,
-                 device: str = 'cpu'):
+                 obs_shape: tuple = None,
+                 device: str = 'cpu', data_type=torch.double):
         """
         Args:
             dataset_type: "unique" or "all"
@@ -839,6 +845,7 @@ class InternalDatasetFIFO:
             n_subsamples: Number of samples to return per period (None = all)
             subsampling_strategy: Strategy for subsampling ("random" or "eder")
             dynamic_horizon: Whether to use a dynamic horizon
+            obs_shape: Shape of observations (e.g., (84, 84, 3) for images)
             device: Torch device
         """
         self.dataset_type = dataset_type
@@ -851,6 +858,8 @@ class InternalDatasetFIFO:
         self.window_size = window_size
         self.device = torch.device(device)
         self.dynamic_horizon = dynamic_horizon
+        self.obs_shape = obs_shape if obs_shape is not None else (n_states,)
+        self.data_type = data_type
         
         # FIFO queue: list of sampling periods, each period is a dict of tensors
         self._periods_queue = []
@@ -876,10 +885,11 @@ class InternalDatasetFIFO:
     def _start_new_period(self):
         """Initialize a new sampling period."""
         self._current_period_data = {
-            'observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+            'observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
             'action': torch.empty((0,), device=self.device, dtype=torch.long),
-            'next_observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
-            'alpha': torch.empty((0,), device=self.device, dtype=torch.double)
+            'next_observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
+            'alpha': torch.empty((0,), device=self.device, dtype=self.data_type),
+        
         }
         self._trajectory_idx = np.array([], dtype=np.int32)
         self._unique_pairs = set()
@@ -993,7 +1003,7 @@ class InternalDatasetFIFO:
                 
                 self._current_period_data['observation'] = torch.cat([
                     self._current_period_data['observation'],
-                    torch.tensor(self._prev_obs, device=self.device, dtype=torch.double).unsqueeze(0)
+                    torch.tensor(self._prev_obs, device=self.device, dtype=self.data_type).unsqueeze(0)
                 ], dim=0)
                 self._current_period_data['action'] = torch.cat([
                     self._current_period_data['action'],
@@ -1001,13 +1011,14 @@ class InternalDatasetFIFO:
                 ], dim=0)
                 self._current_period_data['next_observation'] = torch.cat([
                     self._current_period_data['next_observation'],
-                    torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                    torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
                 ], dim=0)
+
                 
                 alpha_val = 1.0 if len(self._unique_pairs) == 1 else 0.0
                 self._current_period_data['alpha'] = torch.cat([
                     self._current_period_data['alpha'],
-                    torch.tensor([alpha_val], device=self.device, dtype=torch.double)
+                    torch.tensor([alpha_val], device=self.device, dtype=self.data_type)
                 ], dim=0)
                 
                 self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
@@ -1033,13 +1044,13 @@ class InternalDatasetFIFO:
             
             self._current_period_data['observation'] = torch.cat([
                 self._current_period_data['observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             
             alpha_val = 1.0 if self._current_period_data['observation'].shape[0] == 1 else 0.0
             self._current_period_data['alpha'] = torch.cat([
                 self._current_period_data['alpha'],
-                torch.tensor([alpha_val], device=self.device, dtype=torch.double)
+                torch.tensor([alpha_val], device=self.device, dtype=self.data_type)
             ], dim=0)
             
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
@@ -1050,7 +1061,7 @@ class InternalDatasetFIFO:
             
             self._current_period_data['observation'] = torch.cat([
                 self._current_period_data['observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             self._current_period_data['action'] = torch.cat([
                 self._current_period_data['action'],
@@ -1058,11 +1069,11 @@ class InternalDatasetFIFO:
             ], dim=0)
             self._current_period_data['next_observation'] = torch.cat([
                 self._current_period_data['next_observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             self._current_period_data['alpha'] = torch.cat([
                 self._current_period_data['alpha'],
-                torch.tensor([0.0], device=self.device, dtype=torch.double)
+                torch.tensor([0.0], device=self.device, dtype=self.data_type)
             ], dim=0)
             
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
@@ -1079,7 +1090,7 @@ class InternalDatasetFIFO:
             ], dim=0)
             self._current_period_data['next_observation'] = torch.cat([
                 self._current_period_data['next_observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             self._trajectory_active = False
         
@@ -1106,13 +1117,13 @@ class InternalDatasetFIFO:
             
             self._current_period_data['observation'] = torch.cat([
                 self._current_period_data['observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             
             alpha_val = 1.0 if self._current_period_data['observation'].shape[0] == 1 else 0.0
             self._current_period_data['alpha'] = torch.cat([
                 self._current_period_data['alpha'],
-                torch.tensor([alpha_val], device=self.device, dtype=torch.double)
+                torch.tensor([alpha_val], device=self.device, dtype=self.data_type)
             ], dim=0)
             
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
@@ -1124,11 +1135,11 @@ class InternalDatasetFIFO:
             if not self.reset_episode:
                 self._current_period_data['observation'] = torch.cat([
                     self._current_period_data['observation'],
-                    torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                    torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
                 ], dim=0)
                 self._current_period_data['alpha'] = torch.cat([
                     self._current_period_data['alpha'],
-                    torch.tensor([0.0], device=self.device, dtype=torch.double)
+                    torch.tensor([0.0], device=self.device, dtype=self.data_type)
                 ], dim=0)
             else:
                 self._trajectory_active = False
@@ -1140,7 +1151,7 @@ class InternalDatasetFIFO:
             ], dim=0)
             self._current_period_data['next_observation'] = torch.cat([
                 self._current_period_data['next_observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
@@ -1157,7 +1168,7 @@ class InternalDatasetFIFO:
             ], dim=0)
             self._current_period_data['next_observation'] = torch.cat([
                 self._current_period_data['next_observation'],
-                torch.tensor(time_step.observation, device=self.device, dtype=torch.double).unsqueeze(0)
+                torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             self._trajectory_active = False
     
@@ -1166,12 +1177,17 @@ class InternalDatasetFIFO:
         
         if not hasattr(self, '_dummy_transition') or self._dummy_first_state is False:
             self._dummy_first_state = True
-            eye_tensor = torch.eye(self.n_states, device=self.device, dtype=torch.double)
-            indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
-            if indices.shape[0] == 0:
-                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
-                self._dummy_first_state = False
-            # TODO at the moment using second state for alpha not the real first, change this in the future
+            # For image observations, compare using first channel or flattened comparison
+            if len(self.obs_shape) > 1:  # Image observations
+                # Use first observation as dummy
+                indices = torch.tensor([0])
+            else:
+                eye_tensor = torch.eye(self.n_states, device=self.device, dtype=self.data_type)
+                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
+                if indices.shape[0] == 0:
+                    indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
+                    self._dummy_first_state = False
+            
             self._dummy_transition = {
                 'observation': self.data['observation'][indices[0]].unsqueeze(0),
                 'action': self.data['action'][indices[0]].unsqueeze(0),
@@ -1190,10 +1206,10 @@ class InternalDatasetFIFO:
         """Concatenate data from all periods in the window."""
         if len(self._periods_queue) == 0:
             return {
-                'observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+                'observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
                 'action': torch.empty((0,), device=self.device, dtype=torch.long),
-                'next_observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
-                'alpha': torch.empty((0,), device=self.device, dtype=torch.double)
+                'next_observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
+                'alpha': torch.empty((0,), device=self.device, dtype=self.data_type)
             }
         
         all_obs = []
@@ -1211,10 +1227,10 @@ class InternalDatasetFIFO:
         
         if len(all_obs) == 0:
             return {
-                'observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
+                'observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
                 'action': torch.empty((0,), device=self.device, dtype=torch.long),
-                'next_observation': torch.empty((0, self.n_states), device=self.device, dtype=torch.double),
-                'alpha': torch.empty((0,), device=self.device, dtype=torch.double)
+                'next_observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
+                'alpha': torch.empty((0,), device=self.device, dtype=self.data_type)
             }
         
         return {

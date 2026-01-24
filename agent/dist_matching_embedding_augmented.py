@@ -922,6 +922,7 @@ class DistMatchingEmbeddingAgent:
             gamma=self.discount, 
             window_size=window_size, 
             n_subsamples=n_subsamples,
+            obs_shape=obs_shape,
             subsampling_strategy=subsampling_strategy
         )
         
