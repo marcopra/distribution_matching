@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py agent=smm_discrete use_wandb=true eval_every_frames=20000 num_train_frames=500000 agent.feature_dim=200 configs/env=${ENV} device=cuda seed=${SEED} save_video=false wandb_tag="smm_discrete" obs_type=${OBS_TYPE}
+python pretrain.py agent=smm_discrete use_wandb=true eval_every_frames=20000 num_train_frames=500000 agent.feature_dim=200 configs/env=${ENV} device=cuda seed=${SEED} save_video=false wandb_tag="smm_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array"
