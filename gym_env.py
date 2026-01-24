@@ -26,12 +26,10 @@ class ResizeRendering(gym.Wrapper):
     def __init__(self, env, resolution=224):
         super().__init__(env)
         self.resolution = resolution
+        self.render_resolution = resolution  # Expose for agent access
 
     def render(self):
         img = super().render()
-
-        # # Flip verticale per correggere l'orientamento (MuJoCo restituisce immagini capovolte)
-        # img = np.flipud(img)
 
         # Convert numpy array to PIL Image
         img = Image.fromarray(img.astype(np.uint8))
@@ -119,6 +117,12 @@ class ActionRepeatWrapper(gym.Wrapper):
         self.data_collection = data_collection
         self.obs_type = obs_type
         self.obs_keys = None
+        
+        # Expose render_resolution if available
+        if hasattr(env, 'render_resolution'):
+            self.render_resolution = env.render_resolution
+        elif hasattr(env, 'resolution'):
+            self.render_resolution = env.resolution
 
     def _process_proprio_obs(self, obs):
         """Process proprioceptive observation, concatenating dict values if needed."""
@@ -208,6 +212,12 @@ class FrameStackWrapper(gym.Wrapper):
         super().__init__(env)
         self._num_frames = num_frames
         self._frames = deque([], maxlen=num_frames)
+        
+        # Expose render_resolution if available
+        if hasattr(env, 'render_resolution'):
+            self.render_resolution = env.render_resolution
+        elif hasattr(env, 'resolution'):
+            self.render_resolution = env.resolution
         
         # Update observation space to include stacked frames
         obs = env.reset()
@@ -461,6 +471,12 @@ class RewardSpecWrapper(gym.Wrapper):
 class ExtendedTimeStepWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
+        
+        # Expose render_resolution if available
+        if hasattr(env, 'render_resolution'):
+            self.render_resolution = env.render_resolution
+        elif hasattr(env, 'resolution'):
+            self.render_resolution = env.resolution
 
     def reset(self, **kwargs):
         time_step = self.env.reset(**kwargs)
@@ -486,7 +502,11 @@ class ExtendedTimeStepWrapper(gym.Wrapper):
 def observation_spec(env):
     """Get observation spec of the environment for agent initialization."""
     shape = env.observation_space.shape
-    return specs.Array(shape, np.float32, 'observation')
+    if len(shape) == 1:
+        return specs.Array(shape, np.float32, 'observation')
+    elif len(shape) == 3:
+        return specs.Array(shape, np.uint8, 'observation')
+    # return specs.Array(shape, np.float32, 'observation')
 
 
 def action_spec(env):
@@ -618,9 +638,23 @@ def make_kwargs(cfg):
     elif "MultipleRooms" in cfg.env.name:
         env_kwargs['num_rooms'] = cfg.env.num_rooms
         env_kwargs['room_size'] = cfg.env.room_size
-        env_kwargs['corridor_height'] = cfg.env.corridor_height if 'corridor_height' in cfg.env else 1
+         # Check if it's continuous or discrete
+        if "Continuous" in cfg.env.name:
+            if hasattr(cfg.env, 'corridor_width'):
+                env_kwargs['corridor_width'] = cfg.env.corridor_width
+            if hasattr(cfg.env, 'corridor_length'):
+                env_kwargs['corridor_length'] = cfg.env.corridor_length
+            if hasattr(cfg.env, 'main_corridor_height'):
+                env_kwargs['main_corridor_height'] = cfg.env.main_corridor_height
+            
+            if hasattr(cfg.env, 'wall_thickness'):
+                env_kwargs['wall_thickness'] = cfg.env.wall_thickness
+            if hasattr(cfg.env, 'agent_radius'):
+                env_kwargs['agent_radius'] = cfg.env.agent_radius
+        else:
+            env_kwargs['corridor_height'] = cfg.env.corridor_height if 'corridor_height' in cfg.env else 1
+            env_kwargs['connector_position'] = cfg.env.connector_position if 'connector_position' in cfg.env else None
         env_kwargs['connector_length'] = cfg.env.connector_length if 'connector_length' in cfg.env else 1
-        env_kwargs['connector_position'] = cfg.env.connector_position if 'connector_position' in cfg.env else None
     elif "Corridor" in cfg.env.name:
         env_kwargs['length'] = cfg.env.length
         env_kwargs['height'] = cfg.env.height
