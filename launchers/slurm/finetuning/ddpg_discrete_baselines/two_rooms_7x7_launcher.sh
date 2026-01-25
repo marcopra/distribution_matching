@@ -7,12 +7,15 @@ envs=("two_rooms7_0"
 model_path=(
     "none"
     )
-
+obs_type=("pixels"
+    )
 
 for seed in $seeds; do   
     for env in "${envs[@]}"; do
         for path in "${model_path[@]}"; do
-            sbatch --export=SEED="${seed}",ENV="${env}",MODEL_PATH="${path}" launchers/slurm/finetuning/ddpg_discrete_baselines/two_rooms_7x7_base.sh
+            for obs in "${obs_type[@]}"; do
+                sbatch --export=SEED="${seed}",ENV="${env}",MODEL_PATH="${path}",OBS_TYPE="${obs}" launchers/slurm/finetuning/ddpg_discrete_baselines/two_rooms_7x7_base.sh
+            done
         done
     done
 done
