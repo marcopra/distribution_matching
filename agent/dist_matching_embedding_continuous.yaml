@@ -14,7 +14,7 @@ lr_encoder: 1e-3
 hidden_dim: 1024
 feature_dim: null
 T_init_steps: 300
-update_every_steps: 1
+update_every_steps: 5
 update_actor_every_steps: 960
 n_subsamples: null
 pmd_steps: 15000
