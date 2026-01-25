@@ -155,6 +155,30 @@ class BaseRoomEnv(gym.Env, ABC):
             else:
                 return cell  # Stay in place if hitting a wall
     
+    def render_from_position(self, position: Tuple[int, int]) -> np.ndarray:
+        """
+        Render the environment from a specific agent position without modifying state.
+        
+        Args:
+            position: (x, y) tuple representing agent position
+            
+        Returns:
+            RGB image array of shape (H, W, 3)
+        """
+        # Save current agent location
+        original_location = self._agent_location
+        
+        # Temporarily set agent to desired position
+        self._agent_location = position
+        
+        # Render the image
+        img = self._render_rgb()
+        
+        # Restore original agent location
+        self._agent_location = original_location
+        
+        return img
+    
     def _get_obs(self) -> int:
         """Get current observation (state index)."""
         return self.state_to_idx[self._agent_location]

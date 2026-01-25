@@ -1566,7 +1566,7 @@ class InternalDatasetFIFO:
             }
 
             # Encoding state-action pairs as unique integers
-            action_onehot = F.one_hot(sampled_data['action'].long(), self.n_actions).double().reshape(-1, self.n_actions)  # [B, |A|]
+            action_onehot = F.one_hot(sampled_data['action'].long(), self.n_actions).reshape(-1, self.n_actions)  # [B, |A|]
             
             # Outer product: [B, d] ⊗ [B, |A|] -> [B, d*|A|]
             encoded_sa = torch.einsum('bd,ba->bda', sampled_data['observation'], action_onehot).reshape(self.n_subsamples, -1)
