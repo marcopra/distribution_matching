@@ -9,11 +9,10 @@ env:
   show_coordinates: false
   
   # Continuous movement parameters
-  move_delta: 1.0
-  goal_threshold: 1.5
-  corridor_width: 2.0
+  move_delta: 0.3
+  goal_threshold: 0.4
   wall_thickness: 0.3
-  agent_radius: 0.3
+  agent_radius: 0.15
   
   num_actions: 4
   
@@ -22,7 +21,7 @@ env:
   wall_penalty: 0.0
   
   # Goal position (optional, null for random at each episode)
-  goal_position: null  # Can be [x, y] or null for random
+  goal_position: [7.0, 7.0]  # Can be [x, y] or null for random
   
   # Start position (optional, null for random at each episode)
-  start_position: [1.5, 1.5]  # Adjusted to be inside walkable area (wall_thickness=0.3, so min is 0.3)
+  start_position: [0.5, 0.5]  # Adjusted to be inside walkable area (wall_thickness=0.3, so min is 0.3)

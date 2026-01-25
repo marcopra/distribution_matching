@@ -339,7 +339,6 @@ class ContinuousRoomEnv(gym.Env, ABC):
             reward = 0.0 if terminated else -1.0
         
         
-        
         info = {
             "position": self.position.copy(),
             "goal": self.goal.copy(),
@@ -462,11 +461,11 @@ class ContinuousRoomEnv(gym.Env, ABC):
             pygame.draw.rect(surface, COLORS['floor'], rect)
         
         # Draw goal (green)
-        if self._fixed_goal_position is not None:
-            goal_screen = to_screen(self.goal[0], self.goal[1])
-            goal_radius = int(self.goal_threshold * scale)
-            pygame.draw.circle(surface, COLORS['goal'], goal_screen, goal_radius)
-            pygame.draw.circle(surface, COLORS['goal_border'], goal_screen, goal_radius, 3)
+        # if self._fixed_goal_position is not None:
+        #     goal_screen = to_screen(self.goal[0], self.goal[1])
+        #     goal_radius = int(self.goal_threshold * scale)
+        #     pygame.draw.circle(surface, COLORS['goal'], goal_screen, goal_radius)
+        #     pygame.draw.circle(surface, COLORS['goal_border'], goal_screen, goal_radius, 3)
         
         # Draw agent (red) - using actual agent_radius for visual consistency
         agent_screen = to_screen(self.position[0], self.position[1])

@@ -4,6 +4,7 @@ python pretrain.py agent=dist_matching_embedding_augmented_continuous env.render
 from collections import OrderedDict
 import os
 import hydra
+from PIL import Image
 import numpy as np
 import numpy.ma as ma
 import torch
@@ -79,6 +80,11 @@ class Encoder(nn.Module):
             h = F.normalize(h, p=1, dim=-1)
         return h
 
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        z = h
+        return z
+
 class CNNEncoder(nn.Module):
     def __init__(self, obs_shape, feature_dim):
         super().__init__()
@@ -97,7 +103,6 @@ class CNNEncoder(nn.Module):
             nn.Linear(self.repr_dim, feature_dim),
             nn.LayerNorm(feature_dim),
             nn.Tanh()
-            # nn.ReLU( )
         )
 
         self.apply(utils.weight_init)
@@ -112,7 +117,6 @@ class CNNEncoder(nn.Module):
     def encode_and_project(self, obs):
         h = self.forward(obs)
         z = self.projector(h)
-        z = F.normalize(z, p=1, dim=-1)
         return z
 
 
@@ -297,7 +301,7 @@ class EmbeddingDistributionVisualizer:
     - Using actual pixel observations for embedding visualization
     """
     
-    def __init__(self, agent, n_trajectories: int = 50, traj_length: int = 50):
+    def __init__(self, agent, n_trajectories: int = 50, traj_length: int = 50, n_points_grid: int = 16):
         """
         Initialize visualizer with agent reference.
         
@@ -305,6 +309,7 @@ class EmbeddingDistributionVisualizer:
             agent: DistMatchingEmbeddingAgent instance
             n_trajectories: Number of trajectories to sample
             traj_length: Length of each trajectory
+            n_points_grid: Number of points per dimension in the grid
         """
         self.agent = agent
         # Store both wrapped and unwrapped environment
@@ -313,7 +318,8 @@ class EmbeddingDistributionVisualizer:
         
         self.n_trajectories = n_trajectories
         self.traj_length = traj_length
-     
+        self.n_points_grid = n_points_grid
+        
         # Detect observation type
         self.obs_type = agent.obs_type
         self.is_pixel_obs = (self.obs_type == 'pixels')
@@ -337,7 +343,14 @@ class EmbeddingDistributionVisualizer:
     def _sample_and_cache_grid_states(self):
         """Sample grid states once and cache both 2D positions and rendered observations."""
         # Sample 2D states
-        self.grid_states_2d = self.agent._sample_grid_positions()
+        if hasattr(self.agent, 'sampled_positions'):
+            self.grid_states_2d = self.agent.sampled_positions
+            self.grid_observations = self.agent.dataset.get_data()['observation'][:len(self.grid_states_2d)].cpu().numpy()
+            print("observations shape:", self.grid_observations.shape)
+            print(f"Grid observations cached: shape={self.grid_observations.shape}")
+            utils.ColorPrint.blue(f"Using agent's sampled positions for grid states ({len(self.grid_states_2d)} points)")
+            return
+        self.grid_states_2d = self._sample_grid_states(self.n_points_grid)
         
         # Render observations for each state
         self.grid_observations = []
@@ -351,7 +364,7 @@ class EmbeddingDistributionVisualizer:
                 print(f"  Rendered {idx + 1}/{len(self.grid_states_2d)} observations")
         
         self.grid_observations = np.array(self.grid_observations)
-        print(f"Grid observations cached: shape={self.grid_observations.shape}")
+            
     
     def _get_state_and_obs_from_timestep(self, time_step) -> Tuple[np.ndarray, np.ndarray]:
         """Extract both 2D state (for plotting) and observation (for embedding).
@@ -439,6 +452,48 @@ class EmbeddingDistributionVisualizer:
         
         return trajectories, observations, action_sequences
     
+    def _sample_grid_states(self, n_samples: int = 16) -> np.ndarray:
+        """Sample 2D states on a grid within walkable areas.
+        
+        Args:
+            n_samples: Target number of samples
+            
+        Returns:
+            Array of sampled 2D states [n_samples, 2]
+        """
+        if not hasattr(self.env_unwrapped, 'walkable_areas'):
+            # Fallback: uniform grid over observation space
+            grid_size = int(np.ceil(np.sqrt(n_samples)))
+            x_coords = np.linspace(self.obs_low[0] + 0.2, self.obs_high[0] - 0.2, grid_size)
+            y_coords = np.linspace(self.obs_low[1] + 0.2, self.obs_high[1] - 0.2, grid_size)
+            
+            states = []
+            for x in x_coords:
+                for y in y_coords:
+                    states.append([x, y])
+            return np.array(states[:n_samples])
+        
+        # Sample from walkable areas
+        states = []
+        agent_radius = self.env_unwrapped.agent_radius
+        total_area = sum(area[2] * area[3] for area in self.env_unwrapped.walkable_areas)
+        
+        for area in self.env_unwrapped.walkable_areas:
+            ax, ay, aw, ah = area
+            area_size = aw * ah
+            n_samples_area = max(1, int(n_samples * area_size / total_area))
+            grid_size = int(np.ceil(np.sqrt(n_samples_area)))
+            
+            margin = agent_radius + 0.05
+            x_coords = np.linspace(ax + margin, ax + aw - margin, grid_size)
+            y_coords = np.linspace(ay + margin, ay + ah - margin, grid_size)
+            
+            for x in x_coords:
+                for y in y_coords:
+                    if self.env_unwrapped._is_position_valid_with_radius(x, y):
+                        states.append([x, y])
+        
+        return np.array(states)
     
     def _plot_trajectories(self, ax, trajectories):
         """Plot trajectories in 2D state space using proprio_observation."""
@@ -606,45 +661,40 @@ class EmbeddingDistributionVisualizer:
         ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1, 1), fontsize=8)
     
     def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False):
-        """Plot 2D projection of observation embeddings using PCA or t-SNE.
+        """Plot 2D projection of cached observation embeddings using PCA or t-SNE.
         
-        For pixel observations: Uses actual images
-        For state observations: Uses state vectors
+        Uses the embeddings already computed and cached in the agent.
         """
-        trajectories, observations, _ = self._sample_trajectories()
+        # Check if agent has cached features
+        if not hasattr(self.agent, '_phi_all_obs') or self.agent._phi_all_obs is None:
+            print("Warning: No cached embeddings found in agent. Skipping embedding plot.")
+            return
         
-        # Flatten list of observations from all trajectories
-        all_obs = []
-        for obs_list in observations:
-            all_obs.extend(obs_list)
+        # Use cached embeddings from agent (remove augmented dimension)
+        embeddings = self.agent._phi_all_obs[:, :-1].cpu().numpy()  # Remove last column (augmented zero)
+        n_samples = embeddings.shape[0]
         
-        print(f"Collected {len(all_obs)} observations from {len(trajectories)} trajectories")
+        print(f"Plotting {n_samples} cached embeddings with shape {embeddings.shape}")
         
-        # Add grid observations to the mix
-        all_obs.extend(self.grid_observations)
-        n_traj_obs = len(all_obs) - len(self.grid_observations)
+        # Get corresponding observations for spatial coloring
+        dataset_dict = self.agent.dataset.get_data()
+        observations = dataset_dict['observation'][:n_samples]
         
-        print(f"Added {len(self.grid_observations)} grid observations (total: {len(all_obs)})")
-        
-        # Encode observations using agent's encoder
-        with torch.no_grad():
-            # Convert observations to tensor
-            if self.is_pixel_obs:
-                # Stack images: [N, C, H, W]
-                obs_tensor = torch.stack([torch.from_numpy(obs) for obs in all_obs]).float()
-                obs_tensor = obs_tensor.to(self.agent.device)
-            else:
-                # Stack states: [N, state_dim]
-                obs_tensor = torch.from_numpy(np.array(all_obs)).float()
-                obs_tensor = obs_tensor.to(self.agent.device)
-            
-            # Get embeddings
-            embeddings = self.agent.encoder(obs_tensor).cpu().numpy()
-            print(f"Embeddings shape: {embeddings.shape}")
+        # Extract 2D positions for coloring
+        if self.is_pixel_obs:
+            # For pixel obs, use sequential coloring
+            print("Note: Using sequential coloring for pixel observations")
+            spatial_colors = np.arange(n_samples) / n_samples
+        else:
+            # For state observations, use first 2 dimensions as positions
+            obs_np = observations.cpu().numpy()
+            x_norm = (obs_np[:, 0] - self.obs_low[0]) / (self.obs_high[0] - self.obs_low[0])
+            y_norm = (obs_np[:, 1] - self.obs_low[1]) / (self.obs_high[1] - self.obs_low[1])
+            spatial_colors = (x_norm + y_norm) / 2  # Diagonal gradient
         
         # Dimensionality reduction
         if use_tsne:
-            reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_obs)-1))
+            reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, n_samples-1))
             method_name = "t-SNE"
         else:
             reducer = PCA(n_components=2)
@@ -652,49 +702,34 @@ class EmbeddingDistributionVisualizer:
         
         embeddings_2d = reducer.fit_transform(embeddings)
         
-        # Split embeddings: trajectories vs grid
-        traj_embeddings_2d = embeddings_2d[:n_traj_obs]
-        grid_embeddings_2d = embeddings_2d[n_traj_obs:]
+        # Create single plot
+        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
         
-        # Split trajectory embeddings by trajectory
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        # Plot embeddings colored by spatial position
+        scatter = ax.scatter(
+            embeddings_2d[:, 0], 
+            embeddings_2d[:, 1],
+            c=spatial_colors, 
+            cmap='viridis', 
+            s=50, 
+            alpha=0.6,
+            edgecolors='black', 
+            linewidth=0.3
+        )
         
-        cmap = plt.cm.viridis
-        idx = 0
-        
-        for traj_idx, obs_list in enumerate(observations):
-            traj_len = len(obs_list)
-            traj_emb = traj_embeddings_2d[idx:idx+traj_len]
-            colors = cmap(np.linspace(0.3, 0.9, traj_len))
-            
-            # Plot middle points
-            if traj_len > 2:
-                ax.scatter(traj_emb[1:-1, 0], traj_emb[1:-1, 1],
-                          c=colors[1:-1], alpha=0.6, s=30, marker='o')
-            
-            # Mark start (star) and end (triangle)
-            ax.scatter(traj_emb[0, 0], traj_emb[0, 1],
-                      c=[colors[0]], s=200, marker='*', edgecolors='black', linewidth=2,
-                      label='Start' if traj_idx == 0 else '', zorder=10)
-            ax.scatter(traj_emb[-1, 0], traj_emb[-1, 1],
-                      c=[colors[-1]], s=120, marker='^', edgecolors='black', linewidth=2,
-                      label='End' if traj_idx == 0 else '', zorder=10)
-            
-            idx += traj_len
-        
-        # Plot grid samples as red crosses
-        ax.scatter(grid_embeddings_2d[:, 0], grid_embeddings_2d[:, 1],
-                  c='red', s=100, marker='x', linewidths=2,
-                  label=f'Grid samples ({len(self.grid_observations)})', zorder=11)
-        
-        ax.set_xlabel(f'{method_name} Component 1')
-        ax.set_ylabel(f'{method_name} Component 2')
+        ax.set_xlabel(f'{method_name} Component 1', fontsize=12)
+        ax.set_ylabel(f'{method_name} Component 2', fontsize=12)
         obs_type_name = "Image" if self.is_pixel_obs else "State"
-        ax.set_title(f'{obs_type_name} Observation Embeddings\n'
-                    f'({self.n_trajectories} trajectories, {n_traj_obs} traj obs, {len(self.grid_observations)} grid samples)\n'
-                    f'Light→Dark: Start→End')
+        ax.set_title(
+            f'{obs_type_name} Observation Embeddings\n'
+            f'({n_samples} cached samples, dim={embeddings.shape[1]})\n'
+            f'Colored by spatial position',
+            fontsize=14
+        )
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter, ax=ax, label='Spatial gradient')
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -942,12 +977,12 @@ class DistMatchingEmbeddingAgent:
                 self.second_states.append(torch.tensor(obs))
             env.reset()
         
-        # Initialize visualizer now that we have the environment
-        self.visualizer = EmbeddingDistributionVisualizer(self, n_trajectories=5, traj_length=300)
-        
         # If ideal mode, pre-populate the dataset
         if self.ideal and not self._ideal_dataset_filled:
             self._populate_ideal_dataset()
+        
+        # Initialize visualizer now that we have the environment
+        self.visualizer = EmbeddingDistributionVisualizer(self, n_trajectories=5, traj_length=300)
 
     
     def _find_discrete_env(self, env):
@@ -985,10 +1020,10 @@ class DistMatchingEmbeddingAgent:
         """
         print("=== Populating ideal dataset with all reachable state-action pairs ===")
         
-        # Get discretized positions from walkable areas
-        sampled_positions = self._sample_grid_positions()
+        # Get discretized positions from walkable areas, starting from actual start position
+        self.sampled_positions = self._sample_grid_positions()
         
-        print(f"Sampled {len(sampled_positions)} grid positions from walkable areas")
+        print(f"Sampled {len(self.sampled_positions)} grid positions from walkable areas")
         
         # Get the dataset device to ensure consistency
         dataset_device = self.dataset.device
@@ -997,20 +1032,29 @@ class DistMatchingEmbeddingAgent:
         if self.obs_type == 'pixels':
             print("Rendering images for ideal dataset (this may take a while)...")
         
+        # Get actual start position from environment
+        actual_start_position = self.env.position.copy()
+        start_position_found = False
+        
         # For each position, try all actions
-        for pos_idx, position in enumerate(sampled_positions):
+        for pos_idx, position in enumerate(self.sampled_positions):
             if pos_idx % 100 == 0:
-                print(f"Processing position {pos_idx}/{len(sampled_positions)}...", end='\r')
+                print(f"Processing position {pos_idx}/{len(self.sampled_positions)}...", end='\r')
+            obs_rendered = self.render_observation_from_state(position)
+            
+            # Check if this is the actual start position
+            is_start_position = np.allclose(position, actual_start_position, atol=1e-5)
+            if is_start_position:
+                start_position_found = True
             
             for action in range(self.n_actions):
+                print(f"Processing position {pos_idx}/{len(self.sampled_positions)} action {action}/{self.n_actions}...", end='\r')
                 # Use step_from_position to get next state without changing env state
                 next_position, reward, terminated, truncated, info = self.env.step_from_position(
                     position, action
                 )
-                
                 if self.obs_type == 'pixels':
                     # Render observations for current and next position
-                    obs_rendered = self.render_observation_from_state(position)
                     next_obs_rendered = self.render_observation_from_state(next_position)
                     
                     # Convert to tensors
@@ -1037,24 +1081,27 @@ class DistMatchingEmbeddingAgent:
                     next_obs_tensor.unsqueeze(0)
                 ], dim=0)
                 
-                # Set alpha: 1.0 for the first entry (start state), 0.0 for others
-                if self.dataset._current_period_data['alpha'].shape[0] == 0:
-                    alpha_val = 1.0
-                else:
-                    alpha_val = 0.0
+                # Set alpha: 1.0 only for transitions starting from actual start position
+                alpha_val = 1.0 if is_start_position else 0.0
                 
                 self.dataset._current_period_data['alpha'] = torch.cat([
                     self.dataset._current_period_data['alpha'],
                     torch.tensor([alpha_val], device=dataset_device, dtype=torch.float32)
                 ], dim=0)
         
+        if not start_position_found:
+            utils.ColorPrint.yellow(
+                f"Warning: Actual start position {actual_start_position} not found in sampled positions. "
+                f"Alpha might not be set correctly."
+            )
+        
         print()  # New line after progress
         self._ideal_dataset_filled = True
         dataset_size = len(self.dataset._current_period_data['observation'])
-        expected_size = len(sampled_positions) * self.n_actions
+        expected_size = len(self.sampled_positions) * self.n_actions
         
         print(f"Ideal dataset populated with {dataset_size} state-action pairs")
-        print(f"Expected size: {expected_size} (positions: {len(sampled_positions)}, actions: {self.n_actions})")
+        print(f"Expected size: {expected_size} (positions: {len(self.sampled_positions)}, actions: {self.n_actions})")
         
         if self.obs_type == 'pixels':
             obs_shape = self.dataset._current_period_data['observation'][0].shape
@@ -1068,11 +1115,11 @@ class DistMatchingEmbeddingAgent:
     
     def _sample_grid_positions(self) -> np.ndarray:
         """
-        Sample positions on a regular grid within walkable areas.
-        Grid spacing is based on move_delta to capture all reachable discrete positions.
+        Sample positions on a regular grid starting from actual start position.
+        Iterates left to right, bottom to top, adding only valid positions.
         
         Returns:
-            np.ndarray: Array of positions [n_positions, 2]
+            np.ndarray: Array of positions [n_positions, 2], with start position first
         """
         if not hasattr(self.env, 'walkable_areas'):
             raise ValueError(
@@ -1080,32 +1127,50 @@ class DistMatchingEmbeddingAgent:
                 "Make sure you're using a continuous room environment."
             )
         
-        positions = []
+        # Get actual start position and grid spacing
+        actual_start = self.env.position.copy()
         grid_spacing = self.env.move_delta
         
-        # Add margin for agent radius to ensure positions are valid
-        margin = self.env.agent_radius + 0.05
+        # Get environment bounds
+        min_x = min(area[0] for area in self.env.walkable_areas)
+        max_x = max(area[0] + area[2] for area in self.env.walkable_areas)
+        min_y = min(area[1] for area in self.env.walkable_areas)
+        max_y = max(area[1] + area[3] for area in self.env.walkable_areas)
         
-        for area in self.env.walkable_areas:
-            ax, ay, aw, ah = area
-            
-            # Create grid within this area
-            x = ax + margin
-            while x <= ax + aw - margin:
-                y = ay + margin
-                while y <= ay + ah - margin:
-                    # Verify position is valid with agent radius
-                    if self.env._is_position_valid_with_radius(x, y):
-                        positions.append([x, y])
-                    y += grid_spacing
+        positions = []
+        
+        # Validate and add start position first
+        if not self.env._is_position_valid_with_radius(actual_start[0], actual_start[1]):
+        #     positions.append(actual_start.copy())
+        # else:
+            utils.ColorPrint.yellow(
+                f"Warning: Start position {actual_start} is not valid with agent radius."
+            )
+        
+        # Iterate from min_y to max_y, starting from actual_start[1]
+        y = actual_start[1]
+        while y <= max_y:
+            # For each row, iterate from min_x to max_x
+            x = actual_start[0]
+            while x <= max_x:
+                pos = np.array([x, y], dtype=np.float32)
+                
+                # Add only if position is valid
+                if self.env._is_position_valid_with_radius(x, y):
+                    positions.append(pos)
+                
                 x += grid_spacing
             
+            y += grid_spacing
+        
         if len(positions) == 0:
             raise ValueError(
                 "No valid grid positions found. Check walkable_areas and agent_radius."
             )
         
         print(f"Generated grid with {len(positions)} positions (spacing={grid_spacing:.3f})")
+        print(f"Start position: {actual_start}, total positions: {len(positions)}")
+        
         return np.array(positions, dtype=np.float32)
 
     def init_meta(self):
@@ -1186,15 +1251,15 @@ class DistMatchingEmbeddingAgent:
             Observation in the format expected by the agent
         """
         if self.obs_type == 'pixels':
-            from PIL import Image
+            
             
             # Render image from position [H, W, C]
             image = self.env.render_from_position(state_2d)
             
             # Auto-resize if needed
             if image.shape[:2] != (self.render_resolution, self.render_resolution):
-                print(f"Warning: Rendered image shape {image.shape[:2]} doesn't match expected "
-                      f"({self.render_resolution}, {self.render_resolution}). Resizing...")
+                # print(f"Warning: Rendered image shape {image.shape[:2]} doesn't match expected "
+                #       f"({self.render_resolution}, {self.render_resolution}). Resizing...")
                 
                 # Convert to PIL Image, resize, convert back
                 pil_img = Image.fromarray(image.astype(np.uint8))
@@ -1269,14 +1334,14 @@ class DistMatchingEmbeddingAgent:
         
         # Compute loss
         # 1. Contrastive loss:
+        logits = predicted_next@ next_obs_en.T   # [B, B]
         logits = predicted_next/torch.norm(predicted_next, p=2, dim=1, keepdim=True) @ (next_obs_en/torch.norm(next_obs_en, p=2, dim=1, keepdim=True)).T   # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
 
         # 2. Loss embeddings must sum to 1
-        embedding_sum_loss = torch.abs(torch.sum(self.aug_and_encode(obs, project=False), dim=-1) - 1).sum()
-        beta = 1  
+        embedding_sum_loss = torch.abs(torch.sum(self.aug_and_encode(obs, project=True), dim=-1) - 1).mean()
         # 3. \phi(s) and \phi(s') must be close in L2 norm
         l2_loss = torch.norm(obs_en - next_obs_en, p=2, dim=1).mean()
 
@@ -1293,7 +1358,7 @@ class DistMatchingEmbeddingAgent:
         else:
             curl_loss = torch.tensor(0.)
 
-        loss = contrastive_loss + 0.001*embedding_sum_loss + l2_loss # beta*embedding_sum_loss + l2_loss  + curl_loss     
+        loss = contrastive_loss + 0.001*embedding_sum_loss + 0.001*l2_loss # beta*embedding_sum_loss + l2_loss  + curl_loss     
         
         # Optimize
         self.encoder_optimizer.zero_grad()
