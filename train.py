@@ -293,7 +293,7 @@ class Workspace:
             episode_reward += time_step.reward
             self.replay_storage.add(time_step, meta)
             if not self.INITIAL_HEATMAP:
-                self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
+                self.dataset['states'] = np.append(self.dataset['states'],  time_step.proprio_observation if time_step.proprio_observation.shape[0] == 2 else  np.argmax(time_step.proprio_observation))
                 self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
                 self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
             self.train_video_recorder.record(time_step.image_observation)
@@ -307,40 +307,60 @@ class Workspace:
         Args:
             save_path: Path to save the heatmap
         """
-        # Get grid dimensions
-        max_x = max(cell[0] for cell in self.train_env.unwrapped.cells)
-        max_y = max(cell[1] for cell in self.train_env.unwrapped.cells)
-        min_x = min(cell[0] for cell in self.train_env.unwrapped.cells)
-        min_y = min(cell[1] for cell in self.train_env.unwrapped.cells)
-        grid_width = max_x - min_x + 1
-        grid_height = max_y - min_y + 1
-        
-        # Count state visitations
-        state_counts = np.zeros(self.train_env.unwrapped.n_states)
-        for state in self.dataset['states']:
-            state_counts[int(state)] += 1
-        
-        # Create grid
-        grid = np.zeros((grid_height, grid_width))
-        for s_idx in range( self.train_env.unwrapped.n_states):
-            x, y = self.train_env.unwrapped.idx_to_state[s_idx]
-            grid[y - min_y, x - min_x] = state_counts[s_idx]
-        
-        # Mask zero values to show background color
-        masked_grid = np.ma.masked_where(grid == 0, grid)
-        
-        fig, ax = plt.subplots(figsize=(8, 6))
-        # Set light gray background
-        ax.set_facecolor("#B2B2B2")
-        # Plot only non-zero values
-        im = ax.imshow(masked_grid, cmap='YlOrRd', interpolation='nearest')
-        ax.set_title(f'Dataset State Visitation (n={len(self.dataset["states"])})')
-        ax.set_xlabel('x')
-        ax.set_ylabel('y')
-        ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
-        ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
-        plt.colorbar(im, ax=ax, label='Visit Count')
+        # Check if environment has cells attribute (grid-based environment)
+        if hasattr(self.train_env.unwrapped, 'cells'):
+            # Get grid dimensions
+            max_x = max(cell[0] for cell in self.train_env.unwrapped.cells)
+            max_y = max(cell[1] for cell in self.train_env.unwrapped.cells)
+            min_x = min(cell[0] for cell in self.train_env.unwrapped.cells)
+            min_y = min(cell[1] for cell in self.train_env.unwrapped.cells)
+            grid_width = max_x - min_x + 1
+            grid_height = max_y - min_y + 1
+            
+            # Count state visitations
+            state_counts = np.zeros(self.train_env.unwrapped.n_states)
+            for state in self.dataset['states']:
+                state_counts[int(state)] += 1
+            
+            # Create grid
+            grid = np.zeros((grid_height, grid_width))
+            for s_idx in range(self.train_env.unwrapped.n_states):
+                x, y = self.train_env.unwrapped.idx_to_state[s_idx]
+                grid[y - min_y, x - min_x] = state_counts[s_idx]
+            
+            # Mask zero values to show background color
+            masked_grid = np.ma.masked_where(grid == 0, grid)
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            # Set light gray background
+            ax.set_facecolor("#B2B2B2")
+            # Plot only non-zero values
+            im = ax.imshow(masked_grid, cmap='YlOrRd', interpolation='nearest')
+            ax.set_title(f'Dataset State Visitation (n={len(self.dataset["states"])})')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
+            ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+            plt.colorbar(im, ax=ax, label='Visit Count')
+        else:
+            # Continuous space: plot (x,y) coordinates as scatter plot
+            states = self.dataset['states']
+            if len(states) == 0:
+                return
+            
+            # Reshape states to extract x,y coordinates
+            states = np.array(states).reshape(-1, 2)
+            x_coords = states[:, 0]
+            y_coords = states[:, 1]
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            # Create scatter plot
+            ax.scatter(x_coords, y_coords, c='red', alpha=0.5, s=10)
+            ax.set_title(f'Dataset State Visitation (n={len(states)})')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')

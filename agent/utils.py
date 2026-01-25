@@ -873,6 +873,9 @@ class InternalDatasetFIFO:
         self._horizon_history = []
         self._plot_counter = 0
         
+        # Cache for dummy transition (first complete sample)
+        self._dummy_cache = None
+        
         self.reset()
     
     def reset(self):
@@ -888,17 +891,16 @@ class InternalDatasetFIFO:
             'observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
             'action': torch.empty((0,), device=self.device, dtype=torch.long),
             'next_observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
+            'proprio_observation': torch.empty((0, 0), device=self.device, dtype=self.data_type),  # Will be resized on first add
             'alpha': torch.empty((0,), device=self.device, dtype=self.data_type),
-        
         }
         self._trajectory_idx = np.array([], dtype=np.int32)
         self._unique_pairs = set()
         self._prev_obs = None
+        self._prev_proprio = None
         self._traj_boundaries = {}
         self._current_dataset_idx = 0
         self._trajectory_active = False
-        self._dummy_transition = None
-        self._dummy_first_state = False
     
     @property
     def data(self) -> Dict[str, torch.Tensor]:
@@ -919,6 +921,7 @@ class InternalDatasetFIFO:
                 'observation': torch.cat([aggregated['observation'], self._current_period_data['observation']], dim=0),
                 'action': torch.cat([aggregated['action'], self._current_period_data['action']], dim=0),
                 'next_observation': torch.cat([aggregated['next_observation'], self._current_period_data['next_observation']], dim=0),
+                'proprio_observation': torch.cat([aggregated['proprio_observation'], self._current_period_data['proprio_observation']], dim=0) if aggregated['proprio_observation'].shape[0] > 0 else self._current_period_data['proprio_observation'],
                 'alpha': torch.cat([aggregated['alpha'], self._current_period_data['alpha']], dim=0)
             }
         else:
@@ -988,6 +991,7 @@ class InternalDatasetFIFO:
         """Add only unique (s,a) pairs to current period."""
         if time_step.step_type == StepType.FIRST:
             self._prev_obs = time_step.observation
+            self._prev_proprio = getattr(time_step, 'proprio_observation', None)
             self._current_dataset_idx += 1
             self._trajectory_active = True
             return
@@ -1013,7 +1017,18 @@ class InternalDatasetFIFO:
                     self._current_period_data['next_observation'],
                     torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
                 ], dim=0)
-
+                
+                # Add proprio observation if available
+                if self._prev_proprio is not None:
+                    proprio_tensor = torch.tensor(self._prev_proprio, device=self.device, dtype=self.data_type).unsqueeze(0)
+                    if self._current_period_data['proprio_observation'].shape[0] == 0:
+                        # Initialize with correct shape
+                        self._current_period_data['proprio_observation'] = proprio_tensor
+                    else:
+                        self._current_period_data['proprio_observation'] = torch.cat([
+                            self._current_period_data['proprio_observation'],
+                            proprio_tensor
+                        ], dim=0)
                 
                 alpha_val = 1.0 if len(self._unique_pairs) == 1 else 0.0
                 self._current_period_data['alpha'] = torch.cat([
@@ -1029,8 +1044,12 @@ class InternalDatasetFIFO:
                 else:
                     start_idx = self._traj_boundaries[self._current_dataset_idx][0]
                     self._traj_boundaries[self._current_dataset_idx] = (start_idx, current_idx)
+                
+                # Cache first complete transition for dummy
+                self._cache_first_transition()
             
             self._prev_obs = time_step.observation
+            self._prev_proprio = getattr(time_step, 'proprio_observation', None)
             if time_step.step_type == StepType.LAST:
                 self._trajectory_active = False
     
@@ -1046,6 +1065,18 @@ class InternalDatasetFIFO:
                 self._current_period_data['observation'],
                 torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
+            
+            # Add proprio observation if available
+            proprio_obs = getattr(time_step, 'proprio_observation', None)
+            if proprio_obs is not None:
+                proprio_tensor = torch.tensor(proprio_obs, device=self.device, dtype=self.data_type).unsqueeze(0)
+                if self._current_period_data['proprio_observation'].shape[0] == 0:
+                    self._current_period_data['proprio_observation'] = proprio_tensor
+                else:
+                    self._current_period_data['proprio_observation'] = torch.cat([
+                        self._current_period_data['proprio_observation'],
+                        proprio_tensor
+                    ], dim=0)
             
             alpha_val = 1.0 if self._current_period_data['observation'].shape[0] == 1 else 0.0
             self._current_period_data['alpha'] = torch.cat([
@@ -1071,6 +1102,19 @@ class InternalDatasetFIFO:
                 self._current_period_data['next_observation'],
                 torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
+            
+            # Add proprio observation if available
+            proprio_obs = getattr(time_step, 'proprio_observation', None)
+            if proprio_obs is not None:
+                proprio_tensor = torch.tensor(proprio_obs, device=self.device, dtype=self.data_type).unsqueeze(0)
+                if self._current_period_data['proprio_observation'].shape[0] == 0:
+                    self._current_period_data['proprio_observation'] = proprio_tensor
+                else:
+                    self._current_period_data['proprio_observation'] = torch.cat([
+                        self._current_period_data['proprio_observation'],
+                        proprio_tensor
+                    ], dim=0)
+            
             self._current_period_data['alpha'] = torch.cat([
                 self._current_period_data['alpha'],
                 torch.tensor([0.0], device=self.device, dtype=self.data_type)
@@ -1079,7 +1123,10 @@ class InternalDatasetFIFO:
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
             start_idx = self._traj_boundaries[self._current_dataset_idx][0]
             self._traj_boundaries[self._current_dataset_idx] = (start_idx, len(self._trajectory_idx) - 1)
-        
+            
+            # Cache first complete transition for dummy
+            self._cache_first_transition()
+  
         elif time_step.step_type == StepType.LAST:
             if not self._trajectory_active:
                 return
@@ -1093,7 +1140,7 @@ class InternalDatasetFIFO:
                 torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             self._trajectory_active = False
-        
+    
     def _add_dynamic_horizon(self, time_step):
         """Add all transitions to current period."""
         if time_step.step_type == StepType.FIRST:
@@ -1120,6 +1167,18 @@ class InternalDatasetFIFO:
                 torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
             ], dim=0)
             
+            # Add proprio observation if available
+            proprio_obs = getattr(time_step, 'proprio_observation', None)
+            if proprio_obs is not None:
+                proprio_tensor = torch.tensor(proprio_obs, device=self.device, dtype=self.data_type).unsqueeze(0)
+                if self._current_period_data['proprio_observation'].shape[0] == 0:
+                    self._current_period_data['proprio_observation'] = proprio_tensor
+                else:
+                    self._current_period_data['proprio_observation'] = torch.cat([
+                        self._current_period_data['proprio_observation'],
+                        proprio_tensor
+                    ], dim=0)
+            
             alpha_val = 1.0 if self._current_period_data['observation'].shape[0] == 1 else 0.0
             self._current_period_data['alpha'] = torch.cat([
                 self._current_period_data['alpha'],
@@ -1137,6 +1196,19 @@ class InternalDatasetFIFO:
                     self._current_period_data['observation'],
                     torch.tensor(time_step.observation, device=self.device, dtype=self.data_type).unsqueeze(0)
                 ], dim=0)
+                
+                # Add proprio observation if available
+                proprio_obs = getattr(time_step, 'proprio_observation', None)
+                if proprio_obs is not None:
+                    proprio_tensor = torch.tensor(proprio_obs, device=self.device, dtype=self.data_type).unsqueeze(0)
+                    if self._current_period_data['proprio_observation'].shape[0] == 0:
+                        self._current_period_data['proprio_observation'] = proprio_tensor
+                    else:
+                        self._current_period_data['proprio_observation'] = torch.cat([
+                            self._current_period_data['proprio_observation'],
+                            proprio_tensor
+                        ], dim=0)
+                
                 self._current_period_data['alpha'] = torch.cat([
                     self._current_period_data['alpha'],
                     torch.tensor([0.0], device=self.device, dtype=self.data_type)
@@ -1144,7 +1216,6 @@ class InternalDatasetFIFO:
             else:
                 self._trajectory_active = False
             
-            # ColorPrint.green(f"saving the action")
             self._current_period_data['action'] = torch.cat([
                 self._current_period_data['action'],
                 torch.tensor([time_step.action], device=self.device, dtype=torch.long)
@@ -1157,6 +1228,9 @@ class InternalDatasetFIFO:
             self._trajectory_idx = np.append(self._trajectory_idx, self._current_dataset_idx)
             start_idx = self._traj_boundaries[self._current_dataset_idx][0]
             self._traj_boundaries[self._current_dataset_idx] = (start_idx, len(self._trajectory_idx) - 1)
+            
+            # Cache first complete transition for dummy
+            self._cache_first_transition()
   
         elif time_step.step_type == StepType.LAST:
             if not self._trajectory_active:
@@ -1172,35 +1246,63 @@ class InternalDatasetFIFO:
             ], dim=0)
             self._trajectory_active = False
     
-    def add_dummy_transition(self):
-        """Add a dummy transition to ensure at least one datapoint."""
+    def _cache_first_transition(self):
+        """Cache the first complete transition for use as dummy transition."""
+        if self._dummy_cache is not None:
+            return  # Already cached
         
-        if not hasattr(self, '_dummy_transition') or self._dummy_first_state is False:
-            self._dummy_first_state = True
-            # For image observations, compare using first channel or flattened comparison
-            if len(self.obs_shape) > 1:  # Image observations
-                # Use first observation as dummy
-                indices = torch.tensor([0])
-            else:
-                eye_tensor = torch.eye(self.n_states, device=self.device, dtype=self.data_type)
-                indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[0].unsqueeze(0), axis=1))[0]
-                if indices.shape[0] == 0:
-                    indices = torch.where(torch.all(self.data['next_observation'] == eye_tensor[1].unsqueeze(0), axis=1))[0]
-                    self._dummy_first_state = False
+        # Check if we have at least one complete transition
+        if (len(self._current_period_data['observation']) > 0 and
+            len(self._current_period_data['action']) > 0 and
+            len(self._current_period_data['next_observation']) > 0):
             
-            self._dummy_transition = {
-                'observation': self.data['observation'][indices[0]].unsqueeze(0),
-                'action': self.data['action'][indices[0]].unsqueeze(0),
-                'next_observation': self.data['next_observation'][indices[0]].unsqueeze(0),
-                'alpha': self.data['alpha'][indices[0]].unsqueeze(0)
+            self._dummy_cache = {
+                'observation': self._current_period_data['observation'][0:1].clone(),
+                'action': self._current_period_data['action'][0:1].clone(),
+                'next_observation': self._current_period_data['next_observation'][0:1].clone(),
+                'alpha': self._current_period_data['alpha'][0:1].clone()
             }
-        
-        self._sampled_data['observation'] = torch.cat([self._dummy_transition['observation'], self._sampled_data['observation']], dim=0)
-        self._sampled_data['action'] = torch.cat([self._dummy_transition['action'], self._sampled_data['action']], dim=0)
-        self._sampled_data['next_observation'] = torch.cat([self._dummy_transition['next_observation'], self._sampled_data['next_observation']], dim=0)
-        self._sampled_data['alpha'] = torch.cat([self._dummy_transition['alpha'], self._sampled_data['alpha']], dim=0)
             
-
+            # Add proprio if available
+            if self._current_period_data['proprio_observation'].shape[0] > 0:
+                self._dummy_cache['proprio_observation'] = self._current_period_data['proprio_observation'][0:1].clone()
+            else:
+                self._dummy_cache['proprio_observation'] = torch.empty((1, 0), device=self.device, dtype=self.data_type)
+            
+            utils.ColorPrint.green("Cached first transition for dummy use")
+    
+    def add_dummy_transition(self):
+        """Add a dummy transition using the cached first sample."""
+        if self._dummy_cache is None:
+            utils.ColorPrint.yellow("No dummy cache available, skipping dummy transition")
+            return
+        
+        self._sampled_data['observation'] = torch.cat([
+            self._dummy_cache['observation'], 
+            self._sampled_data['observation']
+        ], dim=0)
+        self._sampled_data['action'] = torch.cat([
+            self._dummy_cache['action'], 
+            self._sampled_data['action']
+        ], dim=0)
+        self._sampled_data['next_observation'] = torch.cat([
+            self._dummy_cache['next_observation'], 
+            self._sampled_data['next_observation']
+        ], dim=0)
+        self._sampled_data['alpha'] = torch.cat([
+            self._dummy_cache['alpha'], 
+            self._sampled_data['alpha']
+        ], dim=0)
+        
+        # Add proprio if available
+        if self._dummy_cache['proprio_observation'].shape[0] > 0:
+            if 'proprio_observation' not in self._sampled_data or self._sampled_data['proprio_observation'].shape[0] == 0:
+                self._sampled_data['proprio_observation'] = self._dummy_cache['proprio_observation']
+            else:
+                self._sampled_data['proprio_observation'] = torch.cat([
+                    self._dummy_cache['proprio_observation'],
+                    self._sampled_data['proprio_observation']
+                ], dim=0)
     
     def _aggregate_periods(self) -> Dict[str, torch.Tensor]:
         """Concatenate data from all periods in the window."""
@@ -1209,12 +1311,14 @@ class InternalDatasetFIFO:
                 'observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
                 'action': torch.empty((0,), device=self.device, dtype=torch.long),
                 'next_observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
+                'proprio_observation': torch.empty((0, 0), device=self.device, dtype=self.data_type),
                 'alpha': torch.empty((0,), device=self.device, dtype=self.data_type)
             }
         
         all_obs = []
         all_actions = []
         all_next_obs = []
+        all_proprio = []
         all_alpha = []
         
         for period in self._periods_queue:
@@ -1223,6 +1327,8 @@ class InternalDatasetFIFO:
                 all_obs.append(data['observation'])
                 all_actions.append(data['action'])
                 all_next_obs.append(data['next_observation'])
+                if data['proprio_observation'].shape[0] > 0:
+                    all_proprio.append(data['proprio_observation'])
                 all_alpha.append(data['alpha'])
         
         if len(all_obs) == 0:
@@ -1230,6 +1336,7 @@ class InternalDatasetFIFO:
                 'observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
                 'action': torch.empty((0,), device=self.device, dtype=torch.long),
                 'next_observation': torch.empty((0, *self.obs_shape), device=self.device, dtype=self.data_type),
+                'proprio_observation': torch.empty((0, 0), device=self.device, dtype=self.data_type),
                 'alpha': torch.empty((0,), device=self.device, dtype=self.data_type)
             }
         
@@ -1237,6 +1344,7 @@ class InternalDatasetFIFO:
             'observation': torch.cat(all_obs, dim=0),
             'action': torch.cat(all_actions, dim=0),
             'next_observation': torch.cat(all_next_obs, dim=0),
+            'proprio_observation': torch.cat(all_proprio, dim=0) if len(all_proprio) > 0 else torch.empty((0, 0), device=self.device, dtype=self.data_type),
             'alpha': torch.cat(all_alpha, dim=0)
         }
     

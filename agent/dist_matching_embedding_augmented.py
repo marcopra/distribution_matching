@@ -48,9 +48,46 @@ class Encoder(nn.Module):
         obs = obs.view(obs.shape[0], -1)
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
-
-
         return h
+    
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        z = h
+        return z
+
+class CNNEncoder(nn.Module):
+    def __init__(self, obs_shape, feature_dim):
+        super().__init__()
+
+        assert len(obs_shape) == 3
+
+        self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU())
+
+        self.repr_dim = 32 * 35 * 35
+
+        self.projector = nn.Sequential(
+            nn.Linear(self.repr_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.Tanh()
+        )
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs):
+        obs = obs / 255.
+        h = self.conv(obs)
+        h = h.view(h.shape[0], -1)
+        # h = F.softmax(h/0.1, dim=-1)
+        return h
+
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        z = self.projector(h)
+        return z
 
 class TransitionModel(nn.Module):
     """Learnable transition dynamics T: (s,a) -> s'."""
@@ -896,16 +933,29 @@ class DistMatchingEmbeddingAgent:
             'total_previous_next_states': 0
         }
         
-        # Components
-        self.encoder = Encoder(
-            obs_shape, 
-            hidden_dim, 
-            self.feature_dim
-        ).to(self.device)
+        if obs_type == 'pixels':
+            self.aug = nn.Identity() #utils.RandomShiftsAug(pad=4)
+            self.encoder = CNNEncoder(
+                obs_shape,
+                feature_dim
+            ).to(self.device)
+            
+            self.obs_dim = self.feature_dim
+        else:
+            # Components
+            self.aug = nn.Identity()
+            self.encoder = Encoder(
+                obs_shape, 
+                hidden_dim, 
+                self.feature_dim,
+            ).to(self.device)
+
+            self.obs_dim = self.feature_dim
+       
         
         self.transition_model = TransitionModel(
-            self.feature_dim * self.n_actions,
-            self.feature_dim
+            self.obs_dim * self.n_actions,
+            self.obs_dim
         ).to(self.device)
         
         self.distribution_matcher = DistributionMatcher(
