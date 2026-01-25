@@ -542,9 +542,6 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         Wrapped environment
     """
     
-    # Determine render_mode based on obs_type
-    if obs_type == 'pixels':
-        assert kwargs['render_mode'] == 'rgb_array', "For pixel observations, render_mode must be 'rgb_array'"
     
     env = gym.make(name, **kwargs)
     
@@ -558,9 +555,11 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
             f"render_mode must be 'rgb_array' for pixel observations, got {env.render_mode}"
 
     if seed is not None:
-        env.reset(seed=seed)
+        state, _ = env.reset(seed=seed)
+    else:
+        state, _ = env.reset()
 
-    if obs_type == 'discrete_states':
+    if obs_type == 'discrete_states' or type(state) == int:
         env = DiscreteObservationWrapper(env)
     
     if url:

@@ -72,8 +72,8 @@ class CNNEncoder(nn.Module):
 
         self.projector = nn.Sequential(
             nn.Linear(self.repr_dim, feature_dim),
-            nn.LayerNorm(feature_dim),
-            nn.Tanh()
+            # nn.LayerNorm(feature_dim),
+            nn.ReLU()
         )
 
         self.apply(utils.weight_init)
@@ -88,6 +88,7 @@ class CNNEncoder(nn.Module):
     def encode_and_project(self, obs):
         h = self.forward(obs)
         z = self.projector(h)
+        z =F.normalize(z, p=1, dim=-1)
         return z
 
 class TransitionModel(nn.Module):
@@ -581,7 +582,7 @@ class EmbeddingDistributionVisualizer:
             ax.scatter(embedding_2d[0], embedding_2d[1], 
                       c=[colors[idx]], s=100, edgecolors='black', linewidth=1.5)
             ax.annotate(f"{cell}", (embedding_2d[0], embedding_2d[1]), 
-                       fontsize=8, ha='center', va='center', color='green', fontweight='bold')
+                       fontsize=8, ha='center', va='center', color='red', fontweight='bold')
         
         obs_type_str = "Image" if self.agent.obs_type == 'pixels' else "State"
         ax.set_xlabel(f'{method_name} Component 1')
@@ -1347,7 +1348,7 @@ class DistMatchingEmbeddingAgent:
                 # State observations: [x, y] -> [1, 2]
                 obs_tensor = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)  # [1, obs_dim]
             
-            enc_obs = self.encoder(obs_tensor).cpu()  # [1, feature_dim]
+            enc_obs = self.aug_and_encode(obs_tensor, project=True).cpu()  # [1, feature_dim]
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
@@ -1418,7 +1419,7 @@ class DistMatchingEmbeddingAgent:
         # 5. \phi(s) and \phi(s') must be close in L2 norm
         l2_loss = torch.norm(obs_en - next_obs_en, p=2, dim=1).mean()
 
-        loss =  1000*contrastive_loss + beta*embedding_sum_loss + 0.01*l2_loss
+        loss =  contrastive_loss #+ beta*embedding_sum_loss + 0.01*l2_loss
         
         # Optimize
         self.encoder_optimizer.zero_grad()
@@ -1595,15 +1596,15 @@ class DistMatchingEmbeddingAgent:
             obs = tensors['observation'][:len(tensors['next_observation'])]
             actions = tensors['action']
             next_obs = tensors['next_observation']
+            proprio_obs = tensors['proprio_observation']
         
-            self._phi_all_obs = self.encoder(obs.to(self.device)).cpu()
-            self._phi_all_next = self.encoder(next_obs.to(self.device)).cpu()
+            self._phi_all_obs = self.aug_and_encode(obs.to(self.device), project=True).cpu()
+            self._phi_all_next = self.aug_and_encode(next_obs.to(self.device), project=True).cpu()
          
             # find first row in self._phi_all_next that is equal to first_state
-            indices = torch.where(torch.all(next_obs == self.first_state, dim=1))[0]
+            indices = torch.where(torch.all(proprio_obs == self.first_state, dim=1))[0]
             if indices.shape[0] == 0:
-                indices = torch.where(torch.all(next_obs == self.second_state, dim=1))[0]
-            print("Found indices for second state:", indices)
+                indices = torch.where(torch.all(proprio_obs == self.second_state, dim=1))[0]
 
             self._psi_all = self._encode_state_action(self._phi_all_obs, actions).cpu()
            
@@ -1626,7 +1627,7 @@ class DistMatchingEmbeddingAgent:
             zero_col = torch.zeros(*self._phi_all_obs.shape[:-1], 1, device=self._phi_all_obs.device)
             self._phi_all_obs = torch.cat([self._phi_all_obs, zero_col], dim=-1)
 
-            print("all dtypes:", self._phi_all_obs.dtype, self._phi_all_next.dtype, self._psi_all.dtype)
+            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
             optimal_T = self.transition_model.compute_closed_form(self._psi_all, self._phi_all_next, self.lambda_reg)
             print(f"==== Optimal T error {F.mse_loss(optimal_T @ self._psi_all.T, self._phi_all_next.T).item()} ====")
 

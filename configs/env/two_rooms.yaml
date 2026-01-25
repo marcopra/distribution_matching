@@ -6,7 +6,7 @@ env:
   room_size: 2
   corridor_length: 1
   corridor_y: 1  # Y-coordinate of the corridor
-  max_steps: 300
+  max_steps: 80
   render_mode: rgb_array
   show_coordinates: false
   
