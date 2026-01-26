@@ -12,7 +12,7 @@ obs_type: discrete_states # [discrete_states, states, pixels]
 frame_stack: 1 # only works if obs_type=pixels
 action_repeat: 1 # set to 2 for pixels
 discount: 0.99
-resolution: 224  
+resolution: 84  
 random_init: true
 random_goal: true
 
