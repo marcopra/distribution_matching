@@ -10,9 +10,7 @@ python /home/mprattico/Pretrain-TACO/plot/download_data_from_wandb.py --csv_path
 python /home/mprattico/Pretrain-TACO/plot/download_data_from_wandb.py --csv_path data_plot/exp/shelf-place --filter_by_config "agent/no_taco!=true&env_name=shelf-place-v2&agent/pretrained_path!=/home/mprattico/Pretrain-TACO/models/taco_MT_MT50_OOD_ShelfPlace_0.99_lr=0.0005_ts=43315200_curl_rew_best.pt" --filter_by_tags     "(MT50&BEST)|baseline" --group_by_config agent/pretrained_path --project taco_metaworld_batch1 
 python /home/mprattico/Pretrain-TACO/plot/download_data_from_wandb.py --csv_path data_plot/exp/shelf-place --filter_by_config "agent/no_taco!=true&env_name=shelf-place-v2" --filter_by_tags     MT50 --group_by_config agent/pretrained_path --project taco_metaworld_debug 
 
-python plot/data_downloader.py ---csv_path data_plot/states/multirooms --filter_by_config "env.name=MultipleRooms-v0&&env.goal_position=[10,2]" --group_by_config agent._target_ --project finetune_gym 
-
-
+python plot/data_downloader.py --csv_path data_plot/states/multirooms --filter_by_config "env/name=MultipleRooms-v0&obs_type=pixels" --group_by_config agent/_target_ --project finetune_gym --download --processing --n_points 80
 
 
 """
@@ -91,6 +89,7 @@ def evaluate_config_expression(run_config, expression):
     
     print(f"DEBUG: Original expression: {expression}")
     print(f"DEBUG: Available config keys: {list(flattened_config.keys())}")
+    
     
     # Find all config filter patterns in the expression
     import re
@@ -277,8 +276,8 @@ def parse_tag_filters(tags_filter_str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--csv_path', type=str, default="data_plot/", help='csv folder') 
-    parser.add_argument('--keys', type=str, default="eval/episode_reward,eval/success_rate", help='Data to be saved')
-    parser.add_argument('--x-key', type=str, default="buffer_size", help='X axis key')
+    parser.add_argument('--keys', type=str, default="train/episode_reward", help='Data to be saved')
+    parser.add_argument('--x-key', type=str, default="train/frame", help='X axis key')
     parser.add_argument('--filter_by_tags', type=str, default="", 
                       help='Filter by tags. Use simple comma-separated list or complex expressions with & (AND), | (OR), and parentheses. Example: "(MT50&baseline)|BEST"')
     parser.add_argument('--filter_by_config', type=str, default="", 
@@ -288,7 +287,7 @@ def main():
     parser.add_argument('--project', type=str, default='taco_metaworld', help='Project name') 
     parser.add_argument('--entity', type=str, default=None, help='WandB entity/team name (optional)')
     parser.add_argument('--n_points', type=int, default=1000, help='Number of points to plot')
-    parser.add_argument('--max_x', type=int, default=100_000, help='maximum x axis value of points to plot')
+    parser.add_argument('--max_x', type=int, default=10_000, help='maximum x axis value of points to plot')
     parser.add_argument('--min_x', type=int, default=0, help='minimum x axis value of points to plot')
     parser.add_argument('--group_by_config', type=str, default="pretrained_path", help='Config parameter to use for grouping and naming saved files')
     parser.add_argument('--max_runs_per_group', type=int, default=15, 
@@ -389,6 +388,8 @@ def main():
                 config_match = check_config_match(run.config, config_filters)
             
             print(f"DEBUG: Run {run.id} - tags_match: {tags_match}, config_match: {config_match}")
+            if config_match:
+                print(f"OOOoooooooooooooooooooooooooooooooooooooooo\n\nn\oo\ooo\oooooooooo")
             
             if tags_match and config_match:
                 filtered_runs.append(run)
@@ -430,10 +431,7 @@ def main():
             print(f"\n=== SAVING RUN {run.id} ===")
             print(f"Run name: {run.name}")
             print(f"Tags: {run.tags}")
-            print(f"Config values:")
-            print(f"  - agent/no_taco: {flattened_config.get('agent/no_taco', 'NOT_FOUND')}")
-            print(f"  - env_name: {flattened_config.get('env_name', 'NOT_FOUND')}")
-            print(f"  - agent/pretrained_path: {flattened_config.get('agent/pretrained_path', 'NOT_FOUND')}")
+            
             
             history = run.history(keys=all_keys)  
 

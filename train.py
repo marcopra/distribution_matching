@@ -53,6 +53,8 @@ class Workspace:
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
+        if cfg.seed == 1:
+            cfg.seed = np.random.randint(1, 10000)
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
 
