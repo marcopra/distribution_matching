@@ -215,3 +215,4 @@ results
 *.out
 *.err
 tmp*
+data_plot/

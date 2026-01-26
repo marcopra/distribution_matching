@@ -8,8 +8,77 @@ from utils import ColorPrint
 from collections import OrderedDict
 
 import utils
-from agent.utils import Encoder, ActorDiscrete as Actor, CriticDiscrete as Critic
+from agent.utils import CriticDiscrete as Critic, KernelActorDiscrete as KernelActor
 
+class Encoder(nn.Module):
+    def __init__(self, obs_shape, hidden_dim, feature_dim):
+        super(Encoder, self).__init__()
+        self.obs_shape = obs_shape
+        self.feature_dim = feature_dim
+        self.repr_dim = feature_dim
+        self.temperature = 0.05
+
+        # self.fc = nn.Identity()
+        # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
+        self.fc =  nn.Sequential(
+            nn.Linear(obs_shape[0], hidden_dim, bias=False),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, feature_dim, bias=False),
+            # nn.LayerNorm(feature_dim),
+        )
+
+        # nn.init.eye_(self.fc[0].weight)
+        self.apply(utils.weight_init)
+
+    def forward(self, obs):
+        obs = obs.view(obs.shape[0], -1)
+        h = self.fc(obs)
+        h = F.normalize(h, p=1, dim=-1)
+        # h = F.normalize(h, p=2, dim=-1)
+        # h = F.softmax(h/self.temperature, dim=-1)
+
+        return h
+    
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        return h
+
+
+class CNNEncoder(nn.Module):
+    def __init__(self, obs_shape, feature_dim):
+        super().__init__()
+
+        assert len(obs_shape) == 3
+
+        self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU())
+
+        self.repr_dim = 32 * 35 * 35
+
+        self.projector = nn.Sequential(
+            nn.Linear(self.repr_dim, feature_dim),
+            # nn.LayerNorm(feature_dim),
+            nn.ReLU()
+        )
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs):
+        obs = obs / 255.
+        h = self.conv(obs)
+        h = h.view(h.shape[0], -1)
+        # h = F.softmax(h/0.1, dim=-1)
+        return h
+
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        z = self.projector(h)
+        z =F.normalize(z, p=1, dim=-1)
+        return z
+    
 
 class SACAgent(Agent):
     """SAC algorithm."""
@@ -34,6 +103,9 @@ class SACAgent(Agent):
                  critic_lr,
                  critic_target_tau, 
                  critic_target_update_frequency,
+                 update_actor_after_critic_steps,
+                 dataset_dim,
+                 eta,
                  init_critic,
                  batch_size, 
                  learnable_temperature,
@@ -59,19 +131,24 @@ class SACAgent(Agent):
         self.update_every_steps = update_every_steps
         self.init_critic = init_critic
         self.eps_schedule = eps_schedule
+        self.dataset_dim = dataset_dim
+        self.eta = eta
 
-        # models
         if obs_type == 'pixels':
-            self.aug = utils.RandomShiftsAug(pad=4)
-            self.encoder = Encoder(obs_shape).to(device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
+            self.aug = nn.Identity()  # TODO: implement data augmentation for pixels
+            self.encoder = CNNEncoder(obs_shape, feature_dim).to(self.device)
+            self.obs_dim = feature_dim + meta_dim
         else:
             self.aug = nn.Identity()
-            self.encoder = nn.Identity()
-            self.obs_dim = obs_shape[0] + meta_dim
+            self.encoder = Encoder(
+                obs_shape, 
+                hidden_dim, 
+                self.feature_dim
+            ).to(self.device) # KernelEncoder(obs_shape).to(device)
+            self.obs_dim = self.encoder.repr_dim + meta_dim
+            # self.obs_dim = self.obs_shape[0] + meta_dim
 
-        self.actor = Actor(obs_type, self.obs_dim, self.action_dim,
-                           feature_dim, hidden_dim, linear=linear_actor).to(device)
+        self.actor = KernelActor(obs_type, self.obs_dim, self.dataset_dim, self.action_dim, self.eta).to(device)
 
         self.critic = Critic(obs_type, self.obs_dim, self.action_dim,
                              feature_dim, hidden_dim).to(device)
@@ -79,12 +156,17 @@ class SACAgent(Agent):
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        
+
         self.log_alpha = torch.tensor(np.log(init_temperature)).to(self.device)
         self.log_alpha.requires_grad = True
         # set target entropy to -|A|
         self.target_entropy = -self.action_dim
 
         # optimizers
+        # optimizers
+        self.encoder_opt = None #torch.optim.Adam(self.encoder.parameters(), lr=lr)
+
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
                                                 lr=actor_lr)
 
@@ -103,11 +185,56 @@ class SACAgent(Agent):
         self.critic.train(training)
 
     def init_from(self, other):
+        # Caso 1: Altro DDPGAgent (comportamento esistente)
+        if type(other).__name__ == 'DDPGAgent':
+            raise NotImplementedError("DDPGAgent init_from another DDPGAgent is not implemented yet.")
+            utils.hard_update_params(other.encoder, self.encoder)
+            utils.hard_update_params(other.actor, self.actor)
+            if self.init_critic:
+                utils.hard_update_params(other.critic.trunk, self.critic.trunk)
+            print("✓ Initialized from another DDPG agent")
+        
+        # Caso 2: DistMatchingEmbeddingAgent
+        elif type(other).__name__ == 'DistMatchingEmbeddingAgent':
+            # Carica encoder
+            self.encoder.load_state_dict(other.encoder.state_dict())
+            print("✓ Encoder loaded from DistMatchingEmbeddingAgent")
+            
+            # Inizializza kernel actor se disponibile
+            if not hasattr(other, '_phi_all_obs'):
+                raise RuntimeError(
+                    "DistMatchingEmbeddingAgent not fully trained. "
+                    "Missing cached features (_phi_all_obs). "
+                    "Make sure the agent completed at least one policy update."
+                )
+            
+            # Extract E matrix (action one-hot encoding)
+            # E shape: [num_unique, n_actions]
+            E = other.E  # This should be available from the cached features
+            
+            self.actor.initialize_from_pretrained(
+                phi_dataset=other._phi_all_obs.to(self.device),
+                gradient_coeff=other.gradient_coeff.to(self.device),
+                eta=other.lr_actor,
+                E=E.to(self.device)  # Pass E matrix for proper initialization
+            )
+            print("✓ KernelActorDiscrete initialized from pretrained weights")
+            print(f"  Dataset size: {other.dataset.size}")
+            print(f"  Feature dim: {other.feature_dim}")
+            print(f"  Eta: {other.lr_actor}")
+            print(f"  E matrix shape: {E.shape}")
+                  
+        else:
+            raise ValueError(
+                f"Cannot init_from agent of type {type(other).__name__}. "
+                f"Expected DDPGAgent or DistMatchingEmbeddingAgent."
+            )
         # copy parameters over
-        utils.hard_update_params(other.encoder, self.encoder)
-        utils.hard_update_params(other.actor, self.actor)
-        if self.init_critic:
-            utils.hard_update_params(other.critic.trunk, self.critic.trunk)
+        # utils.hard_update_params(other.encoder, self.encoder)
+        # utils.hard_update_params(other.actor, self.actor)
+        # if self.init_critic:
+        #     utils.hard_update_params(other.critic.trunk, self.critic.trunk)
+
 
     def get_meta_specs(self):
         return tuple()
@@ -126,7 +253,7 @@ class SACAgent(Agent):
     
     def act(self, obs, meta, step, eval_mode):
         obs = torch.FloatTensor(obs).to(self.device)
-        obs = self.encoder(obs.unsqueeze(0))
+        obs = self.aug_and_encode(obs.unsqueeze(0), project=True)
         inputs = [obs]
         for value in meta.values():
             value = torch.as_tensor(value, device=self.device).unsqueeze(0)
@@ -213,9 +340,12 @@ class SACAgent(Agent):
                 metrics['alpha_value'] = self.alpha.item()
         return metrics
     
-    def aug_and_encode(self, obs):
+    def aug_and_encode(self, obs, project=False):
         obs = self.aug(obs)
-        return self.encoder(obs)
+        if project:
+            return self.encoder.encode_and_project(obs)
+        else:
+            return self.encoder(obs)
     
     def update(self, replay_iter, step):
         metrics = dict()
@@ -227,9 +357,9 @@ class SACAgent(Agent):
             batch, self.device)
 
         # augment and encode
-        obs = self.aug_and_encode(obs)
+        obs = self.aug_and_encode(obs, project=True)
         with torch.no_grad():
-            next_obs = self.aug_and_encode(next_obs)
+            next_obs = self.aug_and_encode(next_obs, project=True)
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()

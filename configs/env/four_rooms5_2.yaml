@@ -19,3 +19,5 @@ env:
   
   # Start position (optional, null for random at each episode)
   start_position:  [0, 0]  # Can be [x, y] or null for random
+
+python train.py agent=ddpg_discrete_with_kernel_actor eval_every_frames=5000 num_train_frames=200000 device=cuda:1 env.render_mode=null save_video=false wandb_tag=boost p_path=/home/mprattico/distribution_matching/models/boost/four_rooms_5x5/snapshot.pt agent.actor_lr=1e-7 use_wandb=true save_train_video=false agent.feature_dim=200 num_seed_frames=2000 agent.dataset_dim=5000 wandb_project=finetune2 device=cuda save_video=true env.render_mode=rgb_array configs/env=four_rooms5_3

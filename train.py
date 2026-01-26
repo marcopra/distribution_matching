@@ -89,14 +89,16 @@ class Workspace:
         else:
             env_kwargs = {}
         self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
+                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
+        self.collection_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
         
         self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
        
         # Get observation and action specs for the agent
-        obs_spec = gym_env.observation_spec(self.train_env)
-        action_spec = gym_env.action_spec(self.train_env)
+        obs_spec = gym_env.observation_spec(self.collection_env)
+        action_spec = gym_env.action_spec(self.collection_env)
 
         # create agent
         self.agent = make_agent(cfg.obs_type,
@@ -221,7 +223,10 @@ class Workspace:
                                       self.cfg.action_repeat)
 
         episode_step, episode_reward = 0, 0
-        time_step = self.train_env.reset()
+        if not seed_until_step(self.global_step):
+            time_step = self.train_env.reset()
+        else:
+            time_step = self.collection_env.reset()
         meta = self.agent.init_meta()
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)
@@ -246,7 +251,10 @@ class Workspace:
                     log('step', self.global_step)
 
                 # reset env
-                time_step = self.train_env.reset()
+                if not seed_until_step(self.global_step):
+                    time_step = self.train_env.reset()
+                else:
+                    time_step = self.collection_env.reset()
                 meta = self.agent.init_meta()
                 self.replay_storage.add(time_step, meta)
                 self.train_video_recorder.init(time_step.image_observation)
@@ -289,7 +297,10 @@ class Workspace:
                     self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
             # take env step
-            time_step = self.train_env.step(action)
+            if not seed_until_step(self.global_step):
+                time_step = self.train_env.step(action)
+            else:
+                time_step = self.collection_env.step(action)
             episode_reward += time_step.reward
             self.replay_storage.add(time_step, meta)
             if not self.INITIAL_HEATMAP:
