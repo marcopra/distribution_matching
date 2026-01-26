@@ -1523,7 +1523,8 @@ class InternalDatasetFIFO:
             'observation': data['observation'][indices],
             'action': data['action'][indices],
             'next_observation': data['next_observation'][indices],
-            'alpha': data['alpha'][indices]
+            'alpha': data['alpha'][indices],
+            'proprio_observation': data['proprio_observation'][indices] if 'proprio_observation' in data else torch.emp
         }
 
     def spd_logdet_cholesky(self, K, jitter=1e-6):
@@ -1562,6 +1563,7 @@ class InternalDatasetFIFO:
                 'observation': data['observation'][indices],
                 'action': data['action'][indices],
                 'next_observation': data['next_observation'][indices],
+                'proprio_observation': data['proprio_observation'][indices] if 'proprio_observation' in data else torch.empty((self.n_subsamples, 0), device=self.device, dtype=self.data_type),
                 'alpha': data['alpha'][indices]
             }
 
