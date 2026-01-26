@@ -46,7 +46,7 @@ wandb_project: "finetune_gym"
 wandb_entity: "urlb"
 wandb_tag: none
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}
-wandb_mode: offline # online, offline, disabled
+wandb_mode: online # online, offline, disabled
 # experiment
 experiment: exp
 

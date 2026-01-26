@@ -38,8 +38,46 @@ class Encoder(nn.Module):
         # h = F.softmax(h/self.temperature, dim=-1)
 
         return h
+    
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        return h
 
 
+class CNNEncoder(nn.Module):
+    def __init__(self, obs_shape, feature_dim):
+        super().__init__()
+
+        assert len(obs_shape) == 3
+
+        self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                  nn.ReLU())
+
+        self.repr_dim = 32 * 35 * 35
+
+        self.projector = nn.Sequential(
+            nn.Linear(self.repr_dim, feature_dim),
+            # nn.LayerNorm(feature_dim),
+            nn.ReLU()
+        )
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs):
+        obs = obs / 255.
+        h = self.conv(obs)
+        h = h.view(h.shape[0], -1)
+        # h = F.softmax(h/0.1, dim=-1)
+        return h
+
+    def encode_and_project(self, obs):
+        h = self.forward(obs)
+        z = self.projector(h)
+        z =F.normalize(z, p=1, dim=-1)
+        return z
     
 class DDPGAgent:
     def __init__(self,
@@ -93,10 +131,9 @@ class DDPGAgent:
         # e modificare inizializzazione del kernel actor
         # models
         if obs_type == 'pixels':
-            raise NotImplementedError("Pixel-based observations are yet not supported in this agent.")
-            self.aug = utils.RandomShiftsAug(pad=4)
-            self.encoder = Encoder(obs_shape).to(device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
+            self.aug = nn.Identity()  # TODO: implement data augmentation for pixels
+            self.encoder = CNNEncoder(obs_shape, feature_dim).to(self.device)
+            self.obs_dim = feature_dim + meta_dim
         else:
             self.aug = nn.Identity()
             self.encoder = Encoder(
@@ -192,7 +229,7 @@ class DDPGAgent:
     def act(self, obs, meta, step, eval_mode):
         obs = torch.FloatTensor(obs).to(self.device)
 
-        obs = self.encoder(obs.unsqueeze(0))
+        obs = self.aug_and_encode(obs.unsqueeze(0), project=True)
         inputs = [obs]
         for value in meta.values():
             value = torch.as_tensor(value, device=self.device).unsqueeze(0)
@@ -279,9 +316,12 @@ class DDPGAgent:
 
         return metrics
 
-    def aug_and_encode(self, obs):
+    def aug_and_encode(self, obs, project=False):
         obs = self.aug(obs)
-        return self.encoder(obs)
+        if project:
+            return self.encoder.encode_and_project(obs)
+        else:
+            return self.encoder(obs)
 
     def update(self, replay_iter, step):
         metrics = dict()
