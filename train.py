@@ -71,7 +71,7 @@ class Workspace:
                     name=cfg.wandb_run_name,
                     tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
                     sync_tensorboard=True,
-                    mode='online')
+                    mode=cfg.wandb_mode if hasattr(cfg, 'wandb_mode') else 'online')
             else:
                 wandb.init(
                     config=OmegaConf.to_container(cfg, resolve=True),
@@ -79,7 +79,7 @@ class Workspace:
                     name=cfg.wandb_run_name,
                     tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
                     sync_tensorboard=True,
-                    mode='online')
+                    mode=cfg.wandb_mode if hasattr(cfg, 'wandb_mode') else 'online')
 
 
         # create envs
