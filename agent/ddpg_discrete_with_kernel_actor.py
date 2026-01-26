@@ -334,9 +334,9 @@ class DDPGAgent:
             batch, self.device)
 
         # augment and encode
-        obs = self.aug_and_encode(obs)
+        obs = self.aug_and_encode(obs, project=True)
         with torch.no_grad():
-            next_obs = self.aug_and_encode(next_obs)
+            next_obs = self.aug_and_encode(next_obs, project=True)
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
