@@ -214,3 +214,4 @@ results
 .vscode
 *.out
 *.err
+tmp*
