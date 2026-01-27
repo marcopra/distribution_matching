@@ -11,6 +11,7 @@ python /home/mprattico/Pretrain-TACO/plot/download_data_from_wandb.py --csv_path
 python /home/mprattico/Pretrain-TACO/plot/download_data_from_wandb.py --csv_path data_plot/exp/shelf-place --filter_by_config "agent/no_taco!=true&env_name=shelf-place-v2" --filter_by_tags     MT50 --group_by_config agent/pretrained_path --project taco_metaworld_debug 
 
 python plot/data_downloader.py --csv_path data_plot/states/multirooms --filter_by_config "env/name=MultipleRooms-v0&obs_type=pixels" --group_by_config agent/_target_ --project finetune_gym --download --processing --n_points 80
+python plot/data_downloader.py --csv_path data_plot/states/two_rooms/goal_1 --filter_by_config "env/name=TwoRooms-v0&obs_type=discrete_states" --group_by_config agent/p_path --project old_finetune --download
 
 
 """
@@ -287,7 +288,7 @@ def main():
     parser.add_argument('--project', type=str, default='taco_metaworld', help='Project name') 
     parser.add_argument('--entity', type=str, default=None, help='WandB entity/team name (optional)')
     parser.add_argument('--n_points', type=int, default=1000, help='Number of points to plot')
-    parser.add_argument('--max_x', type=int, default=10_000, help='maximum x axis value of points to plot')
+    parser.add_argument('--max_x', type=int, default=10000000, help='maximum x axis value of points to plot')
     parser.add_argument('--min_x', type=int, default=0, help='minimum x axis value of points to plot')
     parser.add_argument('--group_by_config', type=str, default="pretrained_path", help='Config parameter to use for grouping and naming saved files')
     parser.add_argument('--max_runs_per_group', type=int, default=15, 
@@ -436,7 +437,7 @@ def main():
             history = run.history(keys=all_keys)  
 
             if args.group_by_config in flattened_config:
-                param_value = str(flattened_config[args.group_by_config]).split("/")[-1]
+                param_value = str(flattened_config[args.group_by_config]).replace("/", "_")
                 print(f"param_value: {param_value}")
             else:
                 # Fallback if the parameter doesn't exist

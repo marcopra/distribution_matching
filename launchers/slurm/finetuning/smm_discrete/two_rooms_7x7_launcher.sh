@@ -2,7 +2,7 @@
 
 seeds="0 1 2"
 envs=("two_rooms7_0" 
-       "two_rooms7_1" 
+    #    "two_rooms7_1" 
        "two_rooms7_2" )
 model_path=(
     "/home/mprattico/distribution_matching/models/smm/two_rooms_7x7/snapshot.pt"

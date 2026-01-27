@@ -2,12 +2,12 @@
 
 seeds="0 1 2"
 envs=("two_rooms7_0" 
-       "two_rooms7_1" 
+    #    "two_rooms7_1" 
        "two_rooms7_2" )
 model_path=(
     "none"
     )
-obs_type=("pixels"
+obs_type=("discrete_states"
     )
 
 for seed in $seeds; do   
