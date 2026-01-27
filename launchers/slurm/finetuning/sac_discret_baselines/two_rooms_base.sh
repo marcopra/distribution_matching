@@ -18,5 +18,5 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python train.py agent=sac_discrete_with_kernel_actor eval_every_frames=5000 num_train_frames=300000 configs/env=${ENV} device=cuda seed=${SEED} env.render_mode=null save_video=false wandb_tag=boost p_path=${MODEL_PATH} agent.actor_lr=1e-7 use_wandb=true save_train_video=false agent.feature_dim=200 num_seed_frames=2000 wandb_project="new_sac"
+python train.py agent=sac_discrete_with_kernel_actor eval_every_frames=5000 num_train_frames=300000 configs/env=${ENV} device=cuda seed=${SEED} env.render_mode=null save_video=false wandb_tag=boost p_path=${MODEL_PATH} agent.actor_lr=1e-7 use_wandb=true save_train_video=false agent.feature_dim=200 num_seed_frames=3000 wandb_project="new_sac"
 
