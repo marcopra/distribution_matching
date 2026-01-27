@@ -287,8 +287,8 @@ def main():
     parser.add_argument('--processing', action='store_true', default=False)
     parser.add_argument('--project', type=str, default='taco_metaworld', help='Project name') 
     parser.add_argument('--entity', type=str, default=None, help='WandB entity/team name (optional)')
-    parser.add_argument('--n_points', type=int, default=1000, help='Number of points to plot')
-    parser.add_argument('--max_x', type=int, default=10000000, help='maximum x axis value of points to plot')
+    parser.add_argument('--n_points', type=int, default=1000000, help='Number of points to plot')
+    parser.add_argument('--max_x', type=int, default=1000000, help='maximum x axis value of points to plot')
     parser.add_argument('--min_x', type=int, default=0, help='minimum x axis value of points to plot')
     parser.add_argument('--group_by_config', type=str, default="pretrained_path", help='Config parameter to use for grouping and naming saved files')
     parser.add_argument('--max_runs_per_group', type=int, default=15, 
@@ -434,7 +434,7 @@ def main():
             print(f"Tags: {run.tags}")
             
             
-            history = run.history(keys=all_keys)  
+            history = run.history(keys=all_keys, samples=args.n_points*10)  
 
             if args.group_by_config in flattened_config:
                 param_value = str(flattened_config[args.group_by_config]).replace("/", "_")

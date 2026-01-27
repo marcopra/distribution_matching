@@ -456,18 +456,18 @@ class BaseRoomEnv(gym.Env, ABC):
                     center_x = px + cell_size // 2
                     center_y = py + cell_size // 2
                     
-                    # if is_goal:
-                    #     # Green star for goal (using polygon to draw a star shape)
-                    #     star_outer_radius = cell_size // 3
-                    #     star_inner_radius = cell_size // 6
-                    #     star_points = []
-                    #     for i in range(10):
-                    #         angle = (i * 36 - 90) * np.pi / 180  # 36 degrees between points, start at top
-                    #         radius = star_outer_radius if i % 2 == 0 else star_inner_radius
-                    #         x_point = center_x + radius * np.cos(angle)
-                    #         y_point = center_y + radius * np.sin(angle)
-                    #         star_points.append((x_point, y_point))
-                    #     draw.polygon(star_points, fill=(0, 255, 0))
+                    if is_goal:
+                        # Green star for goal (using polygon to draw a star shape)
+                        star_outer_radius = cell_size // 3
+                        star_inner_radius = cell_size // 6
+                        star_points = []
+                        for i in range(10):
+                            angle = (i * 36 - 90) * np.pi / 180  # 36 degrees between points, start at top
+                            radius = star_outer_radius if i % 2 == 0 else star_inner_radius
+                            x_point = center_x + radius * np.cos(angle)
+                            y_point = center_y + radius * np.sin(angle)
+                            star_points.append((x_point, y_point))
+                        draw.polygon(star_points, fill=(0, 255, 0))
                     
                     if is_agent:
                         # Red square for agent

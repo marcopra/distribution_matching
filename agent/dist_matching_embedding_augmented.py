@@ -922,7 +922,7 @@ class EmbeddingDistributionVisualizer:
         grid = self._state_dist_to_grid(state_occupancy)
         
         # Plot
-        im = ax.imshow(grid, cmap='Blues', interpolation='nearest', vmin=0)
+        im = ax.imshow(grid, cmap='Blues', interpolation='nearest', vmin=0, vmax=0.02)
         ax.set_title(f'{title}\n(Total: {int(total)} samples)')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
