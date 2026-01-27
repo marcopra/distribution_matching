@@ -133,6 +133,7 @@ class SACAgent(Agent):
         self.eps_schedule = eps_schedule
         self.dataset_dim = dataset_dim
         self.eta = eta
+        self.update_actor_after_critic_steps = update_actor_after_critic_steps
 
         if obs_type == 'pixels':
             self.aug = nn.Identity()  # TODO: implement data augmentation for pixels
@@ -365,9 +366,10 @@ class SACAgent(Agent):
             metrics['batch_reward'] = reward.mean().item()
 
         metrics.update(self.update_critic(obs, action, reward, next_obs, discount, step))
-        if step % self.actor_update_frequency == 0:
-            # update actor and alpha
-            metrics.update(self.update_actor_and_alpha(obs.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            if step % self.actor_update_frequency == 0:
+                # update actor and alpha
+                metrics.update(self.update_actor_and_alpha(obs.detach(), step))
 
         if step % self.critic_target_update_frequency == 0:
             utils.soft_update_params(self.critic, self.critic_target,
