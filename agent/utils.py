@@ -1446,7 +1446,8 @@ class InternalDatasetFIFO:
             'observation': data['observation'][unique_indices],
             'action': data['action'][unique_indices],
             'next_observation': data['next_observation'][unique_indices],
-            'alpha': data['alpha'][unique_indices]
+            'alpha': data['alpha'][unique_indices],
+            'proprio_observation': data['proprio_observation'][unique_indices] if 'proprio_observation' in data else torch.empty((0, 0), device=self.device, dtype=self.data_type)
         }
     
     def _clean_incomplete_trajectories(self):

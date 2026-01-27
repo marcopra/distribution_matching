@@ -41,6 +41,7 @@ class Encoder(nn.Module):
             nn.Linear(obs_shape[0], hidden_dim, bias=False),
             nn.ReLU(),
             nn.Linear(hidden_dim, feature_dim, bias=False),
+            nn.ReLU()
         )
 
         self.apply(utils.weight_init)
@@ -52,9 +53,9 @@ class Encoder(nn.Module):
         return h
     
     def encode_and_project(self, obs):
-        h = self.forward(obs)
-        z = h
-        return z
+        # h = self.forward(obs)
+        # z = h
+        return self.forward(obs)
 
 class CNNEncoder(nn.Module):
     def __init__(self, obs_shape, feature_dim):
@@ -913,7 +914,7 @@ class EmbeddingDistributionVisualizer:
         # Normalize to get occupancy distribution
         total = state_counts.sum()
         if total > 0:
-            state_occupancy = state_counts
+            state_occupancy = state_counts/total
         else:
             state_occupancy = state_counts
         
@@ -971,6 +972,7 @@ class DistMatchingEmbeddingAgent:
                  unique_window,
                  n_subsamples,
                  subsampling_strategy,
+                 embeddings = True,
                  data_type: str = "unique",
                  device: str = "cpu",
                  linear_actor: bool = False,
@@ -997,6 +999,7 @@ class DistMatchingEmbeddingAgent:
         self.pmd_steps = pmd_steps
         self.ideal = ideal
         self.unique_window = unique_window
+        self.embeddings = embeddings
 
         self.sink_schedule = sink_schedule
         self.epsilon_schedule = epsilon_schedule
@@ -1025,6 +1028,7 @@ class DistMatchingEmbeddingAgent:
         
         if obs_type == 'pixels':
             self.aug = nn.Identity() #utils.RandomShiftsAug(pad=4)
+            assert embeddings, "Pixel observations require embeddings to be True"
             self.encoder = CNNEncoder(
                 obs_shape,
                 feature_dim
@@ -1034,12 +1038,15 @@ class DistMatchingEmbeddingAgent:
         else:
             # Components
             self.aug = nn.Identity()
-            self.encoder = Encoder(
-                obs_shape, 
-                hidden_dim, 
-                self.feature_dim,
-            ).to(self.device)
-
+            if embeddings == False:
+                self.encoder = nn.Identity()
+                self.feature_dim = obs_shape[0]
+            else:
+                self.encoder = Encoder(
+                        obs_shape, 
+                        hidden_dim, 
+                        self.feature_dim,
+                    ).to(self.device)
             self.obs_dim = self.feature_dim
        
         
@@ -1068,10 +1075,13 @@ class DistMatchingEmbeddingAgent:
         )
        
         # Optimizers
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(), 
-            lr=lr_encoder
-        )
+        if embeddings:
+            self.encoder_optimizer = torch.optim.Adam(
+                self.encoder.parameters(), 
+                lr=lr_encoder
+            )
+        else:
+            self.encoder_optimizer = None
         self.transition_optimizer = torch.optim.Adam(
             self.transition_model.parameters(),
             lr=lr_T
@@ -1422,10 +1432,12 @@ class DistMatchingEmbeddingAgent:
         loss =  contrastive_loss #+ beta*embedding_sum_loss + 0.01*l2_loss
         
         # Optimize
-        self.encoder_optimizer.zero_grad()
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.zero_grad()
         self.transition_optimizer.zero_grad()
         loss.backward()
-        self.encoder_optimizer.step()
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.step()
         self.transition_optimizer.step()
         # Print losses
         print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, EmbeddingSum={embedding_sum_loss.item():.4f}, L2={l2_loss.item():.4f}, Total={loss.item():.4f}")
@@ -1643,6 +1655,8 @@ class DistMatchingEmbeddingAgent:
 
     def aug_and_encode(self, obs, project=False):
         obs = self.aug(obs)
+        if not self.embeddings:
+            return self.encoder(obs)
         if project:
             return self.encoder.encode_and_project(obs)
         else:

@@ -1,0 +1,15 @@
+# @package _global_
+# Single Room Environment Configuration
+
+env:
+  name: "SingleRoom-v0"
+  room_size: 20
+  max_steps: 100
+  render_mode: rgb_array  
+  show_coordinates: false
+  
+  # Goal position (optional, null for random at each episode)
+  goal_position: [0, 0]  # Can be [x, y] or null for random
+  
+  # Start position (optional, null for random at each episode)
+  start_position: [10, 10]  # Can be [x, y] or null for random
