@@ -1,8 +1,9 @@
 #!/bin/bash
 
 seeds="0 1 2"
-envs=("multiplerooms5_4x4_0" 
-       "multiplerooms5_4x4_1" 
+envs=(
+    # "multiplerooms5_4x4_0" 
+    #    "multiplerooms5_4x4_1" 
        "multiplerooms5_4x4_2" 
     )
 model_path=(

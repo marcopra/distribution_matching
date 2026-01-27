@@ -13,7 +13,7 @@ env:
 
   
   # Goal position (optional, null for random at each episode)
-  goal_position: [16,4]  # Can be [x, y] or null for random
+  goal_position: [6,4]  # Can be [x, y] or null for random
   
   # Start position (optional, null for random at each episode)
   start_position:  [0, 0]  # Can be [x, y] or null for random
