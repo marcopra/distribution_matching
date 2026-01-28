@@ -64,7 +64,8 @@ class MultipleRoomsEnv(BaseRoomEnv):
         max_steps: int = 300,
         render_mode: Optional[str] = None,
         show_coordinates: bool = False,
-        lava: bool = False
+        lava: bool = False, 
+        dense_rewards: bool = False,
     ):
         if num_rooms < 1:
             raise ValueError("num_rooms must be at least 1")
@@ -99,7 +100,8 @@ class MultipleRoomsEnv(BaseRoomEnv):
             max_steps=max_steps,
             render_mode=render_mode,
             show_coordinates=show_coordinates,
-            lava=lava
+            lava=lava,
+            dense_rewards=dense_rewards,
         )
     
     def _build_cells(self):
