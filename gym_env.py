@@ -637,6 +637,10 @@ def make_kwargs(cfg):
     elif "MultipleRooms" in cfg.env.name:
         env_kwargs['num_rooms'] = cfg.env.num_rooms
         env_kwargs['room_size'] = cfg.env.room_size
+        
+        if "dense_reward" in cfg.env:
+            env_kwargs['dense_reward'] = cfg.env.dense_reward
+            
          # Check if it's continuous or discrete
         if "Continuous" in cfg.env.name:
             if hasattr(cfg.env, 'corridor_width'):

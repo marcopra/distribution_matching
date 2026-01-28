@@ -65,7 +65,7 @@ class MultipleRoomsEnv(BaseRoomEnv):
         render_mode: Optional[str] = None,
         show_coordinates: bool = False,
         lava: bool = False, 
-        dense_rewards: bool = False,
+        dense_reward: bool = False,
     ):
         if num_rooms < 1:
             raise ValueError("num_rooms must be at least 1")
@@ -101,7 +101,7 @@ class MultipleRoomsEnv(BaseRoomEnv):
             render_mode=render_mode,
             show_coordinates=show_coordinates,
             lava=lava,
-            dense_rewards=dense_rewards,
+            dense_reward=dense_reward,
         )
     
     def _build_cells(self):
