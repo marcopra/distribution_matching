@@ -26,3 +26,4 @@
   init_critic: false  
   learnable_temperature: true
     
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=0 agent.n_subsamples=5000 configs/env=single_room_1000 agent.data_type=all num_seed_frames=5060 agent.update_actor_every_steps=5060 agent.window_size=1 agent.unique_window=false  agent.epsilon_schedule=0.0 "agent.sink_schedule=100" agent.feature_dim=100 agent.lr_actor=10 agent.pmd_steps=250 env.render_mode=null agent.embeddings=false agent.lambda_reg=1e-5 discount=0.9 num_train_frames=25000 num_train_frames=25000 agent.lr_actor=0.1;
