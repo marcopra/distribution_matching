@@ -15,8 +15,6 @@ discount: 0.99
 resolution: 84  
 random_init: true
 random_goal: true
-
-
 update_actor_after_critic_steps: 0
 
 # train settings
@@ -26,7 +24,7 @@ num_seed_frames: 4000
 eval_every_frames: 10000
 num_eval_episodes: 10
 # snapshot
-snapshots: [5000, 10000, 50000, 100000, 500000, 1000000, 2000000]
+snapshots: [50000, 10000, 30000, 50000]
 snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
 # replay buffer
 replay_buffer_size: 1000000
