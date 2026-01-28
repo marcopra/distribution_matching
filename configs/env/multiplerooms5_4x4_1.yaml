@@ -10,6 +10,7 @@ env:
   max_steps: 500
   render_mode: rgb_array
   show_coordinates: false
+  dense_reward: false
 
   
   # Goal position (optional, null for random at each episode)

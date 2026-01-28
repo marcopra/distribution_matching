@@ -37,7 +37,8 @@ class BaseRoomEnv(gym.Env, ABC):
         max_steps: int = 300,
         render_mode: Optional[str] = None,
         show_coordinates: bool = False,
-        lava: bool = False
+        lava: bool = False,
+        dense_reward: bool = False
     ):
         super().__init__()
         
@@ -46,6 +47,7 @@ class BaseRoomEnv(gym.Env, ABC):
         self.show_coordinates = show_coordinates
         self.lava = lava
         self._step_count = 0
+        self.dense_reward = dense_reward
         
         # Build the environment layout (implemented by subclasses)
         self.cells = []
@@ -267,13 +269,26 @@ class BaseRoomEnv(gym.Env, ABC):
         # Truncate if in dead state (lava) or max steps reached
         in_dead_state = self.lava and self._agent_location == self.DEAD_STATE
         truncated = in_dead_state or self._step_count >= self.max_steps
-        
-        # Reward: 1 - 0.9 * (step_count / max_steps) for success, 0 for failure
-        if terminated:
-            reward = 0 #1.0 - 0.9 * (self._step_count / self.max_steps)
-            # terminated =  False  
+
+        # Reward calculation
+        if self.dense_reward:
+            # Dense reward: negative Manhattan distance to goal
+            if terminated:
+                reward = 0.0
+            elif in_dead_state:
+                reward = -1.0  # Penalty for lava
+            else:
+                # Manhattan distance to goal
+                distance = abs(self._agent_location[0] - self.goal_position[0]) + \
+                        abs(self._agent_location[1] - self.goal_position[1])
+                reward = -distance
         else:
-            reward = - 1.0
+            # Reward: 1 - 0.9 * (step_count / max_steps) for success, 0 for failure
+            if terminated:
+                reward = 0 #1.0 - 0.9 * (self._step_count / self.max_steps)
+                # terminated =  False  
+            else:
+                reward = - 1.0
         
         observation = self._get_obs()
         info = self._get_info()
