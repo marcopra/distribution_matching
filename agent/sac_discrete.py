@@ -25,7 +25,7 @@ class SACAgent(Agent):
                  use_wandb,
                  num_expl_steps,
                  update_every_steps,
-                 update_after_critic_steps,
+                 update_actor_after_critic_steps,
                  eps_schedule,
                  nstep,
                  init_temperature, 
@@ -60,7 +60,7 @@ class SACAgent(Agent):
         self.update_every_steps = update_every_steps
         self.init_critic = init_critic
         self.eps_schedule = eps_schedule
-        self.update_after_critic_steps = update_after_critic_steps
+        self.update_actor_after_critic_steps = update_actor_after_critic_steps
 
         # models
         if obs_type == 'pixels':
@@ -237,7 +237,7 @@ class SACAgent(Agent):
             metrics['batch_reward'] = reward.mean().item()
 
         metrics.update(self.update_critic(obs, action, reward, next_obs, discount, step))
-        if step >= self.update_after_critic_steps:
+        if step >= self.update_actor_after_critic_steps:
             if step % self.actor_update_frequency == 0:
                 # update actor and alpha
                 metrics.update(self.update_actor_and_alpha(obs.detach(), step))
