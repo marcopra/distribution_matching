@@ -1,0 +1,26 @@
+# @package _global_
+# Four Rooms Environment Configuration
+
+env:
+  name: "MultipleRooms-v0"
+  num_rooms: 7
+  room_size: 4
+  corridor_height: 1
+  connector_length: 1
+  max_steps: 300
+  render_mode: rgb_array
+  show_coordinates: false
+  dense_reward: false
+
+  
+  # Goal position (optional, null for random at each episode)
+  goal_position: [1,0]  # Can be [x, y] or null for random
+  
+  # Start position (optional, null for random at each episode)
+  start_position:  [0, 0]  # Can be [x, y] or null for random
+
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=0 configs/env=simple_test2 agent.data_type=unique num_seed_frames=1000 agent.update_actor_every_steps=600 agent.window_size=10000 agent.unique_window=true agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,50000)'" agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 agent.embeddings=false
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=0 configs/env=simple_test3 agent.data_type=unique num_seed_frames=1000 agent.update_actor_every_steps=600 agent.window_size=10000 agent.unique_window=true agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,50000)'" agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 agent.embeddings=false
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=0 configs/env=simple_test4 agent.data_type=unique num_seed_frames=1000 agent.update_actor_every_steps=600 agent.window_size=10000 agent.unique_window=true agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,50000)'" agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 agent.embeddings=false
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=0 configs/env=simple_test4 agent.data_type=unique num_seed_frames=1000 agent.update_actor_every_steps=600 agent.window_size=10000 agent.unique_window=true agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,50000)'" agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 agent.embeddings=false
+

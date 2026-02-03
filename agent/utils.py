@@ -777,6 +777,7 @@ class InternalDataset:
 
         if self.n_subsamples >= len(self._trajectory_idx):
             utils.ColorPrint.yellow(f"Requested subsample size {self.n_subsamples} exceeds dataset size {len(self._trajectory_idx)}. Returning full dataset.")
+            self.add_dummy_transition()
             return self.data
 
         utils.ColorPrint.green(f"Subsampling {self.n_subsamples} datapoints from dataset of size {len(self._trajectory_idx)}.")
@@ -834,7 +835,7 @@ class InternalDatasetFIFO:
                  gamma: float, window_size: int, n_subsamples: int, 
                  subsampling_strategy: str, dynamic_horizon: bool = False,
                  obs_shape: tuple = None,
-                 device: str = 'cpu', data_type=torch.double):
+                 device: str = 'cpu', data_type=torch.double, first_state = None, second_state = None):
         """
         Args:
             dataset_type: "unique" or "all"
@@ -860,6 +861,8 @@ class InternalDatasetFIFO:
         self.dynamic_horizon = dynamic_horizon
         self.obs_shape = obs_shape if obs_shape is not None else (n_states,)
         self.data_type = data_type
+        self.first_state = first_state
+        self.second_state = second_state
         
         # FIFO queue: list of sampling periods, each period is a dict of tensors
         self._periods_queue = []
@@ -1256,16 +1259,21 @@ class InternalDatasetFIFO:
             len(self._current_period_data['action']) > 0 and
             len(self._current_period_data['next_observation']) > 0):
             
+            indices = torch.where(torch.all(self._current_period_data['next_observation'] == self.first_state, dim=1))[0]
+            if indices.shape[0] == 0:
+                return
+            # indices = indices[0]
+
             self._dummy_cache = {
-                'observation': self._current_period_data['observation'][0:1].clone(),
-                'action': self._current_period_data['action'][0:1].clone(),
-                'next_observation': self._current_period_data['next_observation'][0:1].clone(),
-                'alpha': self._current_period_data['alpha'][0:1].clone()
+                'observation': self._current_period_data['observation'][indices:indices+1].clone(),
+                'action': self._current_period_data['action'][indices:indices+1].clone(),
+                'next_observation': self._current_period_data['next_observation'][indices:indices+1].clone(),
+                'alpha': self._current_period_data['alpha'][indices:indices+1].clone()
             }
             
             # Add proprio if available
             if self._current_period_data['proprio_observation'].shape[0] > 0:
-                self._dummy_cache['proprio_observation'] = self._current_period_data['proprio_observation'][0:1].clone()
+                self._dummy_cache['proprio_observation'] = self._current_period_data['proprio_observation'][indices:indices+1].clone()
             else:
                 self._dummy_cache['proprio_observation'] = torch.empty((1, 0), device=self.device, dtype=self.data_type)
             
@@ -1277,31 +1285,31 @@ class InternalDatasetFIFO:
             utils.ColorPrint.yellow("No dummy cache available, skipping dummy transition")
             return
         
-        self._sampled_data['observation'] = torch.cat([
+        self._current_period_data['observation'] = torch.cat([
             self._dummy_cache['observation'], 
-            self._sampled_data['observation']
+            self._current_period_data['observation']
         ], dim=0)
-        self._sampled_data['action'] = torch.cat([
+        self._current_period_data['action'] = torch.cat([
             self._dummy_cache['action'], 
-            self._sampled_data['action']
+            self._current_period_data['action']
         ], dim=0)
-        self._sampled_data['next_observation'] = torch.cat([
+        self._current_period_data['next_observation'] = torch.cat([
             self._dummy_cache['next_observation'], 
-            self._sampled_data['next_observation']
+            self._current_period_data['next_observation']
         ], dim=0)
-        self._sampled_data['alpha'] = torch.cat([
+        self._current_period_data['alpha'] = torch.cat([
             self._dummy_cache['alpha'], 
-            self._sampled_data['alpha']
+            self._current_period_data['alpha']
         ], dim=0)
         
         # Add proprio if available
         if self._dummy_cache['proprio_observation'].shape[0] > 0:
-            if 'proprio_observation' not in self._sampled_data or self._sampled_data['proprio_observation'].shape[0] == 0:
-                self._sampled_data['proprio_observation'] = self._dummy_cache['proprio_observation']
+            if 'proprio_observation' not in self._current_period_data or self._current_period_data['proprio_observation'].shape[0] == 0:
+                self._current_period_data['proprio_observation'] = self._dummy_cache['proprio_observation']
             else:
-                self._sampled_data['proprio_observation'] = torch.cat([
+                self._current_period_data['proprio_observation'] = torch.cat([
                     self._dummy_cache['proprio_observation'],
-                    self._sampled_data['proprio_observation']
+                    self._current_period_data['proprio_observation']
                 ], dim=0)
     
     def _aggregate_periods(self) -> Dict[str, torch.Tensor]:
@@ -1363,6 +1371,7 @@ class InternalDatasetFIFO:
             # Clean incomplete trajectories from current period
             self._clean_incomplete_trajectories()
         
+        self.add_dummy_transition()
         # Store current period data with metadata
         period_entry = {
             'data': deepcopy(self._current_period_data),

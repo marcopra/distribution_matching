@@ -125,7 +125,7 @@ class BaseRoomEnv(gym.Env, ABC):
             else:
                 start_position = tuple(start_position)
                 if start_position not in self.state_to_idx:
-                    raise ValueError(f"Start position {start_position} is not a valid cell")
+                    raise ValueError(f"Start position {start_position} is not a valid cell, valid cells: {self.cells}")
                 return start_position
         else:
             # Random position

@@ -3,11 +3,11 @@
 
 env:
   name: "Corridor-v0"
-  length: 20
-  height: 2
-  num_curves: 2
+  length: 21
+  height: 1
+  num_curves: 0
   corridor_width: 1
-  max_steps: 100
+  max_steps: 11
   render_mode: rgb_array
   show_coordinates: false
 
@@ -15,4 +15,7 @@ env:
   goal_position: null  # Can be [x, y] or null for end of corridor
 
   # Start position (optional, null for random at each episode)
-  start_position: [0, 0]  # Can be [x, y] or null for random
+  start_position: [10, 0]  # Can be [x, y] or null for random
+
+
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=0 agent.n_subsamples=5000 configs/env=corridor agent.data_type=all num_seed_frames=2000 agent.update_actor_every_steps=1000 agent.window_size=1 agent.unique_window=false  agent.epsilon_schedule=0.0 "agent.sink_schedule=0.1" agent.feature_dim=100 agent.lr_actor=10 agent.pmd_steps=250 env.render_mode=null agent.embeddings=false agent.lambda_reg=1e-5 discount=0.9 num_train_frames=25000 num_train_frames=25000 agent.lr_actor=0.1

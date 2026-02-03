@@ -46,6 +46,7 @@ class CorridorEnv(BaseRoomEnv):
         render_mode: Rendering mode ("human", "ansi", "rgb_array")
         show_coordinates: Whether to show coordinates in rendering
         lava: Whether walls are lava (agent dies when hitting them)
+        two_actions: Force two-action mode (left/right only). Auto-enabled when num_curves=0 and height=1
     """
     
     def __init__(
@@ -59,7 +60,8 @@ class CorridorEnv(BaseRoomEnv):
         max_steps: int = 300,
         render_mode: Optional[str] = None,
         show_coordinates: bool = False,
-        lava: bool = False
+        lava: bool = False,
+        two_actions: Optional[bool] = None
     ):
         if length < 2:
             raise ValueError("length must be at least 2")
@@ -75,6 +77,16 @@ class CorridorEnv(BaseRoomEnv):
         self.num_curves = num_curves
         self.corridor_width = corridor_width
         
+        # Auto-enable two_actions mode for straight horizontal corridor
+        if two_actions is None:
+            self.two_actions = (num_curves == 0 and height == 1)
+        else:
+            self.two_actions = two_actions
+            
+        # Validate two_actions compatibility
+        if self.two_actions and (num_curves > 0 or height > 1):
+            raise ValueError("two_actions mode requires num_curves=0 and height=1")
+        
         # Calculate total segments (horizontal segments = num_curves + 1)
         self.num_segments = num_curves + 1
         
@@ -86,6 +98,15 @@ class CorridorEnv(BaseRoomEnv):
             show_coordinates=show_coordinates,
             lava=lava
         )
+        
+        # Override action space if in two_actions mode
+        if self.two_actions:
+            self.action_space = gym.spaces.Discrete(2)
+            # 0=left, 1=right
+            self._action_to_direction = {
+                0: np.array([-1, 0]),  # left
+                1: np.array([1, 0]),   # right
+            }
     
     def _build_cells(self):
         """Build cells for the S-shaped corridor."""
@@ -204,6 +225,42 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Testing CorridorEnv - S-Shaped Corridor")
     print("=" * 60)
+    
+    # Test 0: Two-actions mode (straight horizontal corridor)
+    print("\n[Test 0] Two-actions mode (straight corridor, left/right only)")
+    print("-" * 60)
+    env = CorridorEnv(
+        length=10,
+        height=1,
+        num_curves=0,
+        corridor_width=1,
+        render_mode="human",
+        show_coordinates=True
+    )
+    
+    obs, info = env.reset(seed=42)
+    print(f"Action space: {env.action_space}")
+    print(f"Action space size: {env.action_space.n}")
+    print(f"Initial state: {info['agent_position']}")
+    print(f"Goal state: {env.goal_position}")
+    print(f"Total states: {env.n_states}")
+    print("\nInitial render:")
+    env.render()
+    
+    # Test movement with only left/right
+    print("\nTesting left/right movement:")
+    print("Taking 5 right actions (action=1):")
+    for i in range(5):
+        obs, reward, terminated, truncated, info = env.step(1)  # right
+        print(f"  Step {i+1}: position = {info['agent_position']}")
+    
+    print("\nTaking 3 left actions (action=0):")
+    for i in range(3):
+        obs, reward, terminated, truncated, info = env.step(0)  # left
+        print(f"  Step {i+1}: position = {info['agent_position']}")
+    
+    env.render()
+    env.close()
     
     # Test 1: Simple corridor with no curves (straight line)
     print("\n[Test 1] Straight corridor (no curves)")

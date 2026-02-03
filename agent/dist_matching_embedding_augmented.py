@@ -341,6 +341,10 @@ class EmbeddingDistributionVisualizer:
                 'up', 'down', 'left', 'right',
                 'up-left', 'up-right', 'down-left', 'down-right'
             ]
+        elif self.n_actions == 2:
+            self.action_names = ['Left', 'Right']
+            self.action_symbols = ['←', '→']
+            self.action_colors = ['blue', 'red']
         else:
             # Fallback for other action counts
             self.action_symbols = {i: str(i) for i in range(self.n_actions)}
@@ -922,7 +926,7 @@ class EmbeddingDistributionVisualizer:
         grid = self._state_dist_to_grid(state_occupancy)
         
         # Plot
-        im = ax.imshow(grid, cmap='Blues', interpolation='nearest', vmin=0, vmax=0.02)
+        im = ax.imshow(grid, cmap='Blues', interpolation='nearest', vmin=0)
         ax.set_title(f'{title}\n(Total: {int(total)} samples)')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
@@ -1000,7 +1004,10 @@ class DistMatchingEmbeddingAgent:
         self.ideal = ideal
         self.unique_window = unique_window
         self.embeddings = embeddings
+        self.window_size = window_size
+        self.n_subsamples = n_subsamples
 
+        self.first_save = False
         self.sink_schedule = sink_schedule
         self.epsilon_schedule = epsilon_schedule
         self.subsampling_strategy = subsampling_strategy
@@ -1062,17 +1069,6 @@ class DistMatchingEmbeddingAgent:
             device='cpu' #self.device At the moment forcing computatiosn on cpu, to save gpu memory
         )
         
-        self.dataset = InternalDatasetFIFO(
-            dataset_type=self.data_type, 
-            n_states=self.n_states, 
-            n_actions=self.n_actions, 
-            gamma=self.discount, 
-            window_size=window_size, 
-            n_subsamples=n_subsamples,
-            obs_shape=obs_shape,
-            subsampling_strategy=subsampling_strategy,
-            data_type=torch.float32
-        )
        
         # Optimizers
         if embeddings:
@@ -1112,8 +1108,23 @@ class DistMatchingEmbeddingAgent:
         self.n_states = self.env.n_states
         self.first_state = torch.tensor(timestep.proprio_observation)
       
-        self.second_state = torch.eye(self.n_states)[1]
+        self.second_state = torch.zeros(self.n_states)
+        self.second_state[np.argmax(timestep.proprio_observation)+1] = 1.0
         
+        self.dataset = InternalDatasetFIFO(
+            dataset_type=self.data_type, 
+            n_states=self.n_states, 
+            n_actions=self.n_actions, 
+            gamma=self.discount, 
+            window_size=self.window_size, 
+            n_subsamples=self.n_subsamples,
+            obs_shape=self.obs_shape,
+            subsampling_strategy=self.subsampling_strategy,
+            data_type=torch.float32,
+            first_state=self.first_state.numpy(),
+            second_state=self.second_state.numpy()
+        )
+
         # Initialize visualizer now that we have the environment
         self.visualizer = EmbeddingDistributionVisualizer(self)
 
@@ -1614,8 +1625,10 @@ class DistMatchingEmbeddingAgent:
             self._phi_all_next = self.aug_and_encode(next_obs.to(self.device), project=True).cpu()
          
             # find first row in self._phi_all_next that is equal to first_state
-            indices = torch.where(torch.all(proprio_obs == self.first_state, dim=1))[0]
+            indices = torch.where(torch.all(next_obs == self.first_state, dim=1))[0] # TODO usare next_proprio_obs, da fare prossimamente
+            print("first state  is:", np.argmax(self.first_state.numpy()), "second state is:", np.argmax(self.second_state.numpy()))
             if indices.shape[0] == 0:
+                # raise ValueError("First state not found in proprio observations during feature caching.")
                 indices = torch.where(torch.all(proprio_obs == self.second_state, dim=1))[0]
 
             self._psi_all = self._encode_state_action(self._phi_all_obs, actions).cpu()
@@ -1662,8 +1675,114 @@ class DistMatchingEmbeddingAgent:
         else:
             return self.encoder(obs)
 
+    # Method to add to DistMatchingEmbeddingAgent class (after the act method, around line 1395)
+
+    def sample_trajectories(self, n_trajectories: int, max_steps: int, step: int, save_dir: str = "trajectories"):
+        """
+        Sample trajectories from the current policy and save them.
+        
+        Args:
+            n_trajectories: Number of trajectories to sample
+            max_steps: Maximum steps per trajectory
+            step: Current training step (used for folder naming)
+            save_dir: Base directory to save trajectories
+        
+        Returns:
+            step_dir: Path to the directory where trajectories were saved
+        """
+        import os
+        
+        # Create directory for this step
+        step_dir = os.path.join(save_dir, f"step_{step}")
+        os.makedirs(step_dir, exist_ok=True)
+        
+        trajectories = []
+        
+        for traj_idx in range(n_trajectories):
+            trajectory = {
+                'states': [],
+                'positions': [],
+                'actions': [],
+                'rewards': []
+            }
+            
+            # Reset environment
+            timestep = self.wrapped_env.reset()
+            obs = timestep.observation
+            
+            for t in range(max_steps):
+                # Get current state info from the discrete environment
+                state_idx = self.env._get_obs()
+                position = self.env._agent_location
+                
+                trajectory['states'].append(state_idx)
+                trajectory['positions'].append(position)
+                
+                # Sample action from policy
+                action_probs = self.compute_action_probs(obs)
+                action = np.random.choice(self.n_actions, p=action_probs)
+                trajectory['actions'].append(action)
+                
+                # Take step
+                timestep = self.wrapped_env.step(action)
+                obs = timestep.observation
+                reward = timestep.reward
+                trajectory['rewards'].append(reward)
+                
+                if timestep.last():
+                    break
+            
+            trajectories.append(trajectory)
+            
+            # Save individual trajectory
+            traj_file = os.path.join(step_dir, f"trajectory_{traj_idx}.npz")
+            np.savez(
+                traj_file,
+                states=np.array(trajectory['states']),
+                positions=np.array(trajectory['positions']),
+                actions=np.array(trajectory['actions']),
+                rewards=np.array(trajectory['rewards'])
+            )
+        
+        # Get corridor dimensions from environment
+        valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+        min_x = int(min(cell[0] for cell in valid_cells))
+        max_x = int(max(cell[0] for cell in valid_cells))
+        min_y = int(min(cell[1] for cell in valid_cells))
+        max_y = int(max(cell[1] for cell in valid_cells))
+        
+        # Save metadata
+        metadata_file = os.path.join(step_dir, "metadata.npz")
+        np.savez(
+            metadata_file,
+            n_trajectories=n_trajectories,
+            max_steps=max_steps,
+            training_step=step,
+            gamma=self.discount,
+            n_states=self.n_states,
+            min_x=min_x,
+            max_x=max_x,
+            min_y=min_y,
+            max_y=max_y
+        )
+        
+        print(f"Saved {n_trajectories} trajectories to {step_dir}")
+        print(f"Corridor dimensions: x=[{min_x}, {max_x}], y=[{min_y}, {max_y}]")
+        return step_dir
+        
+
     def update(self, replay_iter, step):
         metrics = dict()
+
+        if self.first_save == False:
+             # ADD THIS: Sample and save trajectories
+            # traj_dir = self.sample_trajectories(
+            #     n_trajectories=150,  # Number of trajectories to sample
+            #     max_steps=self.env.max_steps,      # Max steps per trajectory
+            #     step=0,
+            #     save_dir=os.path.join(os.getcwd(), "trajectories")
+            # )
+            self.first_save = True
 
         if step % self.update_every_steps != 0:
             return metrics
@@ -1707,6 +1826,14 @@ class DistMatchingEmbeddingAgent:
                 self.visualizer.plot_results(step, save_path=save_path)
                 save_path = os.path.join(os.getcwd(), f"features_step_{step}.png")
                 self.visualizer.plot_embeddings_2d(save_path=save_path, use_tsne=True)
+                
+                # ADD THIS: Sample and save trajectories
+                # traj_dir = self.sample_trajectories(
+                #     n_trajectories=150,  # Number of trajectories to sample
+                #     max_steps=self.env.max_steps,      # Max steps per trajectory
+                #     step=step,
+                #     save_dir=os.path.join(os.getcwd(), "trajectories")
+                # )
                 if self.obs_type == 'pixels':
                     save_path = os.path.join(os.getcwd(), f"features_step_{step}_projected.png")
                     self.visualizer.plot_embeddings_2d(save_path=save_path, use_tsne=True, project=True)

@@ -1,0 +1,22 @@
+# @package _global_
+# Four Rooms Environment Configuration
+
+env:
+  name: "MultipleRooms-v0"
+  num_rooms: 2
+  room_size: 4
+  corridor_height: 1
+  connector_length: 1
+  max_steps: 300
+  render_mode: rgb_array
+  show_coordinates: false
+  dense_reward: false
+
+  
+  # Goal position (optional, null for random at each episode)
+  goal_position: [1,0]  # Can be [x, y] or null for random
+  
+  # Start position (optional, null for random at each episode)
+  start_position:  [0, 0]  # Can be [x, y] or null for random
+
+# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=20000 configs/env=multiplerooms5_4x4_0 agent.data_type=all num_seed_frames=2000 agent.update_actor_every_steps=1500 agent.window_size=10 agent.unique_window=false agent.n_subsamples=5000 agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,50000)'" agent.T_init_steps=50 agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 obs_type=pixels agent.lambda_reg=1e-6
