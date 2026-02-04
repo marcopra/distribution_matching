@@ -836,7 +836,10 @@ class DistMatchingEmbeddingAgentv2:
             device='cpu' #self.device At the moment forcing computatiosn on cpu, to save gpu memory
         )
         
-        self.W = nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
+        if obs_type == 'pixels' and curl:
+            self.W = nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
+        else:
+            self.W = None 
         
         # Optimizers
         if embeddings:
@@ -1160,7 +1163,7 @@ class DistMatchingEmbeddingAgentv2:
                 self.visualizer.plot_all(step)
                     
                 # Generate t-SNE less frequently (expensive)
-                if step % (self.update_actor_every_steps * 50) == 0:
+                if step % (self.update_actor_every_steps * 1) == 0:
                     self.visualizer.plot_tsne(
                         self._phi_all_obs[:, :-1],  # Remove augmented dim
                         step,
