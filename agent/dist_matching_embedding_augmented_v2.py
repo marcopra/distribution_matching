@@ -85,6 +85,7 @@ class CNNEncoder(nn.Module):
     def forward(self, obs):
         obs = obs / 255.
         h = self.conv(obs)
+        h = self.adaptive_pool(h)
         h = h.view(h.shape[0], -1)
         return h
 
@@ -877,10 +878,6 @@ class DistMatchingEmbeddingAgentv2:
         return tuple()
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
-        if self.ideal:
-            # In ideal mode, we do not update the dataset during training
-            return meta
-        self.dataset.add_transition(time_step)
         return meta
     
     def _encode_state_action(
@@ -946,12 +943,6 @@ class DistMatchingEmbeddingAgentv2:
        
     def update_encoders(self, obs, action, next_obs):
         metrics = dict()
-
-        # Minibatch size for encoder update
-        idxs = np.random.randint(1, obs.shape[0], size=self.batch_size_encoder) # skipping the first index which is the start of episode
-        obs = obs[idxs]
-        action = action[idxs]
-        next_obs = next_obs[idxs]
         
         # Encode
         obs_en = self.aug_and_encode(obs, project=True)
