@@ -168,6 +168,7 @@ class ActionRepeatWrapper(gym.Wrapper):
             step_type = StepType.LAST
         else:
             step_type = StepType.MID
+    
         image_obs = self.env.render()
         proprio_obs = self._process_proprio_obs(obs)
         return ExtendedTimeStep(
@@ -565,8 +566,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     if obs_type == 'discrete_states' or type(state) == int:
         env = DiscreteObservationWrapper(env)
     
-    if url:
-        env = IgnoreSuccessTerminationWrapper(env)
+    # if url:
+    #     env = IgnoreSuccessTerminationWrapper(env)
     
     # Add wrappers
     if obs_type == 'pixels':
@@ -587,6 +588,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     env = ExtendedTimeStepWrapper(env)
     
     return env
+
 
 def make_kwargs(cfg):
     """Return default kwargs for make function."""
@@ -668,121 +670,3 @@ def make_kwargs(cfg):
         env_kwargs['corridor_width'] = cfg.env.corridor_width if 'corridor_width' in cfg.env else 1
         
     return env_kwargs
-# Tests
-if __name__ == "__main__":
-    import pathlib
-    from replay_buffer import ReplayBufferStorage
-    from dm_env import specs
-    
-    def test_reward_consistency():
-        """Test che il reward calcolato dai wrapper corrisponda a quello nei file npz."""
-        print("Testing reward consistency...")
-        
-        # Crea ambiente con relabelling abilitato
-        env = make('PointMaze_MediumDense-v3', enable_relabelling=True)
-        
-        # Setup specs per replay buffer (usando proprio_observation concatenato)
-        proprio_shape = (6,)  # observation + achieved_goal + desired_goal concatenati
-        data_specs = (
-            observation_spec(env),
-            action_spec(env),
-            specs.Array((1,), np.float32, 'reward'),
-            specs.Array((1,), np.float32, 'discount'),
-            specs.Array(proprio_shape, np.float32, 'proprio_observation')
-        )
-        
-        # Directory buffer (assumendo che esista)
-        buffer_dir = pathlib.Path('/home/mprattico/Pretrain-TACO/exp_local/prova2/buffer')
-        if not buffer_dir.exists():
-            print("Buffer directory './buffer' not found. Creating empty test...")
-            return
-        
-        # Carica storage
-        replay_storage = ReplayBufferStorage(data_specs, buffer_dir)
-        
-        if len(replay_storage) == 0:
-            print("No episodes found in buffer directory")
-            return
-        
-        # Carica alcuni episodi npz per test
-        npz_files = list(buffer_dir.glob('*.npz'))
-        if not npz_files:
-            print("No .npz files found in buffer directory")
-            return
-            
-        print(f"Found {len(npz_files)} episodes to test")
-        
-        # Test su primi 3 episodi
-        for i, npz_file in enumerate(npz_files[:3]):
-            print(f"\nTesting episode {i+1}: {npz_file.name}")
-            
-            # Carica episodio
-            episode_data = np.load(npz_file)
-            
-            # Verifica chiavi richieste
-            required_keys = ['reward', 'proprio_observation']
-            if not all(key in episode_data for key in required_keys):
-                print(f"Skipping episode {i+1}: missing required keys")
-                continue
-            
-            # Test su 5 transizioni casuali dell'episodio
-            episode_len = len(episode_data['reward'])
-            test_indices = np.random.choice(episode_len, min(5, episode_len), replace=False)
-            
-            for j, idx in enumerate(test_indices):
-                # Estrai dati originali
-                original_reward = episode_data['reward'][idx][0]
-                proprio_obs = episode_data['proprio_observation'][idx]
-                
-                # Decomponi proprio_observation (observation + achieved_goal + desired_goal)
-                # Formato: [observation(4), achieved_goal(2), desired_goal(2)] = 8 total
-                # Ma dovrebbe essere 6 secondo proprio_shape, quindi probabilmente diverso
-                
-                if len(proprio_obs) >= 6:
-                    # Formato: [observation(4), achieved_goal(2), desired_goal(2)] = 8 total
-                    # Ma per il calcolo dobbiamo usare physics_state con goal incluso
-                    observation = proprio_obs[:4]  # primi 4 valori (observation)  
-                    achieved_goal = proprio_obs[4:6] if len(proprio_obs) >= 8 else proprio_obs[:2]  # achieved_goal
-                    desired_goal = proprio_obs[6:8] if len(proprio_obs) >= 8 else proprio_obs[2:4]  # desired_goal
-                    
-                    # Crea physics_state con goal incluso come ultimi elementi
-                    physics_state = np.concatenate([observation, desired_goal])
-                    
-                    # Estrai action se disponibile
-                    if 'action' in episode_data:
-                        action = episode_data['action'][idx]
-                    else:
-                        action = np.zeros(2, dtype=np.float32)  # dummy action per PointMaze
-                    
-                    try:
-                        # Calcola reward usando state e action
-                        calculated_reward = env.compute_reward_from_state_and_action(proprio_obs, action)
-                        calculated_reward_value = calculated_reward[0]
-                        
-                        # Confronta rewards (aggiustiamo la tolleranza)
-                        reward_diff = abs(original_reward - calculated_reward_value)
-                        
-                        print(f"  Transition {j+1} (idx {idx}):")
-                        print(f"    Achieved goal: {achieved_goal}")
-                        print(f"    Desired goal: {desired_goal}")
-                        print(f"    Original reward: {original_reward:.6f}")
-                        print(f"    Calculated reward: {calculated_reward_value:.6f}")
-                        print(f"    Difference: {reward_diff:.6f}")
-                        
-                        if reward_diff < 1e-5:
-                            print(f"    ✓ Match!")
-                        else:
-                            print(f"    ✗ Mismatch!")
-                            
-                    except Exception as e:
-                        print(f"    Error calculating reward: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        
-                else:
-                    print(f"  Unexpected proprio_observation shape: {proprio_obs.shape}")
-            
-        print("\nReward consistency test completed.")
-    
-    # Esegui test
-    test_reward_consistency()

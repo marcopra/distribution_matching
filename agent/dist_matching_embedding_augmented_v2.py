@@ -94,7 +94,7 @@ class CNNEncoder(nn.Module):
         z = self.projector(h)
         z =F.normalize(z, p=1, dim=-1)
         return z
-
+    
 class TransitionModel(nn.Module):
     """Learnable transition dynamics T: (s,a) -> s'."""
     
@@ -742,6 +742,7 @@ class DistMatchingEmbeddingAgentv2:
                  use_wandb,
                  lr_T,
                  lr_encoder,
+                 curl,
                  hidden_dim,
                  feature_dim,
                  update_every_steps,
@@ -775,6 +776,7 @@ class DistMatchingEmbeddingAgentv2:
         self.device = device
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
+        self.curl = curl
 
         self.first_save = False
         self.sink_schedule = sink_schedule
@@ -800,7 +802,7 @@ class DistMatchingEmbeddingAgentv2:
         }
         
         if obs_type == 'pixels':
-            self.aug = nn.Identity() #utils.RandomShiftsAug(pad=4)
+            self.aug = utils.RandomShiftsAug(pad=4)
             assert embeddings, "Pixel observations require embeddings to be True"
             self.encoder = CNNEncoder(
                 obs_shape,
@@ -834,12 +836,13 @@ class DistMatchingEmbeddingAgentv2:
             device='cpu' #self.device At the moment forcing computatiosn on cpu, to save gpu memory
         )
         
-       
+        self.W = nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
+        
         # Optimizers
         if embeddings:
             self.encoder_optimizer = torch.optim.Adam(
-                self.encoder.parameters(), 
-                lr=lr_encoder
+            list(self.encoder.parameters()) + [self.W] if obs_type == 'pixels' else list(self.encoder.parameters()),
+            lr=lr_encoder
             )
         else:
             self.encoder_optimizer = None
@@ -961,13 +964,22 @@ class DistMatchingEmbeddingAgentv2:
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
         
-        # 4. Loss embeddings must sum to 1
-        embedding_sum_loss = torch.abs(torch.sum(self.aug_and_encode(obs, project=True), dim=-1) - 1).sum()
-        beta = 0.1 
-        # 5. \phi(s) and \phi(s') must be close in L2 norm
-        l2_loss = torch.norm(obs_en - next_obs_en, p=2, dim=1).mean()
+        z_anchor = self.aug_and_encode(obs, project=True)
+        with torch.no_grad():
+            z_pos = self.aug_and_encode(obs, project=True)
 
-        loss =  contrastive_loss #+ beta*embedding_sum_loss + 0.01*l2_loss
+        ### Compute CURL loss
+        if self.curl:
+            logits = self.W @ (z_pos/torch.norm(z_pos, p=2, dim=1, keepdim=True)).T  # [feature_dim, B]
+            logits = (z_anchor/torch.norm(z_anchor, p=2, dim=1, keepdim=True)) @ logits  # [B, B]
+            logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
+            labels = torch.arange(logits.shape[0]).long().to(self.device)
+            curl_loss = self.cross_entropy_loss(logits, labels)
+        else:
+            curl_loss = torch.tensor(0.0, device=self.device)
+
+
+        loss =  contrastive_loss + curl_loss 
         
         # Optimize
         if self.encoder_optimizer is not None:
@@ -979,7 +991,7 @@ class DistMatchingEmbeddingAgentv2:
         self.transition_optimizer.step()
 
         # Print losses
-        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, EmbeddingSum={embedding_sum_loss.item():.4f}, L2={l2_loss.item():.4f}, Total={loss.item():.4f}")
+        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
@@ -1053,6 +1065,7 @@ class DistMatchingEmbeddingAgentv2:
             self._phi_all_obs = self.aug_and_encode(obs, project=True).cpu()
             self._phi_all_next = self.aug_and_encode(next_obs, project=True).cpu()
 
+            action = action.cpu()
             self._psi_all = self._encode_state_action(self._phi_all_obs, action).cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1))
