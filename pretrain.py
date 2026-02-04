@@ -79,6 +79,7 @@ class Workspace:
             env_kwargs = gym_env.make_kwargs(cfg)
         else:
             env_kwargs = {}
+
         self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
         self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
@@ -123,6 +124,7 @@ class Workspace:
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
                                                 False, cfg.nstep, cfg.discount)
+        
         self._replay_iter = None
 
         # create video recorders

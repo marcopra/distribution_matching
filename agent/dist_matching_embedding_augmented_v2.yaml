@@ -1,27 +1,27 @@
 # @package agent
-_target_: agent.dist_matching_embedding_continuous.DistMatchingEmbeddingAgent
+_target_: agent.dist_matching_embedding_augmented_v2.DistMatchingEmbeddingAgentv2
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 lr_actor: 0.05 # eta
 discount: ${discount} # gamma
-lambda_reg: 1e-6
+lambda_reg: 1e-8
 lr_T: 1e-3
 batch_size: 1024
+batch_size_actor: 5000
 nstep: 1
 lr_encoder: 1e-3
 hidden_dim: 1024
 feature_dim: null
 T_init_steps: 300
-update_every_steps: 5
+update_every_steps: 1
 update_actor_every_steps: 960
-n_subsamples: null
-pmd_steps: 15000
-data_type: unique # [unique, all]
+pmd_steps: 100
+sink_schedule: 0.00179856115  #linear(0.0, 0.1, 1000000) #0.00179856115 
+epsilon_schedule: 0.4
+embeddings: true  # whether to use embeddings or not
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
 device: ${device}
-linear_actor: false
-ideal: false

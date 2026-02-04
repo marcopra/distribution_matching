@@ -21,6 +21,9 @@ gym.register_envs(gymnasium_robotics)
 from dm_env import StepType, specs
 from PIL import Image
 
+import ale_py
+gym.register_envs(ale_py)
+
 class ResizeRendering(gym.Wrapper):
 
     def __init__(self, env, resolution=224):

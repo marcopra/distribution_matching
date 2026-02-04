@@ -82,7 +82,7 @@ class ReplayBufferStorage:
 
 class ReplayBuffer(IterableDataset):
     def __init__(self, storage, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot):
+                 fetch_every, save_snapshot, first_transition=False, batch_size=None):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -94,6 +94,8 @@ class ReplayBuffer(IterableDataset):
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
         self._save_snapshot = save_snapshot
+        self._first_transition = first_transition
+        self._batch_size = batch_size
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -141,7 +143,7 @@ class ReplayBuffer(IterableDataset):
             if not self._store_episode(eps_fn):
                 break
 
-    def _sample(self):
+    def _sample(self, first=False):
         try:
             self._try_fetch()
         except:
@@ -150,6 +152,8 @@ class ReplayBuffer(IterableDataset):
         episode = self._sample_episode()
         # add +1 for the first dummy transition
         idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
+        if first:
+            idx = 1
         meta = []
         for spec in self._storage._meta_specs:
             meta.append(episode[spec.name][idx - 1])
@@ -166,7 +170,14 @@ class ReplayBuffer(IterableDataset):
 
     def __iter__(self):
         while True:
-            yield self._sample()
+            if self._first_transition:
+                # First element: first transition of a random episode
+                yield self._sample(first=True)
+                # Remaining elements: normal random sampling
+                for _ in range(self._batch_size - 1):
+                    yield self._sample()
+            else:
+                yield self._sample()
 
 
 def _worker_init_fn(worker_id):
@@ -176,7 +187,7 @@ def _worker_init_fn(worker_id):
 
 
 def make_replay_loader(storage, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount):
+                       save_snapshot, nstep, discount, first_transition=False):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(storage,
@@ -185,7 +196,9 @@ def make_replay_loader(storage, max_size, batch_size, num_workers,
                             nstep,
                             discount,
                             fetch_every=1000,
-                            save_snapshot=save_snapshot)
+                            save_snapshot=save_snapshot,
+                            first_transition=first_transition,
+                            batch_size=batch_size if first_transition else None)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,
