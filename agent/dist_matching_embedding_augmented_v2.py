@@ -278,29 +278,47 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 import umap
-
+from scipy.spatial.distance import pdist, squareform
 
 class FixedRandomEncoder(nn.Module):
-    """Fixed random CNN for stable state hashing (witness network)."""
+    """Fixed random encoder for stable state hashing (witness network)."""
     
-    def __init__(self, obs_shape, hash_dim=128):
+    def __init__(self, obs_shape, obs_type='pixels', hash_dim=128):
         super().__init__()
-        assert len(obs_shape) == 3, "Expected image observations [C, H, W]"
+        self.obs_type = obs_type
+        self.obs_shape = obs_shape
         
-        # Same architecture as trained encoder but FROZEN
-        self.conv = nn.Sequential(
-            nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=1),
-            nn.ReLU()
-        )
-        
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))
-        repr_dim = 32 * 7 * 7
+        if obs_type == 'pixels':
+            assert len(obs_shape) == 3, "Expected image observations [C, H, W]"
+            
+            # CNN for pixel observations
+            self.conv = nn.Sequential(
+                nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, stride=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, stride=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, stride=1),
+                nn.ReLU()
+            )
+            self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))
+            repr_dim = 32 * 7 * 7
+            
+        else:  # obs_type == 'states' (one-hot, continuous, or learned embeddings)
+            # Simple MLP for state vectors
+            input_dim = obs_shape[0] if len(obs_shape) == 1 else np.prod(obs_shape)
+            hidden_dim = max(128, input_dim * 2)
+            
+            self.mlp = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 256),
+                nn.ReLU()
+            )
+            repr_dim = 256
         
         # Random projection matrix for SimHash
         self.register_buffer(
@@ -318,7 +336,7 @@ class FixedRandomEncoder(nn.Module):
         self.eval()  # Always in eval mode
     
     def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -326,21 +344,27 @@ class FixedRandomEncoder(nn.Module):
     def forward(self, obs):
         """
         Args:
-            obs: [B, C, H, W] uint8 images
+            obs: [B, C, H, W] images OR [B, state_dim] state vectors
         Returns:
             features: [B, repr_dim] continuous features
         """
         with torch.no_grad():
-            obs = obs.float() / 255.0
-            h = self.conv(obs)
-            h = self.adaptive_pool(h)
-            h = h.reshape(h.size(0), -1)
+            if self.obs_type == 'pixels':
+                obs = obs.float() / 255.0
+                h = self.conv(obs)
+                h = self.adaptive_pool(h)
+                h = h.reshape(h.size(0), -1)
+            else:
+                # Flatten state to [B, state_dim]
+                obs = obs.float()
+                h = obs.reshape(obs.size(0), -1)
+                h = self.mlp(h)
             return h
     
     def compute_hash(self, obs):
         """
         Args:
-            obs: [B, C, H, W] images
+            obs: [B, ...] observations (any shape)
         Returns:
             hash_codes: [B] int64 unique state IDs
         """
@@ -356,7 +380,7 @@ class FixedRandomEncoder(nn.Module):
             powers_of_2 = 2 ** torch.arange(63, device=obs.device, dtype=torch.long)
             hash_codes = (binary_code[:, :63] * powers_of_2).sum(dim=1)
             
-            return hash_codes
+            return hash_codes.cpu().numpy()
 
 
 class EmpiricalOccupancyTracker:
@@ -401,14 +425,13 @@ class EmpiricalOccupancyTracker:
         counts = np.array(list(self.get_counts().values()))
         probs = counts / counts.sum()
         return -np.sum(probs * np.log(probs + 1e-10))
-
-
 class ExplorationVisualizer:
     """Comprehensive exploration metrics tracking and visualization."""
     
     def __init__(
         self,
-        obs_shape: Tuple[int, int, int],
+        obs_shape: Tuple,  # Can be (C, H, W) for images or (state_dim,) for states
+        obs_type: str,  # 'pixels' or 'states'
         feature_dim: int,
         hash_dim: int = 128,
         k_neighbors: int = 5,
@@ -417,14 +440,15 @@ class ExplorationVisualizer:
         device: str = 'cpu'
     ):
         self.obs_shape = obs_shape
+        self.obs_type = obs_type
         self.feature_dim = feature_dim
         self.k = k_neighbors
         self.device = device
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True, parents=True)
         
-        # Fixed random encoder for stable hashing
-        self.random_encoder = FixedRandomEncoder(obs_shape, hash_dim).to(device)
+        # Fixed random encoder for stable hashing (works for both pixels and states)
+        self.random_encoder = FixedRandomEncoder(obs_shape, obs_type, hash_dim).to(device)
         
         # Occupancy tracker
         self.occupancy = EmpiricalOccupancyTracker(occupancy_window)
@@ -433,6 +457,8 @@ class ExplorationVisualizer:
         self.history = defaultdict(list)
         
         print(f"ExplorationVisualizer initialized:")
+        print(f"  - Observation type: {obs_type}")
+        print(f"  - Observation shape: {obs_shape}")
         print(f"  - Fixed random encoder: {sum(p.numel() for p in self.random_encoder.parameters())} params (frozen)")
         print(f"  - Hash dimension: {hash_dim} bits")
         print(f"  - Occupancy window: {occupancy_window} states")
@@ -447,7 +473,7 @@ class ExplorationVisualizer:
         Update metrics with new batch.
         
         Args:
-            obs_batch: [B, C, H, W] raw pixel observations (for hashing)
+            obs_batch: [B, ...] raw observations (pixels OR state vectors)
             z_batch: [B, feature_dim] learned embeddings (for geometry metrics)
             step: current training step
         
@@ -456,9 +482,9 @@ class ExplorationVisualizer:
         """
         metrics = {}
         
-        # 1. Compute state hashes (fixed random encoder)
+        # 1. Compute state hashes (fixed random encoder - works for both pixels and states)
         with torch.no_grad():
-            state_hashes = self.random_encoder.compute_hash(obs_batch).cpu().numpy()
+            state_hashes = self.random_encoder.compute_hash(obs_batch)
         
         self.occupancy.add(state_hashes)
         
@@ -503,7 +529,7 @@ class ExplorationVisualizer:
             idx = np.random.choice(len(z), 2000, replace=False)
             z = z[idx]
         
-        from scipy.spatial.distance import pdist, squareform
+       
         
         dists = squareform(pdist(z, metric='euclidean'))
         np.fill_diagonal(dists, np.inf)
@@ -724,6 +750,482 @@ class ExplorationVisualizer:
         return summary
 
 # ============================================================================
+# Gridworld-Specific Visualizer (Adapted for v2)
+# ============================================================================
+class EmbeddingDistributionVisualizerV2:
+    """Visualizer for embedding-based distribution matching results (adapted for v2)."""
+    
+    def __init__(self, agent):
+        """
+        Initialize visualizer with agent reference.
+        
+        Args:
+            agent: DistMatchingEmbeddingAgentv2 instance
+        """
+        self.agent = agent
+        self.env = agent.env
+        self.n_states = self.env.n_states
+        self.n_actions = agent.n_actions
+
+        # Get grid dimensions
+        valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+        min_x = min(cell[0] for cell in valid_cells)
+        min_y = min(cell[1] for cell in valid_cells)
+        max_x = max(cell[0] for cell in valid_cells)
+        max_y = max(cell[1] for cell in valid_cells)
+
+        valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
+        print(f"self.n_states: {self.n_states}, len(valid_ids): {len(valid_ids)}")
+        self.all_state_ids_one_hot = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
+        self._image_cache = None
+
+        if hasattr(self.env, 'lava') and self.env.lava:
+            min_x = min(min_x, -1)
+            min_y = min(min_y, -1)
+        
+        self.min_x = min_x
+        self.min_y = min_y
+        self.grid_width = max_x - min_x + 1
+        self.grid_height = max_y - min_y + 1
+        
+        # Action symbols and colors - support both 4 and 8 actions
+        if self.n_actions == 4:
+            self.action_symbols = ['↑', '↓', '←', '→']  # 0=up, 1=down, 2=left, 3=right
+            self.action_names = ['Up', 'Down', 'Left', 'Right']
+            self.action_colors = ['red', 'blue', 'green', 'orange']
+        elif self.n_actions == 8:
+            self.action_symbols = ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗']
+            self.action_names = ['Right', 'Down-Right', 'Down', 'Down-Left', 'Left', 'Up-Left', 'Up', 'Up-Right']
+            self.action_colors = [
+                'orange',      # 0: right
+                'salmon',   # 1: down-right
+                'blue',     # 2: down
+                'cyan',     # 3: down-left
+                'green',    # 4: left
+                'lime',     # 5: up-left
+                'red',   # 6: up
+                'gold'      # 7: up-right
+            ]
+        elif self.n_actions == 2:
+            self.action_symbols = ['→', '↓']
+            self.action_names = ['Right', 'Down']
+            self.action_colors = ['red', 'blue']
+        else:
+            self.action_symbols = [str(i) for i in range(self.n_actions)]
+            self.action_names = [f'Action {i}' for i in range(self.n_actions)]
+            self.action_colors = plt.cm.tab20(np.linspace(0, 1, self.n_actions))
+                    
+    
+    def _state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
+        """Convert state distribution vector to 2D grid."""
+        grid = np.zeros((self.grid_height, self.grid_width))
+        
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            x, y = cell[0] - self.min_x, cell[1] - self.min_y
+            grid[y, x] = nu[s_idx]
+        
+        return grid
+    
+    def _compute_initial_distribution(self) -> np.ndarray:
+        """Compute initial distribution using φ(unique_states) @ alpha."""
+        with torch.no_grad():
+            all_states = self.all_state_ids_one_hot.to(self.agent.device)
+            enc_all_states = self.agent.encoder(all_states)
+            
+            if hasattr(self.agent, '_alpha') and self.agent._alpha is not None:
+                alpha = self.agent._alpha
+                phi_all_next = self.agent._phi_all_next
+                
+                # Add augmented dimension to encoded states
+                zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
+                enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1).cpu()
+                
+                print(f"device of enc_all_states_aug: {enc_all_states_aug.device}, phi_all_next: {phi_all_next.device}, alpha: {alpha.device}")
+                kernel = enc_all_states_aug @ phi_all_next.T
+                nu_init = kernel @ alpha
+            else:
+                nu_init = torch.ones(self.n_states, 1) / self.n_states
+        return nu_init.flatten().numpy()
+    
+    def _compute_current_distribution(self) -> np.ndarray:
+        """Compute current occupancy distribution for all states."""
+        if self.agent.gradient_coeff is None:
+            return np.ones(self.n_states) / self.n_states
+        
+        nu_current = torch.zeros(self.n_states)
+        all_states = self.all_state_ids_one_hot.to(self.agent.device)
+        enc_all_states = self.agent.encoder(all_states).detach().cpu()  # [n_states, feature_dim]
+        
+        with torch.no_grad():
+            # Add augmented dimension
+            zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
+            enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1)
+            
+            H = enc_all_states_aug @ self.agent._phi_all_obs.T
+            pi_all = torch.softmax(
+                -self.agent.lr_actor * (
+                    H @ (self.agent.gradient_coeff[:-1] * self.agent.E) + 
+                    torch.ones(enc_all_states_aug.shape[0], self.agent.E.shape[1]) * self.agent.gradient_coeff[-1]
+                ), 
+                dim=1
+            )
+            
+            M = H * (self.agent.E @ pi_all.T)
+            
+            alpha_all = torch.zeros(self.n_states, 1)
+            alpha_all[0] = 1.0
+            
+            nu_current = self.agent.distribution_matcher.compute_nu_pi(
+                phi_all_next_obs=self.agent._phi_all_next,
+                psi_all_obs_action=self.agent._psi_all,
+                K=self.agent.K,
+                M=M,
+                alpha=alpha_all,
+                epsilon=utils.schedule(self.agent.sink_schedule, 0)
+            )
+        
+        # Normalize
+        nu_current = nu_current[:-1].flatten()  # Remove sink state
+        nu_current = nu_current / (nu_current.sum() + 1e-10)
+        return nu_current.numpy()
+    
+    def _get_policy_per_state(self) -> np.ndarray:
+        """Extract policy probabilities for each state."""
+        policy_per_state = np.zeros((self.n_states, self.n_actions))
+        
+        for s_idx in range(self.n_states):
+            obs = self.env.idx_to_state[s_idx]
+            obs_onehot = np.eye(self.n_states)[s_idx]
+            policy_per_state[s_idx] = self.agent.compute_action_probs(obs_onehot)
+        
+        return policy_per_state
+    
+    def _compute_state_correlation_matrix(self) -> np.ndarray:
+        """Compute correlation matrix between encoded states."""
+        with torch.no_grad():
+            all_states = self.all_state_ids_one_hot.to(self.agent.device)
+            enc_all_states = self.agent.encoder(all_states).detach().cpu()
+            
+            # Normalize embeddings
+            enc_norm = F.normalize(enc_all_states, p=2, dim=1)
+            
+            # Compute cosine similarity matrix
+            correlation_matrix = enc_norm @ enc_norm.T
+            
+        return correlation_matrix.numpy()
+    
+    def _compute_state_to_states_correlation(self) -> np.ndarray:
+        """Compute average correlation of each state with all others."""
+        correlation_matrix = self._compute_state_correlation_matrix()
+        
+        # Set diagonal to 0 (we don't want self-correlation)
+        np.fill_diagonal(correlation_matrix, 0)
+        
+        # Average absolute correlation for each state
+        state_orthogonality_deviation = np.mean(np.abs(correlation_matrix), axis=1)
+        
+        return state_orthogonality_deviation
+    
+    def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False, project=False):
+        """Plot 2D projection of state embeddings using PCA or t-SNE."""
+        with torch.no_grad():
+            all_states = self.all_state_ids_one_hot.to(self.agent.device)
+            if project:
+                embeddings = self.agent.encoder.encode_and_project(all_states).detach().cpu().numpy()
+            else:
+                embeddings = self.agent.encoder(all_states).detach().cpu().numpy()
+        
+        valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+        
+        # Dimensionality reduction
+        if use_tsne:
+            reducer = TSNE(n_components=2, random_state=42)
+            method_name = 't-SNE'
+        else:
+            reducer = PCA(n_components=2)
+            method_name = 'PCA'
+        
+        embeddings_2d = reducer.fit_transform(embeddings)
+        
+        # Create visualization
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Color code by state ID or grid position
+        colors = plt.cm.viridis(np.linspace(0, 1, len(embeddings)))
+        
+        for idx, (cell, embedding_2d) in enumerate(zip(valid_cells, embeddings_2d)):
+            ax.scatter(embedding_2d[0], embedding_2d[1], c=[colors[idx]], s=100, alpha=0.7)
+            ax.text(embedding_2d[0], embedding_2d[1], f"{cell}", fontsize=8, ha='center', va='center')
+        
+        obs_type_str = "Image" if self.agent.obs_type == 'pixels' else "State"
+        ax.set_xlabel(f'{method_name} Component 1')
+        ax.set_ylabel(f'{method_name} Component 2')
+        ax.set_title(f'{obs_type_str} Embeddings Visualization ({method_name})')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Embeddings visualization saved to: {save_path}")
+        plt.close(fig)
+    
+    def plot_results(self, step: int, save_path: str = None):
+        """Create comprehensive visualization of learning progress."""
+        figsize = (22, 10)
+        fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(2, 5, hspace=0.35, wspace=0.35)
+        
+        # Row 1: Initial dist, Policy arrows (bigger), Policy bars (bigger), Correlation matrix
+        ax_init = fig.add_subplot(gs[0, 0])
+        ax_policy = fig.add_subplot(gs[0, 1:3])  # Span 2 columns
+        ax_policy_bars = fig.add_subplot(gs[1, 1:3])  # Span 2 columns
+        ax_corr = fig.add_subplot(gs[0, 3:5])  # Span 2 columns
+        
+        # Row 2: Sample occupancy, State correlations (smaller)
+        ax_sample_occ = fig.add_subplot(gs[1, 0])
+        ax_state_corr = fig.add_subplot(gs[1, 3:5])  # Span 2 columns
+        
+        # Compute distributions
+        nu_init = self._compute_initial_distribution()
+        policy_per_state = self._get_policy_per_state()
+        
+        # Plot distributions
+        self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
+        
+        # Plot policy arrows with grid cells
+        self._plot_policy_arrows(ax_policy, policy_per_state)
+        ax_policy.set_title(f'Policy (Step {step})', fontsize=12, fontweight='bold')
+        
+        # Plot policy bars per cell
+        self._plot_policy_bars_per_cell(ax_policy_bars, policy_per_state)
+        
+        # Plot correlation matrix
+        correlation_matrix = self._compute_state_correlation_matrix()
+        self._plot_state_correlations(ax_corr, correlation_matrix)
+        
+        # Plot sample occupancy (NOT NORMALIZED)
+        self._plot_sample_occupancy(ax_sample_occ, title=f'Batch State Occupancy (Step {step})', normalize=False)
+        
+        # Plot state-to-states correlation
+        state_corrs = self._compute_state_to_states_correlation()
+        self._plot_state_to_states_correlation(ax_state_corr, state_corrs)
+        
+        plt.suptitle(f'Distribution Matching Progress (Step {step})', fontsize=16, y=0.995, fontweight='bold')
+        
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Gridworld visualization saved to: {save_path}")
+        
+        plt.close(fig)
+
+    def _plot_policy_bars_per_cell(self, ax, policy_per_state):
+        """Plot policy bars inside each grid cell, similar to action probabilities grid."""
+        ax.set_xlim(self.min_x - 0.5, self.min_x + self.grid_width - 0.5)
+        ax.set_ylim(self.min_y - 0.5, self.min_y + self.grid_height - 0.5)
+        ax.set_aspect('equal')
+        ax.invert_yaxis()  # Invert Y axis so (0,0) is top-left
+        ax.set_title('Policy Action Probabilities per Cell', fontsize=12, fontweight='bold')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.grid(True, alpha=0.3)
+        
+        # Draw environment structure
+        if hasattr(self.env, 'walkable_areas'):
+            for area in self.env.walkable_areas:
+                rect = Rectangle((area[0], area[1]), area[2], area[3],
+                            fill=False, edgecolor='gray', linewidth=1, linestyle='--', alpha=0.5)
+                ax.add_patch(rect)
+        
+        # Cell size and bar parameters
+        cell_size = 1.0
+        bar_width = cell_size / (self.n_actions + 1)
+        bar_spacing = cell_size / self.n_actions
+        max_bar_height = cell_size * 0.8
+        
+        # For each state, draw bars inside the cell
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            x, y = cell[0], cell[1]
+            
+            # Draw cell background
+            rect = Rectangle(
+                (x - cell_size/2, y - cell_size/2), 
+                cell_size, cell_size,
+                linewidth=1.5,
+                edgecolor='black',
+                facecolor='lightgray',
+                alpha=0.3
+            )
+            ax.add_patch(rect)
+            
+            # Get action probabilities
+            probs = policy_per_state[s_idx]
+            
+            # Draw bars for each action
+            start_x = x - cell_size/2 + bar_width/2
+            
+            for a_idx in range(self.n_actions):
+                bar_x = start_x + a_idx * bar_spacing
+                bar_height = probs[a_idx] * max_bar_height
+                
+                # Bars start from bottom of cell (y + cell_size/2) and grow upward
+                bar_y = y + cell_size/2 - bar_height - 0.1
+                
+                bar_rect = Rectangle(
+                    (bar_x - bar_width/2, bar_y),
+                    bar_width, 
+                    bar_height,
+                    facecolor=self.action_colors[a_idx],
+                    edgecolor='black', 
+                    linewidth=0.5
+                )
+                ax.add_patch(bar_rect)
+        
+        # Set proper ticks
+        ax.set_xticks(np.arange(self.min_x, self.min_x + self.grid_width))
+        ax.set_yticks(np.arange(self.min_y, self.min_y + self.grid_height))
+        
+        # Add legend
+        legend_elements = [Patch(facecolor=self.action_colors[i], label=self.action_names[i])
+                        for i in range(self.n_actions)]
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+
+    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
+        """Plot state occupancy from the current batch.
+        
+        Args:
+            ax: matplotlib axis
+            title: plot title
+            normalize: if True, normalize counts to probabilities; if False, show raw counts
+        """
+        # Use the cached features from the last actor update
+        if not hasattr(self.agent, '_phi_all_next') or self.agent._phi_all_next is None:
+            ax.text(0.5, 0.5, 'No batch data available yet',
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            return
+        
+        # Count state visits in the current batch
+        state_counts = np.zeros(self.n_states)
+        
+        # We need to infer which states are in the batch
+        # Since we have embeddings, we can compare them to known state embeddings
+        with torch.no_grad():
+            all_states = self.all_state_ids_one_hot.to(self.agent.device)
+            enc_all_states = self.agent.encoder(all_states).detach().cpu()
+            
+            # Get batch embeddings (remove augmented dimension)
+            batch_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
+            
+            # Find closest state for each batch sample
+            for batch_emb in batch_embeddings:
+                # Compute cosine similarity
+                similarities = F.cosine_similarity(
+                    batch_emb.unsqueeze(0),
+                    enc_all_states,
+                    dim=1
+                )
+                closest_state = torch.argmax(similarities).item()
+                state_counts[closest_state] += 1
+        
+        # Normalize or keep raw counts
+        if normalize and state_counts.sum() > 0:
+            state_dist = state_counts / state_counts.sum()
+            colorbar_label = 'Probability'
+        else:
+            state_dist = state_counts
+            colorbar_label = 'Count'
+        
+        # Plot on grid
+        grid = self._state_dist_to_grid(state_dist)
+        
+        im = ax.imshow(grid, cmap='YlGnBu', interpolation='nearest')
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
+
+    def _plot_distribution(self, ax, nu, title):
+        """Plot state distribution on grid WITHOUT text annotations."""
+        grid = self._state_dist_to_grid(nu)
+        
+        im = ax.imshow(grid, cmap='YlOrRd', interpolation='nearest')
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        
+        # Add colorbar
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    def _plot_policy_arrows(self, ax, policy_per_state):
+        """Plot policy as arrows on grid WITH cell boundaries."""
+        # Create background grid
+        grid = np.zeros((self.grid_height, self.grid_width))
+        ax.imshow(grid, cmap='gray', alpha=0.05, interpolation='nearest')
+        
+        # Draw cell boundaries
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            x, y = cell[0] - self.min_x, cell[1] - self.min_y
+            
+            # Draw rectangle around each cell
+            rect = Rectangle(
+                (x - 0.5, y - 0.5), 
+                1, 1,
+                linewidth=1.5,
+                edgecolor='black',
+                facecolor='lightgray',
+                alpha=0.3
+            )
+            ax.add_patch(rect)
+            
+            # Draw arrow for most likely action
+            probs = policy_per_state[s_idx]
+            max_action = np.argmax(probs)
+            
+            ax.text(x, y, self.action_symbols[max_action],
+                ha='center', va='center',
+                fontsize=24, color=self.action_colors[max_action],
+                weight='bold', alpha=min(0.9, probs[max_action] + 0.3))
+        
+        ax.set_xlim(-0.5, self.grid_width - 0.5)
+        ax.set_ylim(self.grid_height - 0.5, -0.5)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_xticks(np.arange(self.grid_width))
+        ax.set_yticks(np.arange(self.grid_height))
+        ax.grid(True, which='both', color='black', linewidth=0.5, alpha=0.3)
+
+
+
+    def _plot_state_correlations(self, ax, correlation_matrix):
+        """Plot correlation matrix heatmap WITHOUT text annotations."""
+        im = ax.imshow(correlation_matrix, cmap='RdBu_r', vmin=-1, vmax=1, interpolation='nearest')
+        ax.set_title('State Embedding Correlations', fontsize=12, fontweight='bold')
+        ax.set_xlabel('State Index')
+        ax.set_ylabel('State Index')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    def _plot_state_to_states_correlation(self, ax, state_correlations):
+        """Plot per-state average correlation WITHOUT text annotations."""
+        grid = np.zeros((self.grid_height, self.grid_width))
+        
+        for s_idx in range(self.n_states):
+            cell = self.env.idx_to_state[s_idx]
+            x, y = cell[0] - self.min_x, cell[1] - self.min_y
+            grid[y, x] = state_correlations[s_idx]
+        
+        im = ax.imshow(grid, cmap='RdYlGn_r', interpolation='nearest', vmin=0, vmax=1)
+        ax.set_title('State Orthogonality Deviation\n(Lower = More Orthogonal)', fontsize=12, fontweight='bold')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Avg |Correlation|')
+
+            
+# ============================================================================
 # Main Agent
 # ============================================================================
 class DistMatchingEmbeddingAgentv2:
@@ -816,6 +1318,7 @@ class DistMatchingEmbeddingAgentv2:
             if embeddings == False:
                 self.encoder = nn.Identity()
                 self.feature_dim = obs_shape[0]
+                utils.ColorPrint.yellow("WARNING: Using identity encoder for state observations")
             else:
                 self.encoder = Encoder(
                         obs_shape, 
@@ -844,7 +1347,7 @@ class DistMatchingEmbeddingAgentv2:
         # Optimizers
         if embeddings:
             self.encoder_optimizer = torch.optim.Adam(
-            list(self.encoder.parameters()) + [self.W] if obs_type == 'pixels' else list(self.encoder.parameters()),
+            list(self.encoder.parameters()) + [self.W] if self.W is not None else list(self.encoder.parameters()),
             lr=lr_encoder
             )
         else:
@@ -857,18 +1360,60 @@ class DistMatchingEmbeddingAgentv2:
         self.cross_entropy_loss = nn.CrossEntropyLoss()
         self.training = False
 
-        self.visualizer = None
+        # self.visualizer = None
 
-        if obs_type == 'pixels':
-            self.visualizer = ExplorationVisualizer(
-                obs_shape=obs_shape,
-                feature_dim=self.feature_dim,
-                hash_dim=128,
-                k_neighbors=5,
-                occupancy_window=100000,
-                save_dir= os.path.join("exploration_plots", os.getcwd()),
-                device=self.device
-    )
+    
+        self.visualizer = ExplorationVisualizer(
+            obs_shape=obs_shape,
+            obs_type=obs_type,  # Pass obs_type here!
+            feature_dim=self.feature_dim,
+            hash_dim=128,
+            k_neighbors=5,
+            occupancy_window=self.update_actor_every_steps*3,
+            save_dir=os.path.join("exploration_plots", os.getcwd()),
+            device=self.device
+        )
+
+        # Gridworld-specific visualizer (initialized later via insert_env)
+        self.gridworld_visualizer = None
+        self.env = None
+        self.wrapped_env = None
+        self._discrete_env = None
+    
+    def insert_env(self, env):
+        """
+        Insert environment reference for gridworld-specific visualizations.
+        Call this from pretrain.py after agent creation.
+        """       
+        self.wrapped_env = env
+        self.env = env.unwrapped  # Get the base environment
+        
+        # Initialize gridworld visualizer
+        try:
+            self.gridworld_visualizer = EmbeddingDistributionVisualizerV2(self)
+            print("✓ Gridworld-specific visualizer initialized")
+        except Exception as e:
+            print(f"⚠ Could not initialize gridworld visualizer: {e}")
+            self.gridworld_visualizer = None
+    
+    # def _find_discrete_env(self, env):
+    #     """Find the discrete environment in the wrapper chain."""
+    #     # Copia il metodo da dist_matching_embedding_augmented.py
+    #     current_env = env
+    #     while hasattr(current_env, '_env'):
+    #         inner_env = current_env._env
+    #         if hasattr(inner_env, 'cells') and hasattr(inner_env, 'state_to_idx'):
+    #             return inner_env
+    #         current_env = inner_env
+        
+    #     if hasattr(current_env, 'cells') and hasattr(current_env, 'state_to_idx'):
+    #         return current_env
+        
+    #     if hasattr(env, 'cells') and hasattr(env, 'state_to_idx'):
+    #         return env
+        
+    #     raise ValueError("Could not find discrete environment with 'cells' and 'state_to_idx'")
+
 
 
     
@@ -1169,6 +1714,13 @@ class DistMatchingEmbeddingAgentv2:
                         step,
                         method='tsne'
                     )
+
+            
+                save_path = f"gridworld_plots/step_{step}.png"
+                os.makedirs("gridworld_plots", exist_ok=True)
+                self.gridworld_visualizer.plot_results(step, save_path)
+                print(f"✓ Gridworld plot saved: {save_path}")
+        
     
     
         return metrics

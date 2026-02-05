@@ -123,7 +123,7 @@ class Workspace:
                                                 cfg.replay_buffer_size,
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
-                                                False, cfg.nstep, cfg.discount)
+                                                False, cfg.nstep, cfg.discount, first_transition=True)
         
         self._replay_iter = None
 
