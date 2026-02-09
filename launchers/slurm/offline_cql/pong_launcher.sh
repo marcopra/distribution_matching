@@ -2,7 +2,7 @@
 
 seeds="0 1 2"
 model_path=(
-    "/home/mprattico-iit.local/distribution_matching/data_offline/pong/rover/buffer"
+    "/home/mprattico/distribution_matching/data_offline/pong/rover/buffer"
     )
 
 
