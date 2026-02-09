@@ -8,6 +8,6 @@ model_path=(
 
 for seed in $seeds; do   
     for path in "${model_path[@]}"; do
-        sbatch --export=SEED="${seed}",MODEL_PATH="${path}" launchers/slurm/offline_cql/pong_base.sh
+        sbatch --export=SEED="${seed}",REPLAY_BUFFER_DIR="${path}" launchers/slurm/offline_cql/pong_base.sh
     done
 done
