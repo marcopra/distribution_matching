@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpuv
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
@@ -17,6 +17,4 @@ conda activate dist_matching
 
 export HYDRA_FULL_ERROR=1
 
-python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=20000 configs/env=multiplerooms10_3x3_0 agent.data_type=all num_seed_frames=2000 agent.update_actor_every_steps=1500 agent.window_size=10 agent.unique_window=false agent.n_subsamples=5000 agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,400000)'" agent.T_init_steps=50 agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 obs_type=pixels agent.lambda_reg=1e-6
-# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=20000 configs/env=two_rooms7_0 agent.data_type=all num_seed_frames=2000 agent.update_actor_every_steps=1500 agent.window_size=10 agent.unique_window=false agent.n_subsamples=5000 agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,40000)'" agent.T_init_steps=50 agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 obs_type=pixels agent.lambda_reg=1e-6
-# python pretrain.py agent=dist_matching_embedding_augmented save_video=false num_train_frames=300000 use_wandb=false agent.T_init_steps=20000 configs/env=four_rooms5_0 agent.data_type=all num_seed_frames=2000 agent.update_actor_every_steps=1500 agent.window_size=10 agent.unique_window=false agent.n_subsamples=5000 agent.epsilon_schedule=0.15 "agent.sink_schedule='linear(0.0,0.004,40000)'" agent.T_init_steps=50 agent.feature_dim=200 agent.lr_actor=10 agent.pmd_steps=250 obs_type=pixels agent.lambda_reg=1e-6
+python pretrain.py agent=rnd_discrete num_train_frames=2_000_000 save_train_video=true save_buffer=true frame_stack=3 configs/env=pong agent.feature_dim=256 obs_type=pixels
