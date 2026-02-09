@@ -8,12 +8,12 @@ defaults:
 reward_free: false
 # task settings
 domain: gym
-task_name: FourRooms-v0
-obs_type: discrete_states # [discrete_states, states, pixels]
+task_name:  ${env.name}
+obs_type: pixels # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
 action_repeat: 1 # set to 2 for pixels
 discount: 0.99
-resolution: 224  
+resolution: 84  
 random_init: true
 random_goal: true
 # agent settings
@@ -22,11 +22,12 @@ pretrained_path: null
 #   update_every_steps: 1
 #   nstep: 1
 # train settings
-num_train_frames: 1000
-num_seed_frames_array: [601, 1201, 2401, 3601, 4801, 6001, 7201, 8401, 9601, 10801, 12001, 13201, 14401, 15601, 16801, 18001, 20001] # number of seed frames for each cycle
+num_train_frames: 600_000
+# num_seed_frames_array: [601, 1201, 2401, 3601, 4801, 6001, 7201, 8401, 9601, 10801, 12001, 13201, 14401, 15601, 16801, 18001, 20001] # number of seed frames for each cycle
+num_seed_frames_array: [100_000] # number of seed frames for each cycle
 num_seed_frames: null # will be set dynamically in the code
 # eval
-eval_every_frames: 200
+eval_every_frames: 1000
 num_eval_episodes: 5
 num_eval_dp_episodes: 10
 # pretrained

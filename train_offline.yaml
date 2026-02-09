@@ -1,0 +1,59 @@
+defaults:
+  - agent: cql
+  - configs/env: four_rooms5_1
+  - override hydra/launcher: submitit_local
+
+# unsupervised exploration
+expl_agent: proto
+# task settings
+task_name:  ${env.name}
+obs_type: pixels # [discrete_states, states, pixels]
+frame_stack: 3 # only works if obs_type=pixels
+action_repeat: 1 # set to 2 for pixels
+resolution: 84
+random_init: true
+random_goal: true
+discount: 0.99
+# train settings
+num_grad_steps: 500000
+log_every_steps: 10
+# eval
+eval_every_steps: 1000
+num_eval_episodes: 10
+# dataset
+replay_buffer_dir: ../../../datasets # make sure to update this if you change hydra run dir
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 4
+batch_size: ${agent.batch_size}
+# misc
+seed: 1
+device: cuda
+save_video: true
+save_train_video: false
+use_tb: true
+use_wandb: false
+wandb_id: null
+wandb_project: "offline_rl"
+wandb_entity: "urlb"
+wandb_tag: none
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}
+# experiment
+experiment: exp
+
+
+
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}
+    subdir: ${hydra.job.num}
+  launcher:
+    timeout_min: 4300
+    cpus_per_task: 10
+    gpus_per_node: 1
+    tasks_per_node: 1
+    mem_gb: 160
+    nodes: 1
+    submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm

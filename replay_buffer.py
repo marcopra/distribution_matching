@@ -223,7 +223,7 @@ def relable_episode(env, episode):
 
 
 class OfflineReplayBuffer(IterableDataset):
-    def __init__(self, env, replay_dir, max_size, num_workers, discount):
+    def __init__(self, env, replay_dir, max_size, num_workers, discount, relable=True):
         self._env = env
         self._replay_dir = replay_dir
         self._size = 0
@@ -233,6 +233,7 @@ class OfflineReplayBuffer(IterableDataset):
         self._episodes = dict()
         self._discount = discount
         self._loaded = False
+        self._relable = relable
 
     def _load(self, relable=True):
         print('Labeling data...')
@@ -241,6 +242,7 @@ class OfflineReplayBuffer(IterableDataset):
         except:
             worker_id = 0
         eps_fns = sorted(self._replay_dir.glob('*.npz'))
+        print(f'Found {len(eps_fns)} episodes in replay buffer directory.')
         for eps_fn in eps_fns:
             if self._size > self._max_size:
                 break
@@ -256,7 +258,7 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample_episode(self):
         if not self._loaded:
-            self._load()
+            self._load(self._relable)
             self._loaded = True
         eps_fn = random.choice(self._episode_fns)
         return self._episodes[eps_fn]
@@ -282,11 +284,11 @@ class OfflineReplayBuffer(IterableDataset):
 
 
 def make_offline_replay_loader(env, replay_dir, max_size, batch_size, num_workers,
-                       discount):
+                       discount, relable=True):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = OfflineReplayBuffer(env, replay_dir, max_size_per_worker,
-                                   num_workers, discount)
+                                   num_workers, discount, relable)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,

@@ -52,12 +52,14 @@ def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
 def eval(global_step, agent, env, logger, num_eval_episodes, video_recorder):
     step, episode, total_reward = 0, 0, 0
     eval_until_episode = utils.Until(num_eval_episodes)
+    meta = agent.init_meta()
     while eval_until_episode(episode):
         time_step = env.reset()
         video_recorder.init(env, enabled=(episode == 0))
         while not time_step.last():
             with torch.no_grad(), utils.eval_mode(agent):
                 action = agent.act(time_step.observation,
+                                   meta,
                                    global_step,
                                    eval_mode=True)
             time_step = env.step(action)
@@ -74,7 +76,7 @@ def eval(global_step, agent, env, logger, num_eval_episodes, video_recorder):
         log('step', global_step)
 
 
-@hydra.main(config_path='.', config_name='config')
+@hydra.main(config_path='.', config_name='train_offline')
 def main(cfg):
     work_dir = Path.cwd()
     print(f'workspace: {work_dir}')
@@ -83,7 +85,7 @@ def main(cfg):
     device = torch.device(cfg.device)
 
     # create logger
-    logger = Logger(work_dir, use_tb=cfg.use_tb)
+    logger = Logger(work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
 
      # create logger
     if cfg.use_wandb:
@@ -106,7 +108,6 @@ def main(cfg):
                 mode='online')
                 
     # create envs
-    task = cfg.task_name
     if hasattr(cfg, 'env'):
         env_kwargs = gym_env.make_kwargs(cfg)
     else:
@@ -116,20 +117,19 @@ def main(cfg):
                     cfg.action_repeat, cfg.seed, cfg.resolution, cfg.random_init, 
                     cfg.random_goal, url=True, **env_kwargs)
     
-
-    # create agent
-    agent = make_agent(cfg.obs_type,
-                        obs_spec,
-                        action_spec,
-                        0, 
-                        cfg.agent)
     
 
     # create replay buffer
     # Get observation and action specs for the agent
     obs_spec = gym_env.observation_spec(env)
     action_spec = gym_env.action_spec(env)
-
+     # create agent
+    agent = make_agent(cfg.obs_type,
+                        obs_spec,
+                        action_spec,
+                        0, 
+                        cfg.agent)
+    
     # get meta spec
     meta_specs = agent.get_meta_specs()
     # create replay buffer
@@ -139,18 +139,19 @@ def main(cfg):
                     specs.Array((1,), np.float32, 'discount'))
 
     # create data storage
-    domain = get_domain(cfg.task)
+    # domain = get_domain(cfg.task)
     # datasets_dir = work_dir / cfg.replay_buffer_dir
     # replay_dir = datasets_dir.resolve() / domain / cfg.expl_agent / 'buffer'
-    replay_dir = cfg.replay_buffer_dir
+    # example path for replay_dir: /home/mprattico/distribution_matching/datasets/four_rooms5_1/proto/buffer/seed1
+    replay_dir = Path(cfg.replay_buffer_dir).resolve()
+
     print(f'replay dir: {replay_dir}')
 
     replay_loader = make_offline_replay_loader(env, replay_dir, cfg.replay_buffer_size,
                                        cfg.batch_size,
                                        cfg.replay_buffer_num_workers,
-                                       False,
-                                       cfg.step,
-                                       cfg.discount)
+                                       cfg.discount, 
+                                       relable=False)
     replay_iter = iter(replay_loader)
 
     # create video recorders

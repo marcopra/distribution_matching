@@ -110,17 +110,17 @@ class Workspace:
         # initialize from pretrained
         # if cfg.pretrained_path is not None and cfg.pretrained_path != "none":
         #     if cfg.pretrained_path.endswith('.pt'):
-        #         self.sampling_agent = self.load_sampler(cfg.pretrained_path)['agent']
+        #         self.agent = self.load_sampler(cfg.pretrained_path)['agent']
         #     elif cfg.pretrained_path.endswith('.npy'):
-        #         self.sampling_agent = DistMatchingAgent(env=self.train_env)
-        #         self.sampling_agent.load_policy_operator(cfg.pretrained_path)
-        #     print(f'Loaded pretrained agent {type(self.sampling_agent)} from: {cfg.pretrained_path}')  
+        #         self.agent = DistMatchingAgent(env=self.train_env)
+        #         self.agent.load_policy_operator(cfg.pretrained_path)
+        #     print(f'Loaded pretrained agent {type(self.agent)} from: {cfg.pretrained_path}')  
         # else:
-        #     self.sampling_agent = deepcopy(self.agent)
+        #     self.agent = deepcopy(self.agent)
         #     print(f'No pretrained agent specified, using training agent as sampling agent.')
             
         # get meta specs
-        meta_specs = self.sampling_agent.get_meta_specs()
+        meta_specs = self.agent.get_meta_specs()
         # create replay buffer
         data_specs = (obs_spec,
                       action_spec,
@@ -136,7 +136,7 @@ class Workspace:
                                                 cfg.replay_buffer_size,
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
-                                                False, cfg.nstep, cfg.discount)
+                                                True, cfg.nstep, cfg.discount)
         self._replay_iter = None
 
         # create video recorders
@@ -284,7 +284,7 @@ class Workspace:
 
                 # reset env
                 time_step = self.train_env.reset()
-                meta = self.sampling_agent.init_meta()
+                meta = self.agent.init_meta()
                 self.replay_storage.add(time_step, meta)
                 # self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
                 # self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
@@ -294,20 +294,20 @@ class Workspace:
                 episode_step = 0
                 episode_reward = 0
 
-            meta = self.sampling_agent.update_meta(meta, self.global_step, time_step)
+            meta = self.agent.update_meta(meta, self.global_step, time_step)
 
-            if hasattr(self.sampling_agent, "regress_meta"):
+            if hasattr(self.agent, "regress_meta"):
                 repeat = self.cfg.action_repeat
-                every = self.sampling_agent.update_task_every_step // repeat
-                init_step = self.sampling_agent.num_init_steps
+                every = self.agent.update_task_every_step // repeat
+                init_step = self.agent.num_init_steps
                 if self.global_step > (
                         init_step // repeat) and self.global_step % every == 0:
-                    meta = self.sampling_agent.regress_meta(self.replay_iter,
+                    meta = self.agent.regress_meta(self.replay_iter,
                                                    self.global_step)
 
             # sample action
-            with torch.no_grad(), utils.eval_mode(self.sampling_agent):
-                action = self.sampling_agent.act(time_step.observation,
+            with torch.no_grad(), utils.eval_mode(self.agent):
+                action = self.agent.act(time_step.observation,
                                         meta,
                                         self.sampling_step,
                                         eval_mode=False)
@@ -376,7 +376,7 @@ class Workspace:
         self._training_step = 0
         self.agent = deepcopy(self.initial_agent)
         if not (self.cfg.pretrained_path is not None and self.cfg.pretrained_path != "none"):
-            self.sampling_agent = deepcopy(self.agent)
+            self.agent = deepcopy(self.agent)
         self._replay_iter = None  # reset replay iterator
 
     def visualize_dataset_heatmap(self, save_path: str) -> None:

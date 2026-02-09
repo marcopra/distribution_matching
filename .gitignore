@@ -216,3 +216,4 @@ results
 *.err
 tmp*
 data_plot/
+data*

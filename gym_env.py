@@ -491,6 +491,18 @@ class ExtendedTimeStepWrapper(gym.Wrapper):
         time_step = self.env.step(action)
         return time_step
     
+    def reward_spec(self):
+        """Reward spec for compatibility with replay buffer."""
+        if hasattr(self.env, 'reward_spec'):
+            return self.env.reward_spec()
+        return specs.Array(shape=(1,), dtype=np.float32, name='reward')
+    
+    def discount_spec(self):
+        """Discount spec for compatibility with replay buffer."""
+        if hasattr(self.env, 'discount_spec'):
+            return self.env.discount_spec()
+        return specs.Array(shape=(1,), dtype=np.float32, name='discount')
+    
     @property
     def physics(self):
         """Forward physics attribute if available."""
