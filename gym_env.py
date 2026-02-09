@@ -1,6 +1,7 @@
 from collections import deque
 from typing import Any, NamedTuple
 import os
+import utils
 
 import gymnasium as gym
 from env.rooms import *
@@ -566,7 +567,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     if obs_type == 'discrete_states' or type(state) == int:
         env = DiscreteObservationWrapper(env)
     
-    if url:
+    if url and not isinstance(env.unwrapped, ale_py.env.AtariEnv):
         env = IgnoreSuccessTerminationWrapper(env)
     
     # Add wrappers

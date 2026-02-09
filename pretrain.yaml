@@ -24,7 +24,7 @@ num_seed_frames: 4000
 eval_every_frames: 10000
 num_eval_episodes: 10
 # snapshot
-snapshots: [50000, 10000, 30000, 50000]
+snapshots: [500000000000]
 snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
 # replay buffer
 replay_buffer_size: 1000000
@@ -37,6 +37,7 @@ seed: 1
 device: cuda
 save_video: false
 save_train_video: false
+save_buffer: false
 use_tb: false
 use_wandb: false
 wandb_project: "pretrain_gym"

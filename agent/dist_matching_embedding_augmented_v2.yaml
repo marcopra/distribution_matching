@@ -19,7 +19,7 @@ T_init_steps: 300
 update_every_steps: 1
 update_actor_every_steps: 1500
 pmd_steps: 100
-sink_schedule: linear(0.0,0.004,50000)
+sink_schedule: linear(0.0,0.04,50000)
 epsilon_schedule: 0.15
 embeddings: true  # whether to use embeddings or not, if obs_type is pixels this is always true
 use_tb: ${use_tb}

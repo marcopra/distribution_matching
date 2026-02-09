@@ -20,7 +20,6 @@ import utils
 from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
-from agent.dist_matching import DistMatchingAgent
 from copy import deepcopy
 
 torch.backends.cudnn.benchmark = True
@@ -109,16 +108,16 @@ class Workspace:
         self.initial_agent = deepcopy(self.agent)  # make a copy of the initial agent
 
         # initialize from pretrained
-        if cfg.pretrained_path is not None and cfg.pretrained_path != "none":
-            if cfg.pretrained_path.endswith('.pt'):
-                self.sampling_agent = self.load_sampler(cfg.pretrained_path)['agent']
-            elif cfg.pretrained_path.endswith('.npy'):
-                self.sampling_agent = DistMatchingAgent(env=self.train_env)
-                self.sampling_agent.load_policy_operator(cfg.pretrained_path)
-            print(f'Loaded pretrained agent {type(self.sampling_agent)} from: {cfg.pretrained_path}')  
-        else:
-            self.sampling_agent = deepcopy(self.agent)
-            print(f'No pretrained agent specified, using training agent as sampling agent.')
+        # if cfg.pretrained_path is not None and cfg.pretrained_path != "none":
+        #     if cfg.pretrained_path.endswith('.pt'):
+        #         self.sampling_agent = self.load_sampler(cfg.pretrained_path)['agent']
+        #     elif cfg.pretrained_path.endswith('.npy'):
+        #         self.sampling_agent = DistMatchingAgent(env=self.train_env)
+        #         self.sampling_agent.load_policy_operator(cfg.pretrained_path)
+        #     print(f'Loaded pretrained agent {type(self.sampling_agent)} from: {cfg.pretrained_path}')  
+        # else:
+        #     self.sampling_agent = deepcopy(self.agent)
+        #     print(f'No pretrained agent specified, using training agent as sampling agent.')
             
         # get meta specs
         meta_specs = self.sampling_agent.get_meta_specs()
@@ -196,10 +195,8 @@ class Workspace:
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
                                             meta,
-                                            1000000000, # self.global_step Need o reduce eps greedyness during DP eval id we use eval_mode=False
-                                            eval_mode=False) # TODO think more if to use deterministic or stochastic
-                                            # self.global_step,
-                                            # eval_mode=True)
+                                            self.global_step,
+                                            eval_mode=True) 
                 time_step = self.eval_env.step(action)
                 self.video_recorder.record(self.eval_env)
                 total_reward += time_step.reward
@@ -214,40 +211,40 @@ class Workspace:
             log('episode', self.global_episode)
             log('step', self.global_step)
 
-        self.visualize_q_values_bars(f"q_values_bars_training_step_{self._training_step}.png")
+        # self.visualize_q_values_bars(f"q_values_bars_training_step_{self._training_step}.png")
 
-    def eval_dynamic_programming(self):
-        step, episode, total_reward = 0, 0, 0
-        eval_until_episode = utils.Until(self.cfg.num_eval_dp_episodes)
-        meta = self.agent.init_meta()
-        while eval_until_episode(episode):
-            episode_reward = 0
-            time_step = self.eval_env.reset()
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
-            while not time_step.last():
-                with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation,
-                                            meta,
-                                            1000000000, # self.global_step Need o reduce eps greedyness during DP eval id we use eval_mode=False
-                                            eval_mode=False) # TODO think more if to use deterministic or stochastic
-                time_step = self.eval_env.step(action)
-                self.video_recorder.record(self.eval_env)
-                episode_reward += time_step.reward
-                total_reward += time_step.reward
-                step += 1
-            print("reward for eval episode {}: {}".format(episode, episode_reward))
-            episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+    # def eval_dynamic_programming(self):
+    #     step, episode, total_reward = 0, 0, 0
+    #     eval_until_episode = utils.Until(self.cfg.num_eval_dp_episodes)
+    #     meta = self.agent.init_meta()
+    #     while eval_until_episode(episode):
+    #         episode_reward = 0
+    #         time_step = self.eval_env.reset()
+    #         self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+    #         while not time_step.last():
+    #             with torch.no_grad(), utils.eval_mode(self.agent):
+    #                 action = self.agent.act(time_step.observation,
+    #                                         meta,
+    #                                         1000000000, # self.global_step Need o reduce eps greedyness during DP eval id we use eval_mode=False
+    #                                         eval_mode=False) # TODO think more if to use deterministic or stochastic
+    #             time_step = self.eval_env.step(action)
+    #             self.video_recorder.record(self.eval_env)
+    #             episode_reward += time_step.reward
+    #             total_reward += time_step.reward
+    #             step += 1
+    #         print("reward for eval episode {}: {}".format(episode, episode_reward))
+    #         episode += 1
+    #         self.video_recorder.save(f'{self.global_frame}.mp4')
 
-        with self.logger.log_and_dump_ctx(self.global_frame, ty='eval_dp') as log:
-            log('episode_reward', total_reward / episode)
-            print("Average reward over eval episodes: {}".format(total_reward / episode))
-            log('episode_length', step * self.cfg.action_repeat / episode)
-            log('episode', self.global_episode)
-            log('dataset_size', len(self.replay_storage))
-            log('dynamic_programming_cycle', self.current_cycle)
-            log('step', self.global_step)
-            log('total_time', self.timer.total_time())
+    #     with self.logger.log_and_dump_ctx(self.global_frame, ty='eval_dp') as log:
+    #         log('episode_reward', total_reward / episode)
+    #         print("Average reward over eval episodes: {}".format(total_reward / episode))
+    #         log('episode_length', step * self.cfg.action_repeat / episode)
+    #         log('episode', self.global_episode)
+    #         log('dataset_size', len(self.replay_storage))
+    #         log('dynamic_programming_cycle', self.current_cycle)
+    #         log('step', self.global_step)
+    #         log('total_time', self.timer.total_time())
 
     def collect_and_train(self):
         # predicates
@@ -289,9 +286,9 @@ class Workspace:
                 time_step = self.train_env.reset()
                 meta = self.sampling_agent.init_meta()
                 self.replay_storage.add(time_step, meta)
-                self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
-                self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
-                self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
+                # self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
+                # self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
+                # self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
                 self.train_video_recorder.init(time_step.image_observation)
 
                 episode_step = 0
@@ -318,9 +315,9 @@ class Workspace:
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
             self.replay_storage.add(time_step, meta)
-            self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
-            self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
-            self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
+            # self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
+            # self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
+            # self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
             self.train_video_recorder.record(time_step.image_observation)
             episode_step += 1
             self._sampling_step += 1
@@ -587,7 +584,8 @@ def main(cfg):
     if snapshot.exists():
         print(f'resuming: {snapshot}')
         workspace.load_snapshot()
-    workspace.dynamic_programming_loop()
+    # workspace.dynamic_programming_loop()
+    workspace.collect_and_train()
 
 
 if __name__ == '__main__':

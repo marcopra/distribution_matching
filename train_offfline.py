@@ -10,14 +10,16 @@ os.environ['MUJOCO_GL'] = 'egl'
 from pathlib import Path
 
 import hydra
+from omegaconf import OmegaConf
 import numpy as np
 import torch
 from dm_env import specs
+import gym_env
+import wandb
 
-import dmc
 import utils
 from logger import Logger
-from replay_buffer import make_replay_loader
+from replay_buffer import make_offline_replay_loader
 from video import VideoRecorder
 
 torch.backends.cudnn.benchmark = True
@@ -32,6 +34,20 @@ def get_domain(task):
 def get_data_seed(seed, num_data_seeds):
     return (seed - 1) % num_data_seeds + 1
 
+def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
+    cfg.obs_type = obs_type
+    cfg.obs_shape = obs_spec.shape if obs_spec.shape else (1,)
+    
+    # Determine mode based on action spec
+    if hasattr(action_spec, 'num_values'):
+        # Discrete action space
+        cfg.action_shape = (action_spec.num_values,)
+    else:
+        # Continuous action space
+        cfg.action_shape = action_spec.shape
+    
+    cfg.num_expl_steps = num_expl_steps
+    return hydra.utils.instantiate(cfg)
 
 def eval(global_step, agent, env, logger, num_eval_episodes, video_recorder):
     step, episode, total_reward = 0, 0, 0
@@ -69,27 +85,71 @@ def main(cfg):
     # create logger
     logger = Logger(work_dir, use_tb=cfg.use_tb)
 
+     # create logger
+    if cfg.use_wandb:
+        if cfg.wandb_id is not None and cfg.wandb_id != "none":
+            wandb.init(
+                id=cfg.wandb_id,
+                resume='must',
+                project=cfg.wandb_project,
+                name=cfg.wandb_run_name,
+                tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
+                sync_tensorboard=True,
+                mode='online')
+        else:
+            wandb.init(
+                config=OmegaConf.to_container(cfg, resolve=True),
+                project=cfg.wandb_project,
+                name=cfg.wandb_run_name,
+                tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
+                sync_tensorboard=True,
+                mode='online')
+                
     # create envs
-    env = dmc.make(cfg.task, seed=cfg.seed)
+    task = cfg.task_name
+    if hasattr(cfg, 'env'):
+        env_kwargs = gym_env.make_kwargs(cfg)
+    else:
+        env_kwargs = {}
+
+    env = gym_env.make(cfg.task_name, cfg.obs_type, cfg.frame_stack,
+                    cfg.action_repeat, cfg.seed, cfg.resolution, cfg.random_init, 
+                    cfg.random_goal, url=True, **env_kwargs)
+    
 
     # create agent
-    agent = hydra.utils.instantiate(cfg.agent,
-                                    obs_shape=env.observation_spec().shape,
-                                    action_shape=env.action_spec().shape)
+    agent = make_agent(cfg.obs_type,
+                        obs_spec,
+                        action_spec,
+                        0, 
+                        cfg.agent)
+    
 
     # create replay buffer
-    data_specs = (env.observation_spec(), env.action_spec(), env.reward_spec(),
-                  env.discount_spec())
+    # Get observation and action specs for the agent
+    obs_spec = gym_env.observation_spec(env)
+    action_spec = gym_env.action_spec(env)
+
+    # get meta spec
+    meta_specs = agent.get_meta_specs()
+    # create replay buffer
+    data_specs = (obs_spec,
+                    action_spec,
+                    specs.Array((1,), np.float32, 'reward'),
+                    specs.Array((1,), np.float32, 'discount'))
 
     # create data storage
     domain = get_domain(cfg.task)
-    datasets_dir = work_dir / cfg.replay_buffer_dir
-    replay_dir = datasets_dir.resolve() / domain / cfg.expl_agent / 'buffer'
+    # datasets_dir = work_dir / cfg.replay_buffer_dir
+    # replay_dir = datasets_dir.resolve() / domain / cfg.expl_agent / 'buffer'
+    replay_dir = cfg.replay_buffer_dir
     print(f'replay dir: {replay_dir}')
 
-    replay_loader = make_replay_loader(env, replay_dir, cfg.replay_buffer_size,
+    replay_loader = make_offline_replay_loader(env, replay_dir, cfg.replay_buffer_size,
                                        cfg.batch_size,
                                        cfg.replay_buffer_num_workers,
+                                       False,
+                                       cfg.step,
                                        cfg.discount)
     replay_iter = iter(replay_loader)
 
