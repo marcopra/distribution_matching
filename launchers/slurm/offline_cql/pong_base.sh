@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-train_offline.py replay_buffer_dir="${REPLAY_BUFFER_DIR}" configs/env=pong use_wandb=true seed=$SEED 
+python train_offline.py replay_buffer_dir="${REPLAY_BUFFER_DIR}" configs/env=pong use_wandb=true seed=$SEED 
