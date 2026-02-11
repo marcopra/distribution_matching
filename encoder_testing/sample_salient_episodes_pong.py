@@ -419,7 +419,7 @@ def main():
     parser = argparse.ArgumentParser(description='Campiona clip salienti da Pong')
     parser.add_argument('--save_dir', type=str, default='./data_salient_episodes_pong',
                        help='Directory dove salvare le clip')
-    parser.add_argument('--num_clips', type=int, default=5,
+    parser.add_argument('--num_clips', '--num_episodes', type=int, default=5,
                        help='Numero di clip per tipo da campionare')
     parser.add_argument('--window_size', type=int, default=60,
                        help='Dimensione finestra temporale (in frame) attorno all\'evento')

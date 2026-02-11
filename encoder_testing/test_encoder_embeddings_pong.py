@@ -518,17 +518,17 @@ class EncoderTester:
         for episode_name, data in episodes_data.items():
             obs = data['observations']
             emb = self.encode_observations(obs)
-            norms = torch.norm(emb, p=2, dim=1)
+            norms = torch.norm(emb, p=1, dim=1)
             all_norms.extend(norms.tolist())
         
         all_norms = np.array(all_norms)
-        print(f"Norma embeddings - Mean: {all_norms.mean():.4f}, Std: {all_norms.std():.4f}")
+        print(f"Norma L1 embeddings - Mean: {all_norms.mean():.4f}, Std: {all_norms.std():.4f}")
         
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.hist(all_norms, bins=50, alpha=0.7, color='orange', edgecolor='black')
         ax.axvline(all_norms.mean(), color='red', linestyle='--',
                    linewidth=2, label=f'Mean: {all_norms.mean():.3f}')
-        ax.set_xlabel('L2 Norm', fontsize=12)
+        ax.set_xlabel('L1 Norm', fontsize=12)
         ax.set_ylabel('Frequency', fontsize=12)
         ax.set_title('Distribution of Embedding Norms', fontsize=14, fontweight='bold')
         ax.legend()
