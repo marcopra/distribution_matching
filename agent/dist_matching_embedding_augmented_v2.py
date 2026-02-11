@@ -23,7 +23,9 @@ torch.set_default_dtype(torch.float32)
 from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
-
+import logging
+# set logging lebel to info
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 # ============================================================================
@@ -57,10 +59,12 @@ class Encoder(nn.Module):
         return self.forward(obs)
 
 class CNNEncoder(nn.Module):
-    def __init__(self, obs_shape, feature_dim):
+    def __init__(self, obs_shape, feature_dim, mode='l2'):
         super().__init__()
 
         assert len(obs_shape) == 3
+        assert mode in ['l1', 'l2'], "Mode must be 'l1' or 'l2'"
+        self.mode = mode
 
         self.conv = nn.Sequential(
             nn.Conv2d(obs_shape[0], 32, 3, stride=2),
@@ -76,11 +80,13 @@ class CNNEncoder(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))
         self.repr_dim = 32 * 7 * 7  # 1,568 features
 
+      
+        
         self.projector = nn.Sequential(
             nn.Linear(self.repr_dim, feature_dim),  # Project to 256 dimensions
             nn.LayerNorm(feature_dim),
-            nn.Tanh()
-            # nn.ReLU(inplace=True)
+            # nn.Tanh()
+            nn.ReLU(inplace=True)
         )
 
         self.apply(utils.weight_init)
@@ -95,8 +101,10 @@ class CNNEncoder(nn.Module):
     def encode_and_project(self, obs):
         h = self.forward(obs)
         z = self.projector(h)
-        z =F.normalize(z, p=2, dim=-1)
-        # z =F.normalize(z, p=1, dim=-1)
+        if self.mode == 'l2':   
+            z =F.normalize(z, p=2, dim=-1)
+        elif self.mode == 'l1':
+            z =F.normalize(z, p=1, dim=-1)
         return z
     
 class ProjectSA(nn.Module):
@@ -1377,6 +1385,7 @@ class DistMatchingEmbeddingAgentv2:
                  T_init_steps,
                  sink_schedule,
                  epsilon_schedule,
+                 mode,
                  embeddings = True,
                  device: str = "cpu",
                  ):
@@ -1404,6 +1413,9 @@ class DistMatchingEmbeddingAgentv2:
         self.embeddings = embeddings
         self.curl = curl
         self.embedding_sum_loss = embedding_sum_loss
+
+        self.mode = mode
+        assert self.mode in ['l1', 'l2'], "Mode must be 'l1' or 'l2'"
 
         self.first_save = False
         self.sink_schedule = sink_schedule
@@ -1636,13 +1648,17 @@ class DistMatchingEmbeddingAgentv2:
         projected_sa = self.project_sa(encoded_state_action)
         
         # Normalize embeddings L2
-        # norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-        # norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+        if self.mode == 'l1':
+            norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
+            norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+        elif self.mode == 'l2':
+            norm_next_obs_en = next_obs_en
+            norm_projected_sa = projected_sa
 
         # Compute loss
         # 1. Contrastive loss: 
-        Wz = torch.matmul(self.W, next_obs_en.T)  # [feature_dim, B]
-        logits = torch.matmul(projected_sa, Wz)  # [B, B]
+        Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
+        logits = torch.matmul(norm_projected_sa, Wz)  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
@@ -1654,8 +1670,9 @@ class DistMatchingEmbeddingAgentv2:
         ### Compute CURL loss
         if self.curl:
             # Normalize embeddings L2
-            # z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
-            # z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
+            if self.mode == 'l1':
+                z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
+                z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
             Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
             logits = torch.matmul(z_anchor, Wz)  # [B, B]
             logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
@@ -1683,7 +1700,7 @@ class DistMatchingEmbeddingAgentv2:
         self.transition_optimizer.step()
 
         # Print losses
-        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Total={loss.item():.4f}")
+        logging.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics

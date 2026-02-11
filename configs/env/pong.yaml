@@ -1,8 +1,6 @@
 # @package _global_
-# Continuous Four Rooms Environment Configuration
+# Pong Environment Configuration
 
 env:
   name: "PongNoFrameskip-v4"
-  
   render_mode: rgb_array
-  
