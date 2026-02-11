@@ -24,6 +24,8 @@ from PIL import Image
 
 import ale_py
 gym.register_envs(ale_py)
+from gymnasium.wrappers import AtariPreprocessing
+
 
 class ResizeRendering(gym.Wrapper):
 
@@ -170,7 +172,12 @@ class ActionRepeatWrapper(gym.Wrapper):
         else:
             step_type = StepType.MID
     
-        image_obs = self.env.render()
+        # For Atari (or other envs where obs is already pixels), use obs directly
+        if self.obs_type == 'pixels' and len(obs.shape) == 3:
+            image_obs = obs
+        else:
+            image_obs = self.env.render()
+
         proprio_obs = self._process_proprio_obs(obs)
         return ExtendedTimeStep(
             step_type=step_type,
@@ -185,7 +192,11 @@ class ActionRepeatWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        image_obs = self.env.render()
+        # For Atari (or other envs where obs is already pixels), use obs directly
+        if self.obs_type == 'pixels' and len(obs.shape) == 3:
+            image_obs = obs
+        else:
+            image_obs = self.env.render()
         proprio_obs = self._process_proprio_obs(obs)
         # Convert gym reset to dm_env format
         return ExtendedTimeStep(
@@ -562,9 +573,29 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     
     env = gym.make(name, **kwargs)
     
-    # Apply discretization wrapper for continuous environments
-    if discretize:
-        env = DiscretizedContinuousEnv(env, cell_size=cell_size, lava=lava)
+    # # Apply discretization wrapper for continuous environments
+    # if discretize:
+    #     env = DiscretizedContinuousEnv(env, cell_size=cell_size, lava=lava)
+
+    is_atari = isinstance(env.unwrapped, ale_py.env.AtariEnv) or str(name).startswith("ALE/")
+
+    # If Atari pixels: use AtariPreprocessing instead of custom ResizeRendering + ActionRepeat
+    if is_atari and obs_type == "pixels":
+        # IMPORTANT: base env must have frameskip=1, otherwise you double-skip [web:69]
+        print(f"Applying AtariPreprocessing wrapper for {name} with action_repeat={action_repeat} and resolution={resolution}")
+        env = AtariPreprocessing(
+            env,
+            noop_max=0,
+            frame_skip=action_repeat,          # your "action_repeat" becomes Atari frame-skip
+            screen_size=84,
+            terminal_on_life_loss=True,
+            grayscale_obs=False,               # True if you want grayscale
+            grayscale_newaxis=False,           # True if grayscale and you want (84,84,1)
+            scale_obs=False,
+        )
+        action_repeat = 1  # don't repeat again later
+        state, _ = env.reset()
+    
     
     # Assert that render_mode is 'rgb_array' if pixels observation is requested
     if obs_type == 'pixels':
@@ -583,7 +614,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         env = IgnoreSuccessTerminationWrapper(env)
     
     # Add wrappers
-    if obs_type == 'pixels':
+    if obs_type == 'pixels' and not is_atari:
         env = ResizeRendering(env, resolution=resolution)   
     env = ActionDTypeWrapper(env, np.float32)
     

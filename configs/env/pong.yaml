@@ -2,7 +2,7 @@
 # Continuous Four Rooms Environment Configuration
 
 env:
-  name: "Pong-v4"
+  name: "PongNoFrameskip-v4"
   
   render_mode: rgb_array
   

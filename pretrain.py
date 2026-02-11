@@ -203,6 +203,7 @@ class Workspace:
 
         episode_step, episode_reward = 0, 0
         time_step = self.train_env.reset()
+        print(f"Initial observation shape: {time_step.observation.shape}")
         meta = self.agent.init_meta()
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)

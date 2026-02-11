@@ -78,8 +78,9 @@ class CNNEncoder(nn.Module):
 
         self.projector = nn.Sequential(
             nn.Linear(self.repr_dim, feature_dim),  # Project to 256 dimensions
-            # nn.LayerNorm(feature_dim),
-            nn.ReLU()
+            nn.LayerNorm(feature_dim),
+            nn.Tanh()
+            # nn.ReLU(inplace=True)
         )
 
         self.apply(utils.weight_init)
@@ -94,7 +95,8 @@ class CNNEncoder(nn.Module):
     def encode_and_project(self, obs):
         h = self.forward(obs)
         z = self.projector(h)
-        z =F.normalize(z, p=1, dim=-1)
+        z =F.normalize(z, p=2, dim=-1)
+        # z =F.normalize(z, p=1, dim=-1)
         return z
     
 class ProjectSA(nn.Module):
@@ -124,11 +126,9 @@ class DistributionMatcher:
     def __init__(self, 
                  lambda_reg: float,
                  gamma: float = 0.9, 
-                 eta: float = 0.1, 
                  device: str = "cpu"):
         
         self.gamma = gamma
-        self.eta = eta
         self.lambda_reg = lambda_reg
         self.device = device    
             
@@ -360,7 +360,7 @@ class FixedRandomEncoder(nn.Module):
         Args:
             obs: [B, ...] observations (any shape)
         Returns:
-            hash_codes: [B] int64 unique state IDs
+            hash_codes: [B] string hashes (for uniqueness on high-dimensional spaces like Atari)
         """
         with torch.no_grad():
             features = self.forward(obs)  # [B, repr_dim]
@@ -369,12 +369,15 @@ class FixedRandomEncoder(nn.Module):
             # Binary hash: sign of each projection
             binary_code = (projections > 0).long()  # [B, hash_dim]
             
-            # Convert binary to unique integer (like a base-2 number)
-            # Use only first 63 bits to avoid overflow with int64
-            powers_of_2 = 2 ** torch.arange(63, device=obs.device, dtype=torch.long)
-            hash_codes = (binary_code[:, :63] * powers_of_2).sum(dim=1)
+            # *** FIX: Convert to string hash instead of int64 ***
+            # This avoids collisions on high-dimensional spaces like Atari
+            hash_codes = []
+            for i in range(binary_code.shape[0]):
+                # Convert each binary vector to a string (e.g., "10110101...")
+                hash_str = ''.join(binary_code[i].cpu().numpy().astype(str))
+                hash_codes.append(hash_str)
             
-            return hash_codes.cpu().numpy()
+            return np.array(hash_codes, dtype=object)
 
 
 class EmpiricalOccupancyTracker:
@@ -419,6 +422,7 @@ class EmpiricalOccupancyTracker:
         counts = np.array(list(self.get_counts().values()))
         probs = counts / counts.sum()
         return -np.sum(probs * np.log(probs + 1e-10))
+    
 class ExplorationVisualizer:
     """Comprehensive exploration metrics tracking and visualization."""
     
@@ -560,7 +564,7 @@ class ExplorationVisualizer:
         
         return uniformity
     
-    def plot_all(self, step: int):
+    def plot_all(self, step: int, param_text: str = ""):
         """Generate comprehensive visualization of all metrics."""
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         fig.suptitle(f'Exploration Metrics (Step {step})', fontsize=16)
@@ -617,6 +621,11 @@ class ExplorationVisualizer:
         ax = axes[1, 2]
         self._plot_lorenz_curve(ax)
         
+        # Add text to plot with hyperparameters
+        if param_text:
+           fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
         plt.tight_layout()
         save_path = self.save_dir / f'exploration_metrics_{step}.png'
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -1358,6 +1367,7 @@ class DistMatchingEmbeddingAgentv2:
                  lr_T,
                  lr_encoder,
                  curl,
+                 embedding_sum_loss,
                  hidden_dim,
                  feature_dim,
                  update_every_steps,
@@ -1393,6 +1403,7 @@ class DistMatchingEmbeddingAgentv2:
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
         self.curl = curl
+        self.embedding_sum_loss = embedding_sum_loss
 
         self.first_save = False
         self.sink_schedule = sink_schedule
@@ -1452,11 +1463,9 @@ class DistMatchingEmbeddingAgentv2:
         
         self.distribution_matcher = DistributionMatcher(
             gamma=self.discount,
-            eta=self.lr_actor,
             lambda_reg=self.lambda_reg,
-            device=self.device  # At the moment forcing computations on cpu, to save gpu memory
+            device=self.device  
         )
-        
         
         self.W = nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
        
@@ -1486,7 +1495,7 @@ class DistMatchingEmbeddingAgentv2:
             obs_shape=obs_shape,
             obs_type=obs_type,  # Pass obs_type here!
             feature_dim=self.feature_dim,
-            hash_dim=128,
+            hash_dim=1024,
             k_neighbors=5,
             occupancy_window=self.update_actor_every_steps*3,
             save_dir=os.path.join("exploration_plots", os.getcwd()),
@@ -1498,6 +1507,19 @@ class DistMatchingEmbeddingAgentv2:
         self.env = None
         self.wrapped_env = None
         self._discrete_env = None
+
+        # Gradient norm tracking by reward
+        self.max_samples_per_reward = 150
+        self.gradient_samples = {
+            '+1': [],  # List of (step, gradient_norm)
+            '-1': [],  # List of (step, gradient_norm)
+            '0': []    # List of (step, gradient_norm)
+        }
+        self.gradient_norm_history = {
+            '+1': [],  # List of (step, mean_norm, std_norm)
+            '-1': [],
+            '0': []
+        }
     
     def insert_env(self, env):
         """
@@ -1569,7 +1591,11 @@ class DistMatchingEmbeddingAgentv2:
             enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), device=enc_obs.device)], dim=1)  # [1, feature_dim + 1]
             H = enc_obs_augmented @ self._phi_all_obs.T  # [1, num_unique]
 
-            probs = torch.softmax(-self.lr_actor * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1], device=enc_obs.device)*self.gradient_coeff[-1]), dim=1)  # [1, n_actions]
+            if not hasattr(self, "current_eta"):
+                self.current_eta = utils.schedule(self.sink_schedule, 0)
+                utils.ColorPrint.yellow(f"Initialized sink normalization factor (eta) to {self.current_eta:.6f}")
+
+            probs = torch.softmax(-self.current_eta * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1], device=enc_obs.device)*self.gradient_coeff[-1]), dim=1)  # [1, n_actions]
 
             
             if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
@@ -1610,13 +1636,13 @@ class DistMatchingEmbeddingAgentv2:
         projected_sa = self.project_sa(encoded_state_action)
         
         # Normalize embeddings L2
-        norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-        norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+        # norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
+        # norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
 
         # Compute loss
         # 1. Contrastive loss: 
-        Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
-        logits = torch.matmul(norm_projected_sa, Wz)  # [B, B]
+        Wz = torch.matmul(self.W, next_obs_en.T)  # [feature_dim, B]
+        logits = torch.matmul(projected_sa, Wz)  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
@@ -1628,8 +1654,8 @@ class DistMatchingEmbeddingAgentv2:
         ### Compute CURL loss
         if self.curl:
             # Normalize embeddings L2
-            z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
-            z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
+            # z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
+            # z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
             Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
             logits = torch.matmul(z_anchor, Wz)  # [B, B]
             logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
@@ -1638,8 +1664,14 @@ class DistMatchingEmbeddingAgentv2:
         else:
             curl_loss = torch.tensor(0.0, device=self.device)
 
+        if self.embedding_sum_loss>0:
+            # Sum of embeddings loss = 1
+            sum_next_obs_en = torch.sum(next_obs_en, dim=1)  # [B]
+            embedding_sum_loss = self.embedding_sum_loss * torch.mean((sum_next_obs_en - 1.0) ** 2)
+        else:
+            embedding_sum_loss = torch.tensor(0.0, device=self.device)
 
-        loss =  contrastive_loss + curl_loss 
+        loss =  contrastive_loss + curl_loss + embedding_sum_loss
         
         # Optimize
         if self.encoder_optimizer is not None:
@@ -1651,12 +1683,12 @@ class DistMatchingEmbeddingAgentv2:
         self.transition_optimizer.step()
 
         # Print losses
-        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Total={loss.item():.4f}")
+        print(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
 
-    def update_actor(self, obs, action, next_obs, step):
+    def update_actor(self, obs, action, next_obs, step, rewards=None):
         """Update policy using Projected Mirror Descent."""
         metrics = dict()
 
@@ -1667,8 +1699,10 @@ class DistMatchingEmbeddingAgentv2:
         self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
         self.K = self._psi_all @ self._psi_all.T  # [n, n]
 
+        self.current_eta = utils.schedule(self.lr_actor, step)
+
         sink_norm = utils.schedule(self.sink_schedule, step)
-        self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.float32)  # [z_x+1, n_actions]
+        self.pi = torch.softmax(-self.current_eta * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.float32)  # [z_x+1, n_actions]
 
         M = self.H*(self.E@self.pi.T) 
 
@@ -1684,16 +1718,21 @@ class DistMatchingEmbeddingAgentv2:
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
 
         for iteration in range(self.pmd_steps):
-            self.gradient_coeff += self.distribution_matcher.compute_gradient_coefficient(
+            grad_update = self.distribution_matcher.compute_gradient_coefficient(
                 M, 
                 phi_all_next_obs = self._phi_all_next, 
                 psi_all_obs_action = self._psi_all, 
                 alpha = self._alpha,
                 sink_norm=sink_norm
             ) 
-            
+
+            # Track gradient norms by reward (only on final iteration)
+            if iteration == self.pmd_steps - 1 and rewards is not None:
+                self._track_gradient_norms(grad_update, rewards, step)
+
+            self.gradient_coeff += grad_update
          
-            self.pi = torch.softmax(-self.lr_actor * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1)  # [z_x+1, n_actions]
+            self.pi = torch.softmax(-self.current_eta * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1)  # [z_x+1, n_actions]
 
             M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
 
@@ -1715,6 +1754,52 @@ class DistMatchingEmbeddingAgentv2:
             metrics['actor_loss'] = actor_loss
    
         return metrics
+
+    def _track_gradient_norms(self, gradient, rewards, step):
+        """
+        Track gradient norms for samples with different reward values.
+        
+        Args:
+            gradient: [batch_size+1, 1] gradient tensor
+            rewards: [batch_size] reward tensor
+            step: current training step
+        """
+        with torch.no_grad():
+            # Compute per-sample gradient norm (excluding the last augmented dimension)
+            grad_per_sample = gradient[:-1]  # [batch_size, 1]
+            
+            # Group by reward value
+            for reward_val, reward_key in [(1.0, '+1'), (-1.0, '-1'), (0.0, '0')]:
+                mask = (rewards == reward_val)
+                if mask.sum() > 0:
+                    # Get gradients for this reward type
+                    grads_for_reward = grad_per_sample[mask]
+                    
+                    print(f"shapes for reward {reward_key}: grads {grads_for_reward.shape}, rewards {rewards[mask].shape}")
+                    # Compute norms
+                    norms = torch.norm(grads_for_reward.reshape(grads_for_reward.shape[0], -1), dim=1).cpu().numpy()
+                    
+                    # Store individual samples (up to max)
+                    for norm_val in norms:
+                        if len(self.gradient_samples[reward_key]) < self.max_samples_per_reward:
+                            self.gradient_samples[reward_key].append((step, float(norm_val)))
+                        else:
+                            # Replace oldest sample
+                            self.gradient_samples[reward_key].pop(0)
+                            self.gradient_samples[reward_key].append((step, float(norm_val)))
+            
+            # Compute statistics for this step
+            for reward_key in ['+1', '-1', '0']:
+                # Get norms from current samples at this step
+                current_norms = [norm for s, norm in self.gradient_samples[reward_key] if s == step]
+                if len(current_norms) > 0:
+                    mean_norm = np.mean(current_norms)
+                    std_norm = np.std(current_norms) if len(current_norms) > 1 else 0.0
+                    self.gradient_norm_history[reward_key].append((step, mean_norm, std_norm))
+                    
+                    print(f"  Reward {reward_key}: {len(current_norms)} samples, "
+                          f"mean_norm={mean_norm:.6f}, std={std_norm:.6f}")
+
     
     def _cache_features(self, obs, action, next_obs):
         """Pre-compute and cache dataset features."""
@@ -1766,6 +1851,166 @@ class DistMatchingEmbeddingAgentv2:
         deviation = np.mean(np.abs(mean_probs - uniform_prob))
         return deviation
     
+    def plot_gradient_norm_by_reward(self, save_dir: str = './gradient_plots'):
+        """
+        Plot gradient norms over time, separated by reward value.
+        
+        Args:
+            save_dir: Directory to save the plot
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Check if we have data
+        has_data = any(len(self.gradient_norm_history[key]) > 0 for key in self.gradient_norm_history)
+        if not has_data:
+            print("No gradient norm history to plot yet")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        fig.suptitle('Gradient Norms by Reward Type', fontsize=16, fontweight='bold')
+        
+        colors = {'+1': 'green', '-1': 'red', '0': 'blue'}
+        labels = {'+1': 'Reward +1', '-1': 'Reward -1', '0': 'Reward 0'}
+        
+        # Plot 1: Mean gradient norms over time
+        ax1 = axes[0, 0]
+        for reward_key in ['+1', '-1', '0']:
+            if len(self.gradient_norm_history[reward_key]) > 0:
+                steps, means, stds = zip(*self.gradient_norm_history[reward_key])
+                ax1.plot(steps, means, color=colors[reward_key], linewidth=2, 
+                        label=labels[reward_key], alpha=0.8)
+                means_arr = np.array(means)
+                stds_arr = np.array(stds)
+                ax1.fill_between(steps, means_arr - stds_arr, means_arr + stds_arr, 
+                                color=colors[reward_key], alpha=0.2)
+        
+        ax1.set_xlabel('Training Steps', fontsize=11)
+        ax1.set_ylabel('Mean Gradient Norm', fontsize=11)
+        ax1.set_title('Mean Gradient Norms Over Time', fontsize=12, fontweight='bold')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Current distribution of gradient norms (latest samples)
+        ax2 = axes[0, 1]
+        current_samples = {k: [norm for _, norm in v[-50:]] for k, v in self.gradient_samples.items() if len(v) > 0}
+        
+        if any(len(samples) > 0 for samples in current_samples.values()):
+            positions = []
+            data_to_plot = []
+            tick_labels = []
+            box_colors = []
+            
+            for i, (reward_key, samples) in enumerate(current_samples.items()):
+                if len(samples) > 0:
+                    positions.append(i)
+                    data_to_plot.append(samples)
+                    tick_labels.append(labels[reward_key])
+                    box_colors.append(colors[reward_key])
+            
+            bp = ax2.boxplot(data_to_plot, positions=positions, patch_artist=True,
+                           widths=0.6, showfliers=True)
+            
+            for patch, color in zip(bp['boxes'], box_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.6)
+            
+            ax2.set_xticks(positions)
+            ax2.set_xticklabels(tick_labels)
+            ax2.set_ylabel('Gradient Norm', fontsize=11)
+            ax2.set_title('Current Gradient Norm Distribution\n(Last 50 samples per reward)', 
+                         fontsize=12, fontweight='bold')
+            ax2.grid(True, alpha=0.3, axis='y')
+        else:
+            ax2.text(0.5, 0.5, 'Not enough data yet', ha='center', va='center', 
+                    transform=ax2.transAxes, fontsize=12)
+        
+        # Plot 3: Sample counts over time
+        ax3 = axes[1, 0]
+        for reward_key in ['+1', '-1', '0']:
+            if len(self.gradient_norm_history[reward_key]) > 0:
+                steps, _, _ = zip(*self.gradient_norm_history[reward_key])
+                # Count cumulative samples at each step
+                cumulative_counts = []
+                for step in steps:
+                    count = len([s for s, _ in self.gradient_samples[reward_key] if s <= step])
+                    cumulative_counts.append(count)
+                
+                ax3.plot(steps, cumulative_counts, color=colors[reward_key], 
+                        linewidth=2, label=labels[reward_key], alpha=0.8)
+        
+        ax3.set_xlabel('Training Steps', fontsize=11)
+        ax3.set_ylabel('Cumulative Sample Count', fontsize=11)
+        ax3.set_title('Sample Collection Progress', fontsize=12, fontweight='bold')
+        ax3.legend(loc='best')
+        ax3.grid(True, alpha=0.3)
+        ax3.axhline(self.max_samples_per_reward, color='black', linestyle='--', 
+                   linewidth=1, alpha=0.5, label=f'Max ({self.max_samples_per_reward})')
+        
+        # Plot 4: Ratio comparison
+        ax4 = axes[1, 1]
+        if len(self.gradient_norm_history['+1']) > 0 and len(self.gradient_norm_history['0']) > 0:
+            # Get aligned steps
+            steps_pos = [s for s, _, _ in self.gradient_norm_history['+1']]
+            steps_zero = [s for s, _, _ in self.gradient_norm_history['0']]
+            steps_neg = [s for s, _, _ in self.gradient_norm_history['-1']]
+            
+            common_steps = sorted(set(steps_pos) & set(steps_zero))
+            
+            if len(common_steps) > 0:
+                ratios_pos_zero = []
+                for step in common_steps:
+                    mean_pos = [m for s, m, _ in self.gradient_norm_history['+1'] if s == step][0]
+                    mean_zero = [m for s, m, _ in self.gradient_norm_history['0'] if s == step][0]
+                    if mean_zero > 1e-10:
+                        ratios_pos_zero.append(mean_pos / mean_zero)
+                    else:
+                        ratios_pos_zero.append(np.nan)
+                
+                ax4.plot(common_steps, ratios_pos_zero, color='purple', linewidth=2, 
+                        label='||∇(r=+1)|| / ||∇(r=0)||', alpha=0.8)
+                ax4.axhline(1.0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+            
+            # Add negative reward ratio if available
+            common_steps_neg = sorted(set(steps_neg) & set(steps_zero))
+            if len(common_steps_neg) > 0:
+                ratios_neg_zero = []
+                for step in common_steps_neg:
+                    mean_neg = [m for s, m, _ in self.gradient_norm_history['-1'] if s == step][0]
+                    mean_zero = [m for s, m, _ in self.gradient_norm_history['0'] if s == step][0]
+                    if mean_zero > 1e-10:
+                        ratios_neg_zero.append(mean_neg / mean_zero)
+                    else:
+                        ratios_neg_zero.append(np.nan)
+                
+                ax4.plot(common_steps_neg, ratios_neg_zero, color='orange', linewidth=2,
+                        label='||∇(r=-1)|| / ||∇(r=0)||', alpha=0.8)
+            
+            ax4.set_xlabel('Training Steps', fontsize=11)
+            ax4.set_ylabel('Gradient Norm Ratio', fontsize=11)
+            ax4.set_title('Relative Gradient Magnitudes', fontsize=12, fontweight='bold')
+            ax4.legend(loc='best')
+            ax4.grid(True, alpha=0.3)
+        else:
+            ax4.text(0.5, 0.5, 'Not enough data for comparison', ha='center', va='center',
+                    transform=ax4.transAxes, fontsize=12)
+        
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, 'gradient_norms_by_reward.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Gradient norm plot saved to: {save_path}")
+        
+        # Print summary statistics
+        print("\n=== Gradient Norm Summary ===")
+        for reward_key in ['+1', '-1', '0']:
+            if len(self.gradient_samples[reward_key]) > 0:
+                norms = [norm for _, norm in self.gradient_samples[reward_key]]
+                print(f"Reward {reward_key:>2}: n={len(norms):3d}, "
+                      f"mean={np.mean(norms):.6f}, std={np.std(norms):.6f}, "
+                      f"min={np.min(norms):.6f}, max={np.max(norms):.6f}")
+
+
     def plot_policy_deviation_history(self, save_dir: str = './policy_plots'):
         """
         Plot cumulative history of policy deviation from uniform distribution.
@@ -1850,22 +2095,25 @@ class DistMatchingEmbeddingAgentv2:
             obs_list = [obs]
             action_list = [action]
             next_obs_list = [next_obs]
-            
-            # Accumula batch aggiuntivi
+            reward_list = [reward]
             for _ in range(num_batches_needed - 1):
                 batch = next(replay_iter)
-                obs_b, action_b, _, _, next_obs_b = utils.to_torch(batch, self.device)
+                obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
                 obs_list.append(obs_b)
                 action_list.append(action_b)
                 next_obs_list.append(next_obs_b)
+                reward_list.append(reward_b.reshape(-1, 1))  # Ensure reward has shape [B, 1]
             
+
             # Concatena tutti i batch
             obs_actor = torch.cat(obs_list, dim=0)
             action_actor = torch.cat(action_list, dim=0)
             next_obs_actor = torch.cat(next_obs_list, dim=0)
+            reward_actor = torch.cat(reward_list, dim=0)
 
-            # update actor
-            metrics.update(self.update_actor(obs_actor, action_actor, next_obs_actor, step))
+            # update actor (now with rewards)
+            metrics.update(self.update_actor(obs_actor, action_actor, next_obs_actor, step, rewards=reward_actor))
+
 
             # === UPDATE VISUALIZER ===
             if self.visualizer is not None:
@@ -1877,11 +2125,22 @@ class DistMatchingEmbeddingAgentv2:
                 )
                 metrics.update(vis_metrics)
                 
-                # Generate plots periodically
-                self.visualizer.plot_all(step)
+                #add text
+                  
+                param_text = (
+                    f"Step: {step}\n"
+                    f"γ = {self.discount}\n"
+                    f"η = {self.current_eta}\n"
+                    f"λ = {self.lambda_reg}\n"
+                    f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
+                    f"PMD steps = {self.pmd_steps}\n"
+                    
+                )
+                        # Generate plots periodically
+                self.visualizer.plot_all(step, param_text=param_text)
                     
                 # Generate t-SNE less frequently (expensive)
-                if step % (self.update_actor_every_steps * 1) == 0:
+                if step % (self.update_actor_every_steps * 3) == 0:
                     try:
                         self.visualizer.plot_tsne(
                             self._phi_all_obs[:, :-1],  # Remove augmented dim
@@ -1920,6 +2179,7 @@ class DistMatchingEmbeddingAgentv2:
                 print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
                 self.current_action_probs = []  # Clear after processing
             self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+            self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
     
         return metrics
 
