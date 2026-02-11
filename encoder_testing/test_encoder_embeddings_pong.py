@@ -127,6 +127,7 @@ class EncoderTester:
                 if self.has_projector:
                     embeddings = self.encoder.encode_and_project(batch)
                 else:
+                    raise ValueError("Encoder non ha metodo encode_and_project, non posso codificare osservazioni!")
                     embeddings = self.encoder(batch)
                 
                 all_embeddings.append(embeddings.cpu())

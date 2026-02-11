@@ -157,7 +157,7 @@ class ActionRepeatWrapper(gym.Wrapper):
         
         for i in range(self._num_repeats):
             obs, reward_step, terminated, truncated, info = self.env.step(action)
-            # Handle success as a termination condition in MetaWorld
+            
             done = terminated or truncated
             
             reward += reward_step * discount
@@ -526,6 +526,20 @@ class ExtendedTimeStepWrapper(gym.Wrapper):
         """Forward other attributes to the wrapped environment."""
         return getattr(self.env, name)
 
+class TerminateOnPoint(gym.Wrapper):
+    """Termina l'episodio immediatamente se il reward è -1 (punto perso)."""
+    
+    def __init__(self, env):
+        super().__init__(env)
+        
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Se reward < > 1 (cioè -1 in Pong), termina l'episodio
+        if reward != 0:
+            terminated = True
+            
+        return obs, reward, terminated, truncated, info
 
 def observation_spec(env):
     """Get observation spec of the environment for agent initialization."""
@@ -594,8 +608,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
             scale_obs=False,
         )
         action_repeat = 1  # don't repeat again later
-        state, _ = env.reset()
-    
+        env = TerminateOnPoint(env)  # Termina episodio se punto perso o guadagnato in Pong    
     
     # Assert that render_mode is 'rgb_array' if pixels observation is requested
     if obs_type == 'pixels':
@@ -610,8 +623,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     if obs_type == 'discrete_states' or type(state) == int:
         env = DiscreteObservationWrapper(env)
     
-    if url and not isinstance(env.unwrapped, ale_py.env.AtariEnv):
-        env = IgnoreSuccessTerminationWrapper(env)
+    # if url and not is_atari:
+    #     env = IgnoreSuccessTerminationWrapper(env)
     
     # Add wrappers
     if obs_type == 'pixels' and not is_atari:
