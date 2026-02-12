@@ -21,7 +21,7 @@ update_actor_after_critic_steps: 0
 
 # train settings
 num_train_frames: 500_000
-num_seed_frames: 8000
+num_seed_frames: 500
 
 # eval
 eval_every_frames: 10000
@@ -61,10 +61,11 @@ agent:
   lambda_reg: 1e-3
   embeddings: true
   curl: true
-  lr_actor: 1
-  pmd_steps: 200
-  sink_schedule: "linear(0.0001, 1, 500_000)"
+  lr_actor: 0.5
+  pmd_steps: 150
+  sink_schedule: "linear(0.0, 0.01, 500_000)"
   batch_size_actor: 5000
+  T_init_steps: 300
   embedding_sum_loss: 1
 
 hydra:

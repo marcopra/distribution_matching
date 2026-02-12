@@ -3,8 +3,10 @@
 seeds="0 1 2"
 model_path=(
     # "/home/mprattico/distribution_matching/data_offline/pong/rover/buffer"
-    "/home/mprattico/distribution_matching/data_offline/pong/cic/buffer"
-    "/home/mprattico/distribution_matching/data_offline/pong/rnd/buffer"
+    # "/home/mprattico/distribution_matching/data_offline/pong/cic/buffer"
+    # "/home/mprattico/distribution_matching/data_offline/pong/rnd/buffer"
+    "/home/mprattico/distribution_matching/data_offline/pong/random_long/buffer"
+    "/home/mprattico/distribution_matching/data_offline/pong/rover_short"
 
     )
 
