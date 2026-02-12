@@ -417,8 +417,7 @@ class Workspace:
             print(f"Loaded snapshot keys: {list(payload.keys())}")
         return payload
 
-
-@hydra.main(config_path='.', config_name='train')
+@hydra.main(config_path='configs', config_name='train/train', version_base='1.1')
 def main(cfg):
     from train import Workspace as W
     root_dir = Path.cwd()

@@ -1,7 +1,8 @@
+# @package _global_
 defaults:
-  - agent: sac_discrete
-  - configs/env: four_rooms5_3
-  - override hydra/launcher: submitit_local
+  - /agent: sac_discrete
+  - /env: four_rooms5_3
+  # - override hydra/launcher: submitit_local
 
 # mode
 reward_free: false
@@ -57,11 +58,11 @@ hydra:
   sweep:
     dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
     subdir: ${hydra.job.num}
-  launcher:
-    timeout_min: 4300
-    cpus_per_task: 10
-    gpus_per_node: 1
-    tasks_per_node: 1
-    mem_gb: 160
-    nodes: 1
-    submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm
+  # launcher:
+  #   timeout_min: 4300
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   tasks_per_node: 1
+  #   mem_gb: 160
+  #   nodes: 1
+  #   submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm

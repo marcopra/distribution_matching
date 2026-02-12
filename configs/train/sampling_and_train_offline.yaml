@@ -1,7 +1,8 @@
+# @package _global_
 defaults:
-  - agent: cql
-  - configs/env: four_rooms5_1
-  - override hydra/launcher: submitit_local
+  - /agent: cql
+  - /env: pong
+  # - override hydra/launcher: submitit_local
   
 
 # mode
@@ -11,7 +12,7 @@ domain: gym
 task_name:  ${env.name}
 obs_type: pixels # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
-action_repeat: 1 # set to 2 for pixels
+action_repeat: 4 # set to 2 for pixels
 discount: 0.99
 resolution: 84  
 random_init: true
@@ -24,7 +25,7 @@ pretrained_path: null
 # train settings
 num_train_frames: 600_000
 # num_seed_frames_array: [601, 1201, 2401, 3601, 4801, 6001, 7201, 8401, 9601, 10801, 12001, 13201, 14401, 15601, 16801, 18001, 20001] # number of seed frames for each cycle
-num_seed_frames_array: [100_000] # number of seed frames for each cycle
+num_seed_frames_array: [400_000] # number of seed frames for each cycle
 num_seed_frames: null # will be set dynamically in the code
 # eval
 eval_every_frames: 1000
@@ -61,11 +62,11 @@ hydra:
   sweep:
     dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
     subdir: ${hydra.job.num}
-  launcher:
-    timeout_min: 4300
-    cpus_per_task: 10
-    gpus_per_node: 1
-    tasks_per_node: 1
-    mem_gb: 160
-    nodes: 1
-    submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm
+  # launcher:
+  #   timeout_min: 4300
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   tasks_per_node: 1
+  #   mem_gb: 160
+  #   nodes: 1
+  #   submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm

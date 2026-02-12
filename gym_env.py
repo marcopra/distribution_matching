@@ -608,7 +608,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
             scale_obs=False,
         )
         action_repeat = 1  # don't repeat again later
-        env = TerminateOnPoint(env)  # Termina episodio se punto perso o guadagnato in Pong    
+        if url:
+            env = TerminateOnPoint(env)  # Termina episodio se punto perso o guadagnato in Pong    
     
     # Assert that render_mode is 'rgb_array' if pixels observation is requested
     if obs_type == 'pixels':

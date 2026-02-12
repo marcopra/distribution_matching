@@ -1,7 +1,8 @@
+# @package _global_
 defaults:
-  - agent: cql
-  - configs/env: four_rooms5_1
-  - override hydra/launcher: submitit_local
+  - /agent: cql
+  - /env: pong
+  # - override hydra/launcher: submitit_local
 
 # unsupervised exploration
 expl_agent: proto
@@ -9,7 +10,7 @@ expl_agent: proto
 task_name:  ${env.name}
 obs_type: pixels # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
-action_repeat: 1 # set to 2 for pixels
+action_repeat: 4 # set to 2 for pixels
 resolution: 84
 random_init: true
 random_goal: true
@@ -49,11 +50,11 @@ hydra:
   sweep:
     dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}
     subdir: ${hydra.job.num}
-  launcher:
-    timeout_min: 4300
-    cpus_per_task: 10
-    gpus_per_node: 1
-    tasks_per_node: 1
-    mem_gb: 160
-    nodes: 1
-    submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm
+  # launcher:
+  #   timeout_min: 4300
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   tasks_per_node: 1
+  #   mem_gb: 160
+  #   nodes: 1
+  #   submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm

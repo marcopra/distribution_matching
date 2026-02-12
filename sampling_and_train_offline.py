@@ -575,7 +575,7 @@ class Workspace:
         # return None
 
 
-@hydra.main(config_path='.', config_name='sampling_and_train_offline')
+@hydra.main(config_path='configs', config_name='train/sampling_and_train_offline', version_base='1.1')
 def main(cfg):
     from sampling_and_train_offline import Workspace as W
     root_dir = Path.cwd()

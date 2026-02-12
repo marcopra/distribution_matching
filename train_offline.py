@@ -76,7 +76,7 @@ def eval(global_step, agent, env, logger, num_eval_episodes, video_recorder):
         log('step', global_step)
 
 
-@hydra.main(config_path='.', config_name='train_offline')
+@hydra.main(config_path='configs', config_name='train/train_offline', version_base='1.1')
 def main(cfg):
     work_dir = Path.cwd()
     print(f'workspace: {work_dir}')
