@@ -1386,6 +1386,7 @@ class RoverAgent:
                  sink_schedule,
                  epsilon_schedule,
                  mode,
+                 reward,
                  embeddings = True,
                  device: str = "cpu",
                  ):
@@ -1413,6 +1414,7 @@ class RoverAgent:
         self.embeddings = embeddings
         self.curl = curl
         self.embedding_sum_loss = embedding_sum_loss
+        self.reward = reward
 
         self.mode = mode
         assert self.mode in ['l1', 'l2'], "Mode must be 'l1' or 'l2'"
@@ -1481,11 +1483,22 @@ class RoverAgent:
         
         self.W = nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
        
+        if self.reward:
+            self.reward = nn.Sequential(
+                nn.Linear(self.obs_dim * self.n_actions, hidden_dim), 
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, 1)
+            ).to(self.device)
+        
+        # parameter list:
+        parameters = list(self.encoder.parameters()) + [self.W]
+        if self.reward:
+            parameters += list(self.reward.parameters())
         
         # Optimizers
         if embeddings:
             self.encoder_optimizer = torch.optim.Adam(
-            list(self.encoder.parameters()) + [self.W] if self.W is not None else list(self.encoder.parameters()),
+            parameters,
             lr=lr_encoder
             )
         else:
@@ -1634,7 +1647,7 @@ class RoverAgent:
         """Check if transition learning phase is complete."""
         return step >= self.num_expl_steps + self.T_init_steps 
        
-    def update_encoders(self, obs, action, next_obs):
+    def update_encoders(self, obs, action, next_obs, reward):
         metrics = dict()
         
         # Encode
@@ -1681,6 +1694,14 @@ class RoverAgent:
         else:
             curl_loss = torch.tensor(0.0, device=self.device)
 
+        if self.reward:
+            reward_pred = self.reward(encoded_state_action).squeeze()
+            reward_loss = F.mse_loss(reward_pred, reward.to(self.device))
+        else:
+            reward_loss = torch.tensor(0.0, device=self.device)
+        metrics['reward_loss'] = reward_loss.item()
+
+
         if self.embedding_sum_loss>0:
             # Sum of embeddings loss = 1
             sum_next_obs_en = torch.sum(next_obs_en, dim=1)  # [B]
@@ -1688,7 +1709,7 @@ class RoverAgent:
         else:
             embedding_sum_loss = torch.tensor(0.0, device=self.device)
 
-        loss =  contrastive_loss + curl_loss + embedding_sum_loss
+        loss =  contrastive_loss + curl_loss + embedding_sum_loss+reward_loss
         
         # Optimize
         if self.encoder_optimizer is not None:
@@ -1700,7 +1721,7 @@ class RoverAgent:
         self.transition_optimizer.step()
 
         # Print losses
-        logging.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Total={loss.item():.4f}")
+        logging.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
@@ -2097,7 +2118,7 @@ class RoverAgent:
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
            
-        metrics.update(self.update_encoders(obs, action, next_obs))
+        metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   

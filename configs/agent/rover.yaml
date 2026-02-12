@@ -23,6 +23,7 @@ pmd_steps: 100
 sink_schedule: linear(0.0,0.04,50000)
 epsilon_schedule: 0.15
 mode: l2 # [l1, l2]
+reward: false # whether to learn a reward predictor or not
 embeddings: true  # whether to use embeddings or not, if obs_type is pixels this is always true
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
