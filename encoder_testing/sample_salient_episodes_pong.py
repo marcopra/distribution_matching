@@ -414,7 +414,6 @@ class SalientEpisodeSampler:
         
         return clip_counts
 
-
 def main():
     parser = argparse.ArgumentParser(description='Campiona clip salienti da Pong')
     parser.add_argument('--save_dir', type=str, default='./data_salient_episodes_pong',

@@ -1358,7 +1358,7 @@ class EmbeddingDistributionVisualizerV2:
 # ============================================================================
 # Main Agent
 # ============================================================================
-class DistMatchingEmbeddingAgentv2:
+class RoverAgent:
     def __init__(self,
                  name,
                  obs_type,

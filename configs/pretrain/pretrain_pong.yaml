@@ -1,0 +1,83 @@
+# @package _global_
+defaults:
+  - /agent: rover
+  - /env: pong
+  # - override hydra/launcher: submitit_local
+  
+# mode
+reward_free: true
+
+# task settings
+domain: gym
+task_name: ${env.name}
+obs_type: pixels
+frame_stack: 3
+action_repeat: 4
+discount: 0.99
+resolution: 84
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+# train settings
+num_train_frames: 40_000_000
+num_seed_frames: 8000
+
+# eval
+eval_every_frames: 10000
+num_eval_episodes: 1
+
+# snapshot
+snapshots: [500000000000]
+snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
+
+# replay buffer
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+
+# misc
+seed: 1
+device: cuda
+save_video: true
+save_train_video: false
+save_buffer: true
+use_tb: true
+use_wandb: false
+wandb_project: "pretrain_gym"
+wandb_entity: "urlb"
+wandb_tag: none
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${task_name}
+wandb_id: none
+
+# experiment
+experiment: exp
+
+# agent overrides
+agent:
+  feature_dim: 256
+  lambda_reg: 1e-3
+  embeddings: true
+  curl: true
+  lr_actor: 10
+  pmd_steps: 100
+  sink_schedule: "linear(0.0001, 1, 1_000_000)"
+  batch_size_actor: 8100
+  embedding_sum_loss: 1
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
+    subdir: ${hydra.job.num}
+  # launcher:
+  #   timeout_min: 4300
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   tasks_per_node: 1
+  #   mem_gb: 160
+  #   nodes: 1
+  #   submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm

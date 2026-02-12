@@ -316,7 +316,7 @@ class Workspace:
             payload['agent'].visualizer = visualizer_ref
 
 
-@hydra.main(config_path='.', config_name='pretrain')
+@hydra.main(config_path='configs', config_name='pretrain/pretrain_pong', version_base='1.1')
 def main(cfg):
     from pretrain import Workspace as W
     root_dir = Path.cwd()

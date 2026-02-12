@@ -1,8 +1,9 @@
+# @package _global_
 defaults:
-  - agent: dist_matching_embedding_augmented_v2
-  - configs/env: pong
-  - override hydra/launcher: submitit_local
-
+  - /agent: rover
+  - /env: multiplerooms5_4x4_0
+  # - override hydra/launcher: submitit_local
+  
 # mode
 reward_free: true
 
@@ -10,8 +11,8 @@ reward_free: true
 domain: gym
 task_name: ${env.name}
 obs_type: pixels
-frame_stack: 3
-action_repeat: 4
+frame_stack: 1
+action_repeat: 1
 discount: 0.99
 resolution: 84
 random_init: true
@@ -19,7 +20,7 @@ random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
-num_train_frames: 40_000_000
+num_train_frames: 500_000
 num_seed_frames: 8000
 
 # eval
@@ -56,14 +57,14 @@ experiment: exp
 
 # agent overrides
 agent:
-  feature_dim: 256
+  feature_dim: 200
   lambda_reg: 1e-3
   embeddings: true
   curl: true
-  lr_actor: 10
-  pmd_steps: 100
-  sink_schedule: "linear(0.0001, 1, 1_000_000)"
-  batch_size_actor: 8100
+  lr_actor: 1
+  pmd_steps: 200
+  sink_schedule: "linear(0.0001, 1, 500_000)"
+  batch_size_actor: 5000
   embedding_sum_loss: 1
 
 hydra:
@@ -72,11 +73,11 @@ hydra:
   sweep:
     dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
     subdir: ${hydra.job.num}
-  launcher:
-    timeout_min: 4300
-    cpus_per_task: 10
-    gpus_per_node: 1
-    tasks_per_node: 1
-    mem_gb: 160
-    nodes: 1
-    submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm
+  # launcher:
+  #   timeout_min: 4300
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   tasks_per_node: 1
+  #   mem_gb: 160
+  #   nodes: 1
+  #   submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm
