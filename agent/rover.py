@@ -25,7 +25,7 @@ from PIL import Image
 from sklearn.manifold import TSNE
 import logging
 # set logging lebel to info
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
 
 # ============================================================================
@@ -1450,7 +1450,8 @@ class RoverAgent:
             assert embeddings, "Pixel observations require embeddings to be True"
             self.encoder = CNNEncoder(
                 obs_shape,
-                feature_dim
+                feature_dim,
+                mode=mode
             ).to(self.device)
             
             self.obs_dim = self.feature_dim
@@ -1627,7 +1628,7 @@ class RoverAgent:
                 utils.ColorPrint.red(f"Warning: action_probs sum to zero or NaN. Returning uniform distribution. Check training stability and learning rates.{torch.sum(probs)}, {probs}")
                 probs = torch.ones_like(probs) / self.n_actions
                 # raise ValueError(f"action_probs sum to zero or NaN", torch.sum(probs), probs)
-            print(f"Action probabilities: {probs.cpu().numpy().flatten()}")
+            logging.info(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
     
@@ -1695,7 +1696,7 @@ class RoverAgent:
             curl_loss = torch.tensor(0.0, device=self.device)
 
         if self.reward:
-            reward_pred = self.reward(encoded_state_action).squeeze()
+            reward_pred = self.reward(encoded_state_action)
             reward_loss = F.mse_loss(reward_pred, reward.to(self.device))
         else:
             reward_loss = torch.tensor(0.0, device=self.device)
@@ -1721,7 +1722,7 @@ class RoverAgent:
         self.transition_optimizer.step()
 
         # Print losses
-        logging.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
+        logging.info(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
