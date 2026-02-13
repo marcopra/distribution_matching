@@ -115,7 +115,7 @@ def main(cfg):
 
     env = gym_env.make(cfg.task_name, cfg.obs_type, cfg.frame_stack,
                     cfg.action_repeat, cfg.seed, cfg.resolution, cfg.random_init, 
-                    cfg.random_goal, url=True, **env_kwargs)
+                    cfg.random_goal, url=False, **env_kwargs)
     
     
 
