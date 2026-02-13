@@ -25,9 +25,20 @@ from PIL import Image
 from sklearn.manifold import TSNE
 import logging
 # set logging level to info
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+import logging
 
+logger = logging.getLogger("myapp")
+logger.setLevel(logging.INFO)
 
+handler = logging.StreamHandler()
+handler.setLevel(logging.DEBUG)
+
+formatter = logging.Formatter(
+    "%(asctime)s - %(levelname)s - %(message)s"
+)
+handler.setFormatter(formatter)
+
+logger.addHandler(handler)
 # ============================================================================
 # Neural Network Components
 # ============================================================================
@@ -1628,7 +1639,7 @@ class RoverAgent:
                 utils.ColorPrint.red(f"Warning: action_probs sum to zero or NaN. Returning uniform distribution. Check training stability and learning rates.{torch.sum(probs)}, {probs}")
                 probs = torch.ones_like(probs) / self.n_actions
                 # raise ValueError(f"action_probs sum to zero or NaN", torch.sum(probs), probs)
-            logging.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
+            logger.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
     
@@ -1722,7 +1733,7 @@ class RoverAgent:
         self.transition_optimizer.step()
 
         # Print losses
-        logging.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
+        logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
