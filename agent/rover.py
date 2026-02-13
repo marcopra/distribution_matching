@@ -24,8 +24,8 @@ from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
 import logging
-# set logging lebel to info
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+# set logging level to info
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
 
 # ============================================================================
@@ -1628,7 +1628,7 @@ class RoverAgent:
                 utils.ColorPrint.red(f"Warning: action_probs sum to zero or NaN. Returning uniform distribution. Check training stability and learning rates.{torch.sum(probs)}, {probs}")
                 probs = torch.ones_like(probs) / self.n_actions
                 # raise ValueError(f"action_probs sum to zero or NaN", torch.sum(probs), probs)
-            logging.info(f"Action probabilities: {probs.cpu().numpy().flatten()}")
+            logging.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
     
@@ -1722,7 +1722,7 @@ class RoverAgent:
         self.transition_optimizer.step()
 
         # Print losses
-        logging.info(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
+        logging.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
         return metrics
