@@ -624,8 +624,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     if obs_type == 'discrete_states' or type(state) == int:
         env = DiscreteObservationWrapper(env)
     
-    # if url and not is_atari:
-    #     env = IgnoreSuccessTerminationWrapper(env)
+    if url and not is_atari:
+        env = IgnoreSuccessTerminationWrapper(env)
     
     # Add wrappers
     if obs_type == 'pixels' and not is_atari:
