@@ -124,9 +124,10 @@ class ProjectSA(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
         super().__init__()
         self.project_sa= nn.Sequential(
-            nn.Linear(input_dim, hidden_dim, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, output_dim, bias=False),
+            # nn.Linear(input_dim, hidden_dim, bias=False),
+            # nn.ReLU(inplace=True),
+            # nn.Linear(hidden_dim, output_dim, bias=False),
+            nn.Linear(input_dim, output_dim, bias=False)
 
         )
     
@@ -1493,7 +1494,7 @@ class RoverAgent:
             device=self.device  
         )
         
-        self.W = nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
+        self.W = None #nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
        
         if self.reward:
             self.reward = nn.Sequential(
@@ -1503,7 +1504,11 @@ class RoverAgent:
             ).to(self.device)
         
         # parameter list:
-        parameters = list(self.encoder.parameters()) + [self.W]
+        parameters = list(self.encoder.parameters()) 
+        if self.W is not None:
+            parameters+= [self.W]
+        else:
+            self.W = nn.Identity()
         if self.reward:
             parameters += list(self.reward.parameters())
         
@@ -1682,8 +1687,8 @@ class RoverAgent:
 
         # Compute loss
         # 1. Contrastive loss: 
-        Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
-        logits = torch.matmul(norm_projected_sa, Wz)  # [B, B]
+        # Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
+        logits = torch.matmul(norm_projected_sa, norm_next_obs_en.T)  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
@@ -1698,8 +1703,8 @@ class RoverAgent:
             if self.mode == 'l1':
                 z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
                 z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
-            Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
-            logits = torch.matmul(z_anchor, Wz)  # [B, B]
+            # Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
+            logits = torch.matmul(z_anchor, z_pos.T)  # [B, B]
             logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
             labels = torch.arange(logits.shape[0]).long().to(self.device)
             curl_loss = self.cross_entropy_loss(logits, labels)

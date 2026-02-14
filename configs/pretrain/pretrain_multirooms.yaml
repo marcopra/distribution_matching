@@ -61,7 +61,7 @@ agent:
   lambda_reg: 1e-3
   embeddings: true
   curl: true
-  lr_actor: 0.5
+  lr_actor: 50
   pmd_steps: 150
   sink_schedule: "linear(0.0, 0.01, 500_000)"
   batch_size_actor: 5000
