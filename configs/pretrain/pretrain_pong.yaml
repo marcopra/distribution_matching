@@ -63,7 +63,7 @@ agent:
   curl: true
   lr_actor: 10
   pmd_steps: 100
-  sink_schedule: "linear(0.0001, 1, 1_000_000)"
+  sink_schedule: "linear(0.0, 0.005, 100_000)"
   batch_size_actor: 8100
   embedding_sum_loss: 0
 
