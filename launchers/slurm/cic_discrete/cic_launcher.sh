@@ -1,9 +1,12 @@
 #!/bin/bash
 
-seeds="0 1 2"
-envs=("multiplerooms10_3x3" 
-"four_rooms10_2" 
-"two_rooms15_0")
+seeds="0" #1 2"
+envs=(
+# "multiplerooms10_3x3" 
+# "four_rooms10_2" 
+# "two_rooms15_0"
+"pong"
+)
 
 
 

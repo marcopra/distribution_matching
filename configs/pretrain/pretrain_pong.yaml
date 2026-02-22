@@ -55,17 +55,6 @@ wandb_id: none
 # experiment
 experiment: exp
 
-# agent overrides
-agent:
-  feature_dim: 256
-  lambda_reg: 1e-3
-  embeddings: true
-  curl: true
-  lr_actor: 10
-  pmd_steps: 100
-  sink_schedule: "linear(0.0, 0.005, 100_000)"
-  batch_size_actor: 8100
-  embedding_sum_loss: 0
 
 hydra:
   run:

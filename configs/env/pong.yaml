@@ -4,3 +4,6 @@
 env:
   name: "PongNoFrameskip-v4"
   render_mode: rgb_array
+
+agent:
+  feature_dim: 512

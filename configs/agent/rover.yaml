@@ -6,21 +6,21 @@ obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 lr_actor: 10 # eta
 discount: ${discount} # gamma
-lambda_reg: 1e-8
+lambda_reg: 1e-3
 lr_T: 1e-3
 batch_size: 1024
-batch_size_actor: 5000
+batch_size_actor: 8100
 nstep: 1
 lr_encoder: 1e-3
 curl: true
-embedding_sum_loss: 0.1
+embedding_sum_loss: 0.0
 hidden_dim: 1024
 feature_dim: null
 T_init_steps: 1000
 update_every_steps: 1
 update_actor_every_steps: 1500
 pmd_steps: 100
-sink_schedule: linear(0.0,0.04,100000)
+sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15
 mode: l1 # [l1, l2]
 reward: false # whether to learn a reward predictor or not

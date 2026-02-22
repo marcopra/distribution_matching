@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py agent=cic_discrete use_wandb=true eval_every_frames=20000 num_train_frames=2000000 configs/env=${ENV} device=cuda seed=${SEED} save_video=true wandb_tag="cic_discrete"
+python pretrain.py agent=cic_discrete use_wandb=true eval_every_frames=100_000 num_train_frames=8_200_000 env=${ENV} device=cuda seed=${SEED} save_video=true wandb_tag="cic_discrete" agent.feature_dim=512

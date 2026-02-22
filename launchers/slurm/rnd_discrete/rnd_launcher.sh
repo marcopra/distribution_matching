@@ -4,9 +4,10 @@ seeds="1"
 envs=(
 # "continuous_four_rooms" 
 # "continuous_multiple_rooms"
-"multiplerooms10_3x3" 
-"four_rooms5_0" 
-"two_rooms7_0"
+# "multiplerooms10_3x3" 
+# "four_rooms5_0" 
+# "two_rooms7_0"
+"pong"
 )
 obs_types=(
 "pixels"
