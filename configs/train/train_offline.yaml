@@ -19,7 +19,7 @@ discount: 0.99
 num_grad_steps: 500000
 log_every_steps: 10
 # eval
-eval_every_steps: 10000
+eval_every_steps: 5000
 num_eval_episodes: 10
 # dataset
 replay_buffer_dir: ../../../datasets # make sure to update this if you change hydra run dir
