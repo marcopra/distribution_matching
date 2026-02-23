@@ -2,9 +2,10 @@
 
 seeds="0 1 2"
 model_path=(
-    "/home/mprattico/distribution_matching/data_offline/pong/500k/cic"
-    "/home/mprattico/distribution_matching/data_offline/pong/500k/random"
-    "/home/mprattico/distribution_matching/data_offline/pong/500k/rover"
+    # "/home/mprattico/distribution_matching/data_offline/pong/100k/cic"
+    # "/home/mprattico/distribution_matching/data_offline/pong/100k/random"
+    "/home/mprattico/distribution_matching/data_offline/pong/100k/rover"
+
     )
 
 

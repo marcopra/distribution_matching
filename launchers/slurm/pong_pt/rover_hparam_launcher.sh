@@ -14,13 +14,13 @@ lr_actors=(
 #   2 -> linear(0.0, 0.1, 100_000)
 sink_idxs=(0 1 2)
 batch_sizes_actor=(
-    1000
+    # 1030
     # 5000
-    # 10000
+    10000
 )
 feature_dims=(
-    128
-    512
+    # 128
+    # 512
     1024
 )
 

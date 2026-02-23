@@ -17,4 +17,4 @@ conda activate dist_matching
 
 export HYDRA_FULL_ERROR=1
 
-python pretrain.py agent=rnd_discrete num_train_frames=2_000_000 save_train_video=true save_buffer=true frame_stack=3 configs/env=pong agent.feature_dim=256 obs_type=pixels
+python pretrain.py use_wandb=true wandb_project=rover_pong agent.lr_actor=10 agent.pmd_steps=500 eval_every_frames=100_000 num_train_frames=1_100_000 agent.update_every_steps=5 agent.update_actor_every_steps=10000 env=pong device=cuda seed=2 save_video=false wandb_tag=rover env.render_mode=rgb_array agent.batch_size_actor=8100 agent.feature_dim=512 agent.curl=false
