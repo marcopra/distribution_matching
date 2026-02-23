@@ -23,12 +23,12 @@ pretrained_path: null
 #   update_every_steps: 1
 #   nstep: 1
 # train settings
-num_train_frames: 600_000
+num_train_frames: 8_800_000
 # num_seed_frames_array: [601, 1201, 2401, 3601, 4801, 6001, 7201, 8401, 9601, 10801, 12001, 13201, 14401, 15601, 16801, 18001, 20001] # number of seed frames for each cycle
-num_seed_frames_array: [400_000] # number of seed frames for each cycle
+num_seed_frames_array: [8_500_000] # number of seed frames for each cycle
 num_seed_frames: null # will be set dynamically in the code
 # eval
-eval_every_frames: 1000
+eval_every_frames: 1_000_000
 num_eval_episodes: 5
 num_eval_dp_episodes: 10
 # pretrained
