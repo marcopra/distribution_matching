@@ -20,6 +20,14 @@ T_init_steps: 1000
 update_every_steps: 1
 update_actor_every_steps: 1500
 pmd_steps: 100
+pmd_eta_mode: none # [none, adagrad, backtracking]
+pmd_best_iterate: true
+pmd_grad_clip_norm: 0.0
+pmd_adagrad_eps: 1e-8
+pmd_eta_min: 1e-8
+pmd_eta_max: 1e3
+pmd_backtrack_factor: 0.5
+pmd_backtrack_max_trials: 8
 sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15
 mode: l1 # [l1, l2]

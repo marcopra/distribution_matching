@@ -125,7 +125,8 @@ class ProjectSA(nn.Module):
         super().__init__()
         self.project_sa= nn.Sequential(
             nn.Linear(input_dim, hidden_dim, bias=False),
-            nn.ReLU(inplace=True),
+            # nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, output_dim, bias=False),
             # nn.Linear(input_dim, output_dim, bias=False)
 
@@ -917,12 +918,12 @@ class EmbeddingDistributionVisualizerV2:
         
         nu_current = torch.zeros(self.n_states)
         if self.agent.obs_type == 'pixels':
-                # Use pre-rendered images
-                enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach() #.cpu()
+            # Use pre-rendered images
+            enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach()
         else:
             # Use one-hot encodings
             all_states = self.all_state_ids_one_hot.to(self.agent.device)
-        enc_all_states = self.agent.encoder(all_states).detach().cpu()  # [n_states, feature_dim]
+            enc_all_states = self.agent.encoder(all_states).detach()
         
         with torch.no_grad():
             # Add augmented dimension
@@ -930,13 +931,7 @@ class EmbeddingDistributionVisualizerV2:
             enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1)
             
             H = enc_all_states_aug @ self.agent._phi_all_obs.T
-            pi_all = torch.softmax(
-                -self.agent.lr_actor * (
-                    H @ (self.agent.gradient_coeff[:-1] * self.agent.E) + 
-                    torch.ones(enc_all_states_aug.shape[0], self.agent.E.shape[1]) * self.agent.gradient_coeff[-1]
-                ), 
-                dim=1
-            )
+            pi_all = self.agent._policy_from_H(H)
             
             M = H * (self.agent.E @ pi_all.T)
             
@@ -1400,6 +1395,14 @@ class RoverAgent:
                  mode,
                  reward,
                  embeddings = True,
+                 pmd_eta_mode: str = "none",
+                 pmd_best_iterate: bool = True,
+                 pmd_grad_clip_norm: float = 0.0,
+                 pmd_adagrad_eps: float = 1e-8,
+                 pmd_eta_min: float = 1e-8,
+                 pmd_eta_max: float = 1e3,
+                 pmd_backtrack_factor: float = 0.5,
+                 pmd_backtrack_max_trials: int = 8,
                  device: str = "cpu",
                  ):
 
@@ -1427,6 +1430,15 @@ class RoverAgent:
         self.curl = curl
         self.embedding_sum_loss = embedding_sum_loss
         self.reward = reward
+        self.pmd_eta_mode = pmd_eta_mode.lower()
+        assert self.pmd_eta_mode in ["none", "adagrad", "backtracking"], "pmd_eta_mode must be one of ['none', 'adagrad', 'backtracking']"
+        self.pmd_best_iterate = pmd_best_iterate
+        self.pmd_grad_clip_norm = pmd_grad_clip_norm
+        self.pmd_adagrad_eps = pmd_adagrad_eps
+        self.pmd_eta_min = pmd_eta_min
+        self.pmd_eta_max = pmd_eta_max
+        self.pmd_backtrack_factor = pmd_backtrack_factor
+        self.pmd_backtrack_max_trials = pmd_backtrack_max_trials
 
         self.mode = mode
         assert self.mode in ['l1', 'l2'], "Mode must be 'l1' or 'l2'"
@@ -1562,6 +1574,8 @@ class RoverAgent:
             '-1': [],
             '0': []
         }
+        self.current_eta = 0.0
+        self._adagrad_accum = None
     
     def insert_env(self, env):
         """
@@ -1606,6 +1620,19 @@ class RoverAgent:
         # Outer product: [B, d] ⊗ [B, |A|] -> [B, d*|A|]
         encoded_sa = torch.einsum('bd,ba->bda', encoded_obs, action_onehot)
         return encoded_sa.reshape(encoded_obs.shape[0], -1)
+
+    def _policy_logits_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute policy logits for a given kernel matrix H and PMD coefficient vector."""
+        coeff = self.gradient_coeff if coeff is None else coeff
+        if coeff is None:
+            return torch.zeros(H.shape[0], self.n_actions, device=H.device, dtype=H.dtype)
+        sink_bias = torch.ones(H.shape[0], self.E.shape[1], device=H.device, dtype=H.dtype) * coeff[-1]
+        return H @ (coeff[:-1] * self.E) + sink_bias
+
+    def _policy_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Closed-form PMD policy from logits."""
+        logits = self._policy_logits_from_H(H, coeff=coeff)
+        return torch.softmax(-logits, dim=1, dtype=torch.float32)
     
     
     def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
@@ -1632,12 +1659,7 @@ class RoverAgent:
             # Add a zero to enc_obs to account for the extra row in H
             enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), device=enc_obs.device)], dim=1)  # [1, feature_dim + 1]
             H = enc_obs_augmented @ self._phi_all_obs.T  # [1, num_unique]
-
-            if not hasattr(self, "current_eta"):
-                self.current_eta = utils.schedule(self.sink_schedule, 0)
-                utils.ColorPrint.yellow(f"Initialized sink normalization factor (eta) to {self.current_eta:.6f}")
-
-            probs = torch.softmax(-self.current_eta * (H@(self.gradient_coeff[:-1]*self.E)+ torch.ones(1, self.E.shape[1], device=enc_obs.device)*self.gradient_coeff[-1]), dim=1)  # [1, n_actions]
+            probs = self._policy_from_H(H)
 
             
             if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
@@ -1753,11 +1775,12 @@ class RoverAgent:
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
         self.K = self._psi_all @ self._psi_all.T  # [n, n]
-
-        self.current_eta = utils.schedule(self.lr_actor, step)
+        base_eta = float(utils.schedule(self.lr_actor, step))
+        base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
+        self.current_eta = base_eta
 
         sink_norm = utils.schedule(self.sink_schedule, step)
-        self.pi = torch.softmax(-self.current_eta * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1, dtype=torch.float32)  # [z_x+1, n_actions]
+        self.pi = self._policy_from_H(self.H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
         M = self.H*(self.E@self.pi.T) 
 
@@ -1771,6 +1794,12 @@ class RoverAgent:
         )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
+        best_loss = actor_loss
+        best_pi = self.pi.clone()
+        best_coeff = self.gradient_coeff.clone()
+
+        if self._adagrad_accum is None:
+            self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
             grad_update = self.distribution_matcher.compute_gradient_coefficient(
@@ -1785,28 +1814,77 @@ class RoverAgent:
             if iteration == self.pmd_steps - 1 and rewards is not None:
                 self._track_gradient_norms(grad_update, rewards, step)
 
-            self.gradient_coeff += grad_update
-         
-            self.pi = torch.softmax(-self.current_eta * (self.H.T@(self.gradient_coeff[:-1]*self.E)+ torch.ones(self._phi_all_next.shape[0], self.E.shape[1], device=self.device)*self.gradient_coeff[-1]), dim=1)  # [z_x+1, n_actions]
+            if self.pmd_grad_clip_norm > 0:
+                grad_norm = torch.linalg.norm(grad_update)
+                if grad_norm > self.pmd_grad_clip_norm:
+                    grad_update = grad_update * (self.pmd_grad_clip_norm / (grad_norm + 1e-12))
 
-            M = self.H*(self.E@self.pi.T) # [num_unique, num_unique]
+            if self.pmd_eta_mode == "adagrad":
+                grad_norm_sq = float(torch.sum(grad_update * grad_update).item())
+                self._adagrad_accum += grad_norm_sq
+                eta_t = base_eta / np.sqrt(self._adagrad_accum + self.pmd_adagrad_eps)
+                eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
+            else:
+                eta_t = base_eta
 
+            candidate_coeff = self.gradient_coeff + eta_t * grad_update
+            candidate_pi = self._policy_from_H(self.H.T, coeff=candidate_coeff)
+            candidate_M = self.H * (self.E @ candidate_pi.T)
+            candidate_nu = self.distribution_matcher.compute_nu_pi(
+                phi_all_next_obs=self._phi_all_next,
+                psi_all_obs_action=self._psi_all,
+                K=self.K,
+                M=candidate_M,
+                alpha=self._alpha,
+                sink_norm=sink_norm
+            )
+            candidate_loss = torch.linalg.norm(candidate_nu) ** 2
 
-            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
-                nu_pi = self.distribution_matcher.compute_nu_pi(
-                        phi_all_next_obs = self._phi_all_next,
-                        psi_all_obs_action= self._psi_all,
-                        K= self.K,
-                        M = M,
+            if self.pmd_eta_mode == "backtracking":
+                trial_eta = eta_t
+                trial = 0
+                while candidate_loss > actor_loss and trial < self.pmd_backtrack_max_trials:
+                    trial_eta *= self.pmd_backtrack_factor
+                    trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
+                    candidate_coeff = self.gradient_coeff + trial_eta * grad_update
+                    candidate_pi = self._policy_from_H(self.H.T, coeff=candidate_coeff)
+                    candidate_M = self.H * (self.E @ candidate_pi.T)
+                    candidate_nu = self.distribution_matcher.compute_nu_pi(
+                        phi_all_next_obs=self._phi_all_next,
+                        psi_all_obs_action=self._psi_all,
+                        K=self.K,
+                        M=candidate_M,
                         alpha=self._alpha,
                         sink_norm=sink_norm
-                )
-                actor_loss = torch.linalg.norm(nu_pi)**2
-                print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}")
+                    )
+                    candidate_loss = torch.linalg.norm(candidate_nu) ** 2
+                    trial += 1
+                eta_t = trial_eta
+
+            self.current_eta = eta_t
+            self.gradient_coeff = candidate_coeff
+            self.pi = candidate_pi
+            M = candidate_M
+            actor_loss = candidate_loss
+
+            if actor_loss < best_loss:
+                best_loss = actor_loss
+                best_pi = self.pi.clone()
+                best_coeff = self.gradient_coeff.clone()
+
+            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
+                print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
+
+        if self.pmd_best_iterate:
+            self.pi = best_pi
+            self.gradient_coeff = best_coeff
+            actor_loss = best_loss
             
 
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss
+            metrics['actor_eta'] = float(self.current_eta)
+            metrics['actor_best_loss'] = float(best_loss)
    
         return metrics
 
@@ -1887,8 +1965,6 @@ class RoverAgent:
             self._phi_all_obs = torch.cat([self._phi_all_obs, zero_col], dim=-1)
 
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
-
-    # Add these new methods to the class (after _cache_features method):
 
     def _compute_mean_action_probs_deviation(self, action_probs: np.ndarray) -> float:
         """
@@ -2237,4 +2313,3 @@ class RoverAgent:
             self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
     
         return metrics
-

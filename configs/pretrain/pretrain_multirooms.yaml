@@ -60,13 +60,13 @@ agent:
   feature_dim: 200
   lambda_reg: 1e-3
   embeddings: true
-  curl: true
+  curl: false
   lr_actor: 10
   pmd_steps: 250
   sink_schedule: "linear(0.0, 0.01, 500_000)"
   batch_size_actor: 5000
   T_init_steps: 300
-  embedding_sum_loss: 1
+  embedding_sum_loss: 0
 
 hydra:
   run:

@@ -21,6 +21,8 @@ from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 from copy import deepcopy
+import ale_py
+from omegaconf import open_dict
 
 torch.backends.cudnn.benchmark = True
 
@@ -88,6 +90,12 @@ class Workspace:
         self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
        
+        # TODO: modify the make function to work with cfg and modify inplace the cfg values, this is a temporary solution to avoid modifying the make function
+        if isinstance(self.train_env.unwrapped, ale_py.env.AtariEnv) or str(self.cfg.task_name).startswith("ALE/"):
+            # L'action repeat è gestito internamente da ALE, quindi forziamo action_repeat a 1
+            with open_dict(self.cfg):
+                self.cfg.action_repeat = 1
+    
         # TODO Remove
         self.dataset = {
             'states': np.array([]),
