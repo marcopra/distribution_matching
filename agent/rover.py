@@ -2210,7 +2210,7 @@ class RoverAgent:
     def update(self, replay_iter, step):
         metrics = dict()
 
-        if step % self.update_every_steps != 0:
+        if step % self.update_every_steps != 0 and self._is_T_sufficiently_initialized(step) is True:
             return metrics
 
         batch = next(replay_iter)
