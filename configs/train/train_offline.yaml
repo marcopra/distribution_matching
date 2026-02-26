@@ -15,6 +15,8 @@ resolution: 84
 random_init: true
 random_goal: true
 discount: 0.99
+reward_free: false
+update_actor_after_critic_steps: 0
 # train settings
 num_grad_steps: 500000
 log_every_steps: 10
@@ -29,7 +31,7 @@ batch_size: ${agent.batch_size}
 # misc
 seed: 1
 device: cuda
-save_video: true
+save_video: false
 save_train_video: false
 use_tb: true
 use_wandb: false
