@@ -1431,7 +1431,7 @@ class RoverAgent:
         self.embedding_sum_loss = embedding_sum_loss
         self.reward = reward
         self.pmd_eta_mode = pmd_eta_mode.lower()
-        assert self.pmd_eta_mode in ["none", "adagrad", "backtracking"], "pmd_eta_mode must be one of ['none', 'adagrad', 'backtracking']"
+        assert self.pmd_eta_mode in ["none", "adagrad", "backtracking", "adadiff"], "pmd_eta_mode must be one of ['none', 'adagrad', 'backtracking', 'adadiff']"
         self.pmd_best_iterate = pmd_best_iterate
         self.pmd_grad_clip_norm = pmd_grad_clip_norm
         self.pmd_adagrad_eps = pmd_adagrad_eps
@@ -1773,6 +1773,7 @@ class RoverAgent:
         self._cache_features(obs, action, next_obs)
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
+        prev_gradient_coeff = self.gradient_coeff.clone()
         self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
         self.K = self._psi_all @ self._psi_all.T  # [n, n]
         base_eta = float(utils.schedule(self.lr_actor, step))
@@ -1798,8 +1799,7 @@ class RoverAgent:
         best_pi = self.pi.clone()
         best_coeff = self.gradient_coeff.clone()
 
-        if self._adagrad_accum is None:
-            self._adagrad_accum = 0.0
+        self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
             grad_update = self.distribution_matcher.compute_gradient_coefficient(
@@ -1820,7 +1820,15 @@ class RoverAgent:
                     grad_update = grad_update * (self.pmd_grad_clip_norm / (grad_norm + 1e-12))
 
             if self.pmd_eta_mode == "adagrad":
-                grad_norm_sq = float(torch.sum(grad_update * grad_update).item())
+                # Infinite norm for mirror descent
+                grad_norm_sq = float(torch.max(grad_update * grad_update).item())
+                self._adagrad_accum += grad_norm_sq
+                eta_t = base_eta / np.sqrt(self._adagrad_accum + self.pmd_adagrad_eps)
+                eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
+            elif self.pmd_eta_mode == "adadiff":
+        
+                # Infinite norm for mirror descent
+                grad_norm_sq = float(torch.max(grad_update * grad_update - prev_gradient_coeff*prev_gradient_coeff).item())
                 self._adagrad_accum += grad_norm_sq
                 eta_t = base_eta / np.sqrt(self._adagrad_accum + self.pmd_adagrad_eps)
                 eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
@@ -1863,6 +1871,7 @@ class RoverAgent:
 
             self.current_eta = eta_t
             self.gradient_coeff = candidate_coeff
+            prev_gradient_coeff = grad_update.clone()
             self.pi = candidate_pi
             M = candidate_M
             actor_loss = candidate_loss

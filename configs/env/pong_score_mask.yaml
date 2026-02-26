@@ -1,0 +1,10 @@
+# @package _global_
+# Pong Environment Configuration
+
+env:
+  name: "PongNoFrameskip-v4"
+  render_mode: rgb_array
+  score_mask: true
+
+# agent:
+#   feature_dim: 512

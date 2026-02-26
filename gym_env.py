@@ -55,6 +55,46 @@ class ResizeRendering(gym.Wrapper):
         """Forward other attributes to the wrapped environment."""
         return getattr(self.env, name)
 
+
+class AtariScoreMaskWrapper(gym.ObservationWrapper):
+    """
+    Mask Atari score area by overwriting a top band.
+    Defaults are tuned for ALE/Pong, but can be customized per env.
+    """
+
+    DEFAULT_BANDS = {
+        "ALE/Pong-v5": 10,
+        "PongNoFrameskip-v4": 10,
+        "ALE/Breakout-v5": 12,
+        "BreakoutNoFrameskip-v4": 12,
+        "ALE/SpaceInvaders-v5": 12,
+        "SpaceInvadersNoFrameskip-v4": 12,
+    }
+
+    def __init__(self, env, band_height=None, color=255):
+        super().__init__(env)
+        self.band_height = band_height
+        self.color = color
+
+    def _resolve_band_height(self):
+        if self.band_height is not None:
+            return self.band_height
+        env_id = getattr(self.env.unwrapped, "spec", None)
+        env_name = env_id.id if env_id is not None else None
+        if env_name in self.DEFAULT_BANDS:
+            return self.DEFAULT_BANDS[env_name]
+        return 0
+
+    def observation(self, obs):
+        if not isinstance(obs, np.ndarray) or obs.ndim != 3:
+            return obs
+        band = self._resolve_band_height()
+        if band <= 0:
+            return obs
+        out = obs.copy()
+        out[:band, :, :] = self.color
+        return out
+
 class ExtendedTimeStep(NamedTuple):
     step_type: Any
     reward: Any
@@ -563,7 +603,7 @@ def action_spec(env):
         max_action = env.action_space.high[0]
         return specs.BoundedArray(shape, np.float32, min_action, max_action, 'action')
 
-def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, discretize=False, cell_size=1.0, lava=False, **kwargs):
+def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, discretize=False, cell_size=1.0, lava=False, score_mask=False, score_mask_band=None, score_mask_color=255, **kwargs):
     """
     Create a Gymnasium environment with wrappers.
     
@@ -607,6 +647,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
             grayscale_newaxis=False,           # True if grayscale and you want (84,84,1)
             scale_obs=False,
         )
+        if score_mask:
+            env = AtariScoreMaskWrapper(env, band_height=score_mask_band, color=score_mask_color)
         action_repeat = 1  # don't repeat again later
         # if url:
         #     env = TerminateOnPoint(env)  # Termina episodio se punto perso o guadagnato in Pong    
@@ -646,8 +688,6 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     env = ExtendedTimeStepWrapper(env)
     
     return env
-
-
 def make_kwargs(cfg):
     """Return default kwargs for make function."""
     env_kwargs = {}
@@ -728,3 +768,34 @@ def make_kwargs(cfg):
         env_kwargs['corridor_width'] = cfg.env.corridor_width if 'corridor_width' in cfg.env else 1
         
     return env_kwargs
+
+
+if __name__ == "__main__":
+    # Simple visual test: save a few masked Pong frames
+    test_env = make(
+        "PongNoFrameskip-v4",
+        obs_type="pixels",
+        frame_stack=1,
+        action_repeat=4,
+        resolution=84,
+        score_mask=True,
+        score_mask_band=None,
+        render_mode="rgb_array",
+    )
+
+    def to_hwc(obs):
+        if isinstance(obs, np.ndarray) and obs.ndim == 3 and obs.shape[0] in (1, 3, 4):
+            return obs.transpose(1, 2, 0)
+        return obs
+
+    time_step = test_env.reset()
+    for i in range(5):
+        if i > 0:
+            action = test_env.action_space.sample()
+            time_step = test_env.step(action)
+        obs_hwc = to_hwc(time_step.observation)
+        out_path = os.path.join(os.getcwd(), f"pong_score_mask_test_{i:02d}.png")
+        Image.fromarray(obs_hwc.astype(np.uint8)).save(out_path)
+        print(f"Saved score-masked test image to {out_path}")
+
+    test_env.close()
