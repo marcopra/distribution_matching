@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpuv
 
 cd $SLURM_SUBMIT_DIR
 
@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python train_offline.py replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong use_wandb=true seed=$SEED 
+python train_offline.py agent=ddpg_discrete replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong use_wandb=true seed=$SEED num_grad_steps=250000

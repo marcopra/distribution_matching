@@ -5,23 +5,25 @@ envs=(
     "pong"
 )
 lr_actors=(
-    10
-    50
+    # 10 
+    100
 )
 # Indices into the sink_schedules array defined in rover_hparam_base.sh:
 #   0 -> linear(0.0, 0.0001, 1_000_000)
 #   1 -> linear(0.0, 1, 1_000_000)
 #   2 -> linear(0.0, 0.1, 100_000)
-sink_idxs=(0 1 2)
+#   3 -> 0.0
+#   4 -> 1.0
+sink_idxs=(0 1 2 3 4)
 batch_sizes_actor=(
     # 1030
     # 5000
-    10000
+    8200
 )
 feature_dims=(
     # 128
     # 512
-    1024
+    2048
 )
 
 for seed in $seeds; do

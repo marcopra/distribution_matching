@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpuv
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
@@ -21,19 +21,22 @@ sink_schedules=(
     "linear(0.0, 0.0001, 1_000_000)"
     "linear(0.0, 1, 1_000_000)"
     "linear(0.0, 0.1, 100_000)"
+    "0.0"
+    "1.0"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 python pretrain.py \
     use_wandb=true \
     wandb_project="rover_pong" \
-    wandb_tag="rover_hparam" \
+    wandb_tag="rover_hparam2" \
     agent.lr_actor=${LR_ACTOR} \
-    agent.pmd_steps=500 \
-    eval_every_frames=100_000 \
-    num_train_frames=1_100_000 \
+    agent.pmd_steps=250 \
+    eval_every_frames=10_000 \
+    num_train_frames=5_000_000 \
+    agent.T_init_steps=10000 \
     agent.update_every_steps=5 \
-    agent.update_actor_every_steps=10000 \
+    agent.update_actor_every_steps=5000 \
     env=pong \
     device=cuda \
     seed=${SEED} \
@@ -42,4 +45,8 @@ python pretrain.py \
     agent.batch_size_actor=${BATCH_SIZE_ACTOR} \
     agent.curl=false \
     agent.feature_dim=${FEATURE_DIM} \
-    "agent.sink_schedule='${SINK_SCHEDULE}'"
+    agent.hidden_dim=2048 \
+    "agent.sink_schedule='${SINK_SCHEDULE}'" \
+    replay_buffer_size=1_000_000 \
+    agent.pmd_eta_mode=backtracking \
+    env=${ENV}
