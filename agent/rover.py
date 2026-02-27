@@ -1390,6 +1390,7 @@ class RoverAgent:
                  pmd_steps,
                  num_expl_steps,
                  T_init_steps,
+                 total_train_steps,
                  sink_schedule,
                  epsilon_schedule,
                  mode,
@@ -1526,10 +1527,20 @@ class RoverAgent:
         
         # Optimizers
         if embeddings:
-            self.encoder_optimizer = torch.optim.Adam(
-            parameters,
-            lr=lr_encoder
+            self.encoder_optimizer = torch.optim.AdamW(
+                parameters,
+                lr=lr_encoder,
+                weight_decay=1e-5,   # try 1e-6 to 1e-4
+                betas=(0.9, 0.999),
+                eps=1e-8
             )
+
+            # decay to 10% of initial LR over total training steps
+            self.encoder_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.encoder_optimizer,
+                T_max=total_train_steps,   # pass from config
+                eta_min=lr_encoder * 0.1)
+                        
         else:
             self.encoder_optimizer = None
         self.transition_optimizer = torch.optim.Adam(
@@ -1761,6 +1772,7 @@ class RoverAgent:
         if self.encoder_optimizer is not None:
             self.encoder_optimizer.step()
         self.transition_optimizer.step()
+        self.encoder_scheduler.step()
 
         # Print losses
         logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")

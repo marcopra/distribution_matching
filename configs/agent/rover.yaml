@@ -17,6 +17,7 @@ embedding_sum_loss: 0.0
 hidden_dim: 1024
 feature_dim: null
 T_init_steps: 1000
+total_train_steps: ${num_train_frames}
 update_every_steps: 1
 update_actor_every_steps: 1500
 pmd_steps: 100
