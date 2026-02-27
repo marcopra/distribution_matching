@@ -19,7 +19,7 @@ reward_free: false
 update_actor_after_critic_steps: 0
 # train settings
 num_grad_steps: 500000
-log_every_steps: 10
+log_every_steps: 1000
 # eval
 eval_every_steps: 5000
 num_eval_episodes: 10
