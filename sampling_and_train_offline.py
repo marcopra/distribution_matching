@@ -116,16 +116,16 @@ class Workspace:
         self.initial_agent = deepcopy(self.agent)  # make a copy of the initial agent
 
         # initialize from pretrained
-        # if cfg.pretrained_path is not None and cfg.pretrained_path != "none":
-        #     if cfg.pretrained_path.endswith('.pt'):
-        #         self.agent = self.load_sampler(cfg.pretrained_path)['agent']
-        #     elif cfg.pretrained_path.endswith('.npy'):
-        #         self.agent = DistMatchingAgent(env=self.train_env)
-        #         self.agent.load_policy_operator(cfg.pretrained_path)
-        #     print(f'Loaded pretrained agent {type(self.agent)} from: {cfg.pretrained_path}')  
-        # else:
-        #     self.agent = deepcopy(self.agent)
-        #     print(f'No pretrained agent specified, using training agent as sampling agent.')
+        if cfg.pretrained_path is not None and cfg.pretrained_path != "none":
+            if cfg.pretrained_path.endswith('.pt'):
+                self.agent = self.load_sampler(cfg.pretrained_path)['agent']
+            # elif cfg.pretrained_path.endswith('.npy'):
+            #     self.agent = DistMatchingAgent(env=self.train_env)
+            #     self.agent.load_policy_operator(cfg.pretrained_path)
+            print(f'Loaded pretrained agent {type(self.agent)} from: {cfg.pretrained_path}')  
+        else:
+            self.agent = deepcopy(self.agent)
+            print(f'No pretrained agent specified, using training agent as sampling agent.')
             
         # get meta specs
         meta_specs = self.agent.get_meta_specs()

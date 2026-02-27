@@ -1750,9 +1750,12 @@ class RoverAgent:
 
         loss =  contrastive_loss + curl_loss + embedding_sum_loss+reward_loss
         
+        max_grad_norm = 1.0
         # Optimize
         if self.encoder_optimizer is not None:
-            self.encoder_optimizer.zero_grad()
+            self.encoder_optimizer.zero_grad()      
+            torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.project_sa.parameters(), max_grad_norm)
         self.transition_optimizer.zero_grad()
         loss.backward()
         if self.encoder_optimizer is not None:
