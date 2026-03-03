@@ -1713,10 +1713,9 @@ class RoverAgent:
         # Normalize embeddings L2
         if self.mode == 'l1':
             norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-            norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
         elif self.mode == 'l2':
             norm_next_obs_en = next_obs_en
-            norm_projected_sa = projected_sa
+        norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
 
         # Compute loss
         # 1. Contrastive loss: 
@@ -1761,12 +1760,12 @@ class RoverAgent:
 
         loss =  contrastive_loss + curl_loss + embedding_sum_loss+reward_loss
         
-        max_grad_norm = 1.0
+        # max_grad_norm = 1.0
         # Optimize
         if self.encoder_optimizer is not None:
             self.encoder_optimizer.zero_grad()      
-            torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_grad_norm)
-        torch.nn.utils.clip_grad_norm_(self.project_sa.parameters(), max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_grad_norm)
+        # torch.nn.utils.clip_grad_norm_(self.project_sa.parameters(), max_grad_norm)
         self.transition_optimizer.zero_grad()
         loss.backward()
         if self.encoder_optimizer is not None:

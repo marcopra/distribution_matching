@@ -1,11 +1,11 @@
 #!/bin/bash
 
-seeds="4 5 6"
+seeds="0 1 2 3"
 model_path=(
-    # "/home/mprattico/distribution_matching/data_offline/pong/100k/cic"
-    "/home/mprattico/distribution_matching/data_offline/pong/800k/random"
-    "/home/mprattico/distribution_matching/data_offline/pong/800k/rover_sampling"
-    "/home/mprattico/distribution_matching/data_offline/pong/800k/rover"
+    "/home/mprattico/distribution_matching/data_offline/pong/100k/rover"
+    "/home/mprattico/distribution_matching/data_offline/pong/100k/random"
+    "/home/mprattico/distribution_matching/data_offline/pong/100k/cic"
+    "/home/mprattico/distribution_matching/data_offline/pong/100k/rover_sampling"
 
     )
 

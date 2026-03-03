@@ -21,8 +21,8 @@ sink_schedules=(
     "linear(0.0, 0.0001, 1_000_000)"
     "linear(0.0, 1, 1_000_000)"
     "linear(0.0, 0.1, 100_000)"
-    "0.0"
-    "1.0"
+    "linear(0.0, 0.0, 100_000)"
+    "linear(1.0, 1.0, 100_000)"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
