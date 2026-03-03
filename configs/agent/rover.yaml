@@ -7,11 +7,11 @@ action_shape: ??? # to be specified later
 lr_actor: 10 # eta
 discount: ${discount} # gamma
 lambda_reg: 1e-3
-lr_T: 1e-3
+lr_T: 1e-4
 batch_size: 1024
 batch_size_actor: 8100
 nstep: 1
-lr_encoder: 1e-3
+lr_encoder: 1e-4
 curl: true
 embedding_sum_loss: 0.0
 hidden_dim: 1024
