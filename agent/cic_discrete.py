@@ -52,11 +52,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class RMS(object):
     def __init__(self, epsilon=1e-4, shape=(1,)):
-        self.M = torch.zeros(shape).to(device)
-        self.S = torch.ones(shape).to(device)
+        self.M = torch.zeros(shape)
+        self.S = torch.ones(shape)
         self.n = epsilon
 
     def __call__(self, x):
+        if self.M.device != x.device:
+            self.M = self.M.to(x.device)
+            self.S = self.S.to(x.device)
+            
         bs = x.size(0)
         delta = torch.mean(x, dim=0) - self.M
         new_M = self.M + delta * bs / (self.n + bs)
@@ -91,13 +95,15 @@ def compute_apt_reward(source, target, args):
         if args.rms:
             moving_mean, moving_std = rms(reward)
             reward = reward / moving_std
-        reward = torch.max(reward - args.knn_clip, torch.zeros_like(reward).to(device))  # (b1, )
+        # reward = torch.max(reward - args.knn_clip, torch.zeros_like(reward).to(device))  # (b1, )
+        reward = torch.max(reward - args.knn_clip, torch.zeros_like(reward))  # (b1, )
     else:  # average over all k nearest neighbors
         reward = reward.reshape(-1, 1)  # (b1 * k, 1)
         if args.rms:
             moving_mean, moving_std = rms(reward)
             reward = reward / moving_std
-        reward = torch.max(reward - args.knn_clip, torch.zeros_like(reward).to(device))
+        # reward = torch.max(reward - args.knn_clip, torch.zeros_like(reward).to(device))
+        reward = torch.max(reward - args.knn_clip, torch.zeros_like(reward))
         reward = reward.reshape((b1, args.knn_k))  # (b1, k)
         reward = reward.mean(dim=1)  # (b1,)
     reward = torch.log(reward + 1.0)
