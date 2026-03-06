@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpuv
 
 cd $SLURM_SUBMIT_DIR
 
@@ -19,10 +19,10 @@ export HYDRA_FULL_ERROR=1
 # Decode sink_schedule from index to avoid quoting issues in sbatch --export
 sink_schedules=(
     "linear(0.0, 0.0001, 1_000_000)"
-    "linear(0.0, 1, 1_000_000)"
-    "linear(0.0, 0.1, 100_000)"
-    "linear(0.0, 0.0, 100_000)"
-    "linear(1.0, 1.0, 100_000)"
+    "linear(0.0, 0.001,  2_000_000)"
+    "linear(0.0, 1,      1_000_000)"
+    "linear(0.0, 0.0001, 500_000)"
+    "linear(1.0, 1.0,    100_000)"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
@@ -33,7 +33,7 @@ python pretrain.py \
     agent.lr_actor=${LR_ACTOR} \
     agent.pmd_steps=250 \
     eval_every_frames=10_000 \
-    num_train_frames=5_000_000 \
+    num_train_frames=1_000_000 \
     agent.T_init_steps=10000 \
     agent.update_every_steps=5 \
     agent.update_actor_every_steps=5000 \

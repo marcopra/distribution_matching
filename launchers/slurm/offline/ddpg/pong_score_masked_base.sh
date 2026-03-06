@@ -1,0 +1,21 @@
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
+#SBATCH --time=24:00:00
+#SBATCH --output=%j.out
+#SBATCH --error=%j.err
+#SBATCH --partition=gpua
+
+cd $SLURM_SUBMIT_DIR
+
+# Load environment
+source ~/.bashrc
+conda activate dist_matching
+
+
+export HYDRA_FULL_ERROR=1
+
+
+python train_offline.py agent=ddpg_discrete replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong_score_masked use_wandb=true seed=$SEED num_grad_steps=250000

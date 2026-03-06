@@ -1,8 +1,9 @@
 #!/bin/bash
 
-seeds="3"
+seeds="1"
 envs=(
     "pong"
+    # "pong_score_masked"
 )
 lr_actors=(
     # 10 
@@ -10,15 +11,16 @@ lr_actors=(
 )
 # Indices into the sink_schedules array defined in rover_hparam_base.sh:
 #   0 -> linear(0.0, 0.0001, 1_000_000)
-#   1 -> linear(0.0, 1, 1_000_000)
-#   2 -> linear(0.0, 0.1, 100_000)
-#   3 -> linear(0.0, 0.0, 100_000)
-#   4 -> linear(1.0, 1.0, 100_000)
+#   1 -> linear(0.0, 0.001,  2_000_000)
+#   2 -> linear(0.0, 1,      1_000_000)
+#   3 -> linear(0.0, 0.0001, 500_000)
+#   4 -> linear(1.0, 1.0,    100_000)
+
 sink_idxs=(0 1 2 3 4) #
 batch_sizes_actor=(
-    1030
-    # 5000
-    8200
+    # 1030
+    5000
+    # 8200
 )
 feature_dims=(
     # 128
