@@ -58,9 +58,9 @@ experiment: exp
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${experiment}_${hydra.job.id}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}_${experiment}
   sweep:
-    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}_${hydra.job.id}
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
     subdir: ${hydra.job.num}
   # launcher:
   #   timeout_min: 4300
