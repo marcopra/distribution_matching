@@ -69,7 +69,8 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "BreakoutNoFrameskip-v4": 12,
         "ALE/SpaceInvaders-v5": 12,
         "SpaceInvadersNoFrameskip-v4": 12,
-        "TennisNoFrameskip-v4" : 8
+        "TennisNoFrameskip-v4" : 8,
+        "BowlingNoFrameskip-v4" : 16
     }
 
     def __init__(self, env, band_height=None, color=255):
@@ -774,7 +775,7 @@ def make_kwargs(cfg):
 if __name__ == "__main__":
     # Simple visual test: save a few masked Pong frames
     test_env = make(
-        "TennisNoFrameskip-v4",
+        "BowlingNoFrameskip-v4",
         obs_type="pixels",
         frame_stack=1,
         action_repeat=4,
