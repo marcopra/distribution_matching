@@ -5,14 +5,21 @@ envs=(
 # "multiplerooms10_3x3" 
 # "four_rooms10_2" 
 # "two_rooms15_0"
-"pong"
+# "pong"
+# "tennis_score_masked"
+"tennis"
 )
 
+obs_types=(
+"pixels"
+# "discrete_states"
+)
 
 
 for seed in $seeds; do   
     for env in "${envs[@]}"; do
-        sbatch --export=SEED="${seed}",ENV="${env}" launchers/slurm/cic_discrete/cic_base.sh
-            
+        for obs_type in "${obs_types[@]}"; do
+            sbatch --export=SEED="${seed}",ENV="${env}",OBS_TYPE="${obs_type}" launchers/slurm/cic_discrete/cic_base.sh
+        done
     done
 done

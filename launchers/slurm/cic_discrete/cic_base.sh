@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpuv
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py agent=cic_discrete use_wandb=true eval_every_frames=100_000 num_train_frames=8_200_000 env=${ENV} device=cuda seed=${SEED} save_video=true wandb_tag="cic_discrete" agent.feature_dim=512
+python pretrain.py agent=cic_discrete use_wandb=true eval_every_frames=100_000 agent.feature_dim=512 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="cic_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines"

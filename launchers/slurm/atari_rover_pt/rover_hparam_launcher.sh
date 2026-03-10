@@ -2,8 +2,9 @@
 
 seeds="1"
 envs=(
-    "pong"
-    # "pong_score_masked"
+    # "pong"
+    "pong_score_masked"
+    "tennis_score_masked"
 )
 lr_actors=(
     # 10 
@@ -16,7 +17,7 @@ lr_actors=(
 #   3 -> linear(0.0, 0.0001, 500_000)
 #   4 -> linear(1.0, 1.0,    100_000)
 
-sink_idxs=(0 1 2 3 4) #
+sink_idxs=(1) #
 batch_sizes_actor=(
     # 1030
     5000
@@ -25,7 +26,7 @@ batch_sizes_actor=(
 feature_dims=(
     # 128
     # 512
-    # 1024
+    1024
     2048
 )
 
@@ -36,7 +37,7 @@ for seed in $seeds; do
                 for batch_size_actor in "${batch_sizes_actor[@]}"; do
                     for feature_dim in "${feature_dims[@]}"; do
                         sbatch --export=SEED="${seed}",ENV="${env}",LR_ACTOR="${lr_actor}",SINK_IDX="${sink_idx}",BATCH_SIZE_ACTOR="${batch_size_actor}",FEATURE_DIM="${feature_dim}" \
-                            launchers/slurm/pong_pt/rover_hparam_base.sh
+                            launchers/slurm/atari_rover_pt/rover_hparam_base.sh
                     done
                 done
             done

@@ -1,16 +1,13 @@
 #!/bin/bash
 
-seeds="4 5"
+seeds="0 1 2 3 4 5 6 7 8 9 10" # 3 4 5
 model_path=(
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/random"
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/rover"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/100k/random"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/100k/rover"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/500k/random"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/500k/rover"
-    # "/home/mprattico/distribution_matching/data_offline/pong/100k/random"
-    # "/home/mprattico/distribution_matching/data_offline/pong/100k/cic"
-    # "/home/mprattico/distribution_matching/data_offline/pong/100k/rover_sampling"
+    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/random"
+    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/rover"
+    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/smm"
+    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/cic"
+    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/rnd"
+    
 
     )
 

@@ -1,0 +1,9 @@
+# @package _global_
+# Pong Environment Configuration
+
+env:
+  name: "TennisNoFrameskip-v4"
+  render_mode: rgb_array
+
+# agent:
+#   feature_dim: 512

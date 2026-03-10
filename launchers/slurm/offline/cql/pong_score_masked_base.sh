@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python train_offline.py agent=ddpg_discrete replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong_score_masked use_wandb=true seed=$SEED num_grad_steps=250000
+python train_offline.py agent=cql_discrete replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong_score_masked use_wandb=true seed=$SEED num_grad_steps=250000
