@@ -3,8 +3,9 @@
 seeds="1"
 envs=(
     # "pong"
-    "pong_score_masked"
-    "tennis_score_masked"
+    # "pong_score_masked"
+    # "tennis_score_masked"
+    "bowling_score_masked"
 )
 lr_actors=(
     # 10 
@@ -25,9 +26,9 @@ batch_sizes_actor=(
 )
 feature_dims=(
     # 128
-    # 512
-    1024
-    2048
+    512
+    # 1024
+    # 2048
 )
 
 for seed in $seeds; do
