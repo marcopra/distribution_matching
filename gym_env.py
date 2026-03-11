@@ -70,7 +70,7 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "ALE/SpaceInvaders-v5": 12,
         "SpaceInvadersNoFrameskip-v4": 12,
         "TennisNoFrameskip-v4" : 8,
-        "BowlingNoFrameskip-v4" : 16
+        "BowlingNoFrameskip-v4" : 25
     }
 
     def __init__(self, env, band_height=None, color=255):
