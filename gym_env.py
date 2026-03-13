@@ -299,7 +299,7 @@ class FrameStackWrapper(gym.Wrapper):
         self.proprio_observation_space = env.observation_space
 
     def _transform_observation(self, time_step):
-        assert len(self._frames) == self._num_frames
+        assert len(self._frames) == self._num_frames, f"Expected {self._num_frames} frames in buffer, but got {len(self._frames)}"
         # Stack frames along the channel dimension (axis 0 after transpose)
         obs = np.concatenate(list(self._frames), axis=0)
         return time_step._replace(observation=obs)
@@ -684,6 +684,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     
     env = ActionRepeatWrapper(env, action_repeat, obs_type)
     
+    print(f"Action repeat wrapper applied with num_repeats={action_repeat} and obs_type={obs_type}, frame_stack={frame_stack}")
     if obs_type == 'pixels':
         env = FrameStackWrapper(env, frame_stack)
     

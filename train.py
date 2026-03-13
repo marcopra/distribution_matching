@@ -21,6 +21,8 @@ from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 import matplotlib.pyplot as plt
+import ale_py
+from omegaconf import open_dict
 
 torch.backends.cudnn.benchmark = True
 
@@ -92,12 +94,19 @@ class Workspace:
             env_kwargs = {}
         self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
+        
         self.collection_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
         
         self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
        
+        # TODO: modify the make function to work with cfg and modify inplace the cfg values, this is a temporary solution to avoid modifying the make function
+        if isinstance(self.train_env.unwrapped, ale_py.env.AtariEnv) or str(self.cfg.task_name).startswith("ALE/"):
+            # L'action repeat è gestito internamente da ALE, quindi forziamo action_repeat a 1
+            with open_dict(self.cfg):
+                self.cfg.action_repeat = 1
+
         # Get observation and action specs for the agent
         obs_spec = gym_env.observation_spec(self.collection_env)
         action_spec = gym_env.action_spec(self.collection_env)
@@ -188,6 +197,9 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
+    def _should_update_agent(self, active_env):
+        return active_env is self.train_env
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
@@ -219,16 +231,12 @@ class Workspace:
         # predicates
         train_until_step = utils.Until(self.cfg.num_train_frames,
                                        self.cfg.action_repeat)
-        seed_until_step = utils.Until(self.cfg.num_seed_frames,
-                                      self.cfg.action_repeat)
         eval_every_step = utils.Every(self.cfg.eval_every_frames,
                                       self.cfg.action_repeat)
 
         episode_step, episode_reward = 0, 0
-        if not seed_until_step(self.global_step):
-            time_step = self.train_env.reset()
-        else:
-            time_step = self.collection_env.reset()
+        active_env = self.collection_env if self.global_frame < self.cfg.num_seed_frames else self.train_env
+        time_step = active_env.reset()
         meta = self.agent.init_meta()
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)
@@ -253,10 +261,9 @@ class Workspace:
                     log('step', self.global_step)
 
                 # reset env
-                if not seed_until_step(self.global_step):
-                    time_step = self.train_env.reset()
-                else:
-                    time_step = self.collection_env.reset()
+                if active_env is self.collection_env and self.global_frame >= self.cfg.num_seed_frames:
+                    active_env = self.train_env
+                time_step = active_env.reset()
                 meta = self.agent.init_meta()
                 self.replay_storage.add(time_step, meta)
                 self.train_video_recorder.init(time_step.image_observation)
@@ -288,21 +295,18 @@ class Workspace:
                                         self.global_step,
                                         eval_mode=False)
 
-            if self.global_step > self.cfg.num_seed_frames + (self.cfg.agent.update_actor_after_critic_steps if hasattr(self.cfg.agent, "update_actor_after_critic_steps") else self.cfg.update_actor_after_critic_steps):
-                if not self.INITIAL_HEATMAP:
-                        self.visualize_dataset_heatmap("dataset_heatmap.png")
-                        self.INITIAL_HEATMAP = True
+            # if self.global_step > self.cfg.num_seed_frames + (self.cfg.agent.update_actor_after_critic_steps if hasattr(self.cfg.agent, "update_actor_after_critic_steps") else self.cfg.update_actor_after_critic_steps):
+            #     if not self.INITIAL_HEATMAP:
+            #             self.visualize_dataset_heatmap("dataset_heatmap.png")
+            #             self.INITIAL_HEATMAP = True
             # try to update the agent
-            if not seed_until_step(self.global_step):
+            if self._should_update_agent(active_env):
                 for _ in range(self.cfg.num_agent_updates_per_env_step):
                     metrics = self.agent.update(self.replay_iter, self.global_step)
                     self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
             # take env step
-            if not seed_until_step(self.global_step):
-                time_step = self.train_env.step(action)
-            else:
-                time_step = self.collection_env.step(action)
+            time_step = active_env.step(action)
             episode_reward += time_step.reward
             self.replay_storage.add(time_step, meta)
             if not self.INITIAL_HEATMAP:
@@ -417,7 +421,7 @@ class Workspace:
             print(f"Loaded snapshot keys: {list(payload.keys())}")
         return payload
 
-@hydra.main(config_path='configs', config_name='train/train', version_base='1.1')
+@hydra.main(config_path='configs', config_name='train/train_atari', version_base='1.1')
 def main(cfg):
     from train import Workspace as W
     root_dir = Path.cwd()
