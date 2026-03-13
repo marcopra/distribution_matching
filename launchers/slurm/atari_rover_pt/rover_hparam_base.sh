@@ -31,7 +31,6 @@ python pretrain.py \
     wandb_project="rover_pong" \
     wandb_tag="rover_hparam2" \
     agent.lr_actor=${LR_ACTOR} \
-    # agent.lr_encoder=3e-5 \
     agent.pmd_steps=250 \
     eval_every_frames=10_000 \
     num_train_frames=1_000_000 \

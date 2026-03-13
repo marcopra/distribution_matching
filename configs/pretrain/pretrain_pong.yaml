@@ -24,7 +24,7 @@ num_train_frames: 40_000_000
 num_seed_frames: 8000
 
 # eval
-eval_every_frames: 10000
+eval_every_frames: 25000
 num_eval_episodes: 5
 
 # snapshot
