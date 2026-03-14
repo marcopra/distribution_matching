@@ -70,7 +70,9 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "ALE/SpaceInvaders-v5": 12,
         "SpaceInvadersNoFrameskip-v4": 12,
         "TennisNoFrameskip-v4" : 8,
-        "BowlingNoFrameskip-v4" : 25
+        "BowlingNoFrameskip-v4" : 25,
+        "MarioBrosNoFrameskip-v4" : 7,
+        "ALE/MarioBros-v5" : 7
     }
 
     def __init__(self, env, band_height=None, color=255):
@@ -776,7 +778,7 @@ def make_kwargs(cfg):
 if __name__ == "__main__":
     # Simple visual test: save a few masked Pong frames
     test_env = make(
-        "BowlingNoFrameskip-v4",
+        "ALE/MarioBros-v5",
         obs_type="pixels",
         frame_stack=1,
         action_repeat=4,
@@ -784,6 +786,7 @@ if __name__ == "__main__":
         score_mask=True,
         score_mask_band=None,
         render_mode="rgb_array",
+        frameskip=1
     )
 
     def to_hwc(obs):
