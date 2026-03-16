@@ -10,7 +10,8 @@ envs=(
 # "pong"
 # "tennis_score_masked"
 # "tennis"
-"bowling_score_masked"
+# "bowling_score_masked"
+"bowling_score_masked_visible_strike"
 )
 obs_types=(
 "pixels"

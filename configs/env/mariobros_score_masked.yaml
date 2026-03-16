@@ -2,7 +2,7 @@
 # Pong Environment Configuration
 
 env:
-  name: "MarioBrosNoFrameskip-v4-v4"
+  name: "ALE/MarioBros-v5"
   render_mode: rgb_array
   score_mask: true
   frameskip: 1
