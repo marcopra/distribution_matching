@@ -21,6 +21,7 @@ from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 import matplotlib.pyplot as plt
+import seaborn as sns
 import ale_py
 from omegaconf import open_dict
 
@@ -295,10 +296,10 @@ class Workspace:
                                         self.global_step,
                                         eval_mode=False)
 
-            # if self.global_step > self.cfg.num_seed_frames + (self.cfg.agent.update_actor_after_critic_steps if hasattr(self.cfg.agent, "update_actor_after_critic_steps") else self.cfg.update_actor_after_critic_steps):
-            #     if not self.INITIAL_HEATMAP:
-            #             self.visualize_dataset_heatmap("dataset_heatmap.png")
-            #             self.INITIAL_HEATMAP = True
+            if self.global_step > self.cfg.num_seed_frames + (self.cfg.agent.update_actor_after_critic_steps if hasattr(self.cfg.agent, "update_actor_after_critic_steps") else self.cfg.update_actor_after_critic_steps):
+                if not self.INITIAL_HEATMAP:
+                        self.visualize_dataset_heatmap("dataset_heatmap.png")
+                        self.INITIAL_HEATMAP = True
             # try to update the agent
             if self._should_update_agent(active_env):
                 for _ in range(self.cfg.num_agent_updates_per_env_step):
@@ -324,6 +325,8 @@ class Workspace:
         Args:
             save_path: Path to save the heatmap
         """
+        sns.set_theme(style="white", context="paper")
+
         # Check if environment has cells attribute (grid-based environment)
         if hasattr(self.train_env.unwrapped, 'cells'):
             # Get grid dimensions
@@ -344,22 +347,32 @@ class Workspace:
             for s_idx in range(self.train_env.unwrapped.n_states):
                 x, y = self.train_env.unwrapped.idx_to_state[s_idx]
                 grid[y - min_y, x - min_x] = state_counts[s_idx]
-            
-            # Mask zero values to show background color
-            masked_grid = np.ma.masked_where(grid == 0, grid)
-            
-            fig, ax = plt.subplots(figsize=(8, 6))
-            # Set light gray background
-            ax.set_facecolor("#B2B2B2")
-            # Plot only non-zero values
-            im = ax.imshow(masked_grid, cmap='YlOrRd', interpolation='nearest')
-            ax.set_title(f'Dataset State Visitation (n={len(self.dataset["states"])})')
-            ax.set_xlabel('x')
-            ax.set_ylabel('y')
-            ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
-            ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
-            ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
-            plt.colorbar(im, ax=ax, label='Visit Count')
+
+            # Mask zero values to emphasize visited regions
+            mask = grid == 0
+
+            fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+            sns.heatmap(
+                grid,
+                mask=mask,
+                cmap='Blues',
+                linewidths=0.4,
+                linecolor='white',
+                cbar_kws={'label': 'Visit count', 'shrink': 0.85},
+                square=True,
+                ax=ax
+            )
+
+            # Put cell coordinates on ticks
+            ax.set_xticks(np.arange(grid_width) + 0.5)
+            ax.set_yticks(np.arange(grid_height) + 0.5)
+            ax.set_xticklabels(np.arange(min_x, max_x + 1), rotation=0)
+            ax.set_yticklabels(np.arange(min_y, max_y + 1), rotation=0)
+
+            ax.set_title(f'State visitation heatmap (n={len(self.dataset["states"])})')
+            ax.set_xlabel('x coordinate')
+            ax.set_ylabel('y coordinate')
+            sns.despine(ax=ax, left=False, bottom=False)
         else:
             # Continuous space: plot (x,y) coordinates as scatter plot
             states = self.dataset['states']
@@ -370,17 +383,34 @@ class Workspace:
             states = np.array(states).reshape(-1, 2)
             x_coords = states[:, 0]
             y_coords = states[:, 1]
-            
-            fig, ax = plt.subplots(figsize=(8, 6))
-            # Create scatter plot
-            ax.scatter(x_coords, y_coords, c='red', alpha=0.5, s=10)
-            ax.set_title(f'Dataset State Visitation (n={len(states)})')
-            ax.set_xlabel('x')
-            ax.set_ylabel('y')
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+
+            fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+            sns.kdeplot(
+                x=x_coords,
+                y=y_coords,
+                fill=True,
+                levels=30,
+                thresh=0.03,
+                cmap='Blues',
+                alpha=0.9,
+                ax=ax
+            )
+            sns.scatterplot(
+                x=x_coords,
+                y=y_coords,
+                s=8,
+                color='black',
+                alpha=0.25,
+                linewidth=0,
+                ax=ax
+            )
+            ax.set_title(f'State visitation density (n={len(states)})')
+            ax.set_xlabel('x coordinate')
+            ax.set_ylabel('y coordinate')
+            ax.grid(alpha=0.15, linestyle='--')
+            sns.despine(ax=ax)
+
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
     def load_snapshot(self):

@@ -19,6 +19,7 @@ class Encoder(nn.Module):
         self.temperature = 0.05
 
         # self.fc = nn.Identity()
+        # self.repr_dim = obs_shape[0] # TODO activate this for encoder identity 
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
         self.fc =  nn.Sequential(
             nn.Linear(obs_shape[0], hidden_dim, bias=False),

@@ -75,6 +75,15 @@ def eval(global_step, agent, env, logger, num_eval_episodes, video_recorder):
         log('episode_length', step / episode)
         log('step', global_step)
 
+def load_snapshot_from_path(path: str):
+        snapshot = Path(path)
+        print(f'loading snapshot from path: {os.path.abspath(snapshot)}')
+        if not snapshot.exists():
+            return None
+        with snapshot.open('rb') as f:
+            payload = torch.load(f, weights_only=False, map_location='cpu')
+            print(f"Loaded snapshot keys: {list(payload.keys())}")
+        return payload
 
 @hydra.main(config_path='configs', config_name='train/train_offline', version_base='1.1')
 def main(cfg):
@@ -130,6 +139,10 @@ def main(cfg):
                         0, 
                         cfg.agent)
     
+    if hasattr(cfg, 'encoder_path') and cfg.encoder_path is not None and cfg.encoder_path != "none":
+        pretrained_agent = load_snapshot_from_path(cfg.encoder_path)['agent']
+        agent.init_from(pretrained_agent, encoder_only=True)
+
     # get meta spec
     meta_specs = agent.get_meta_specs()
     # create replay buffer
@@ -137,7 +150,6 @@ def main(cfg):
                     action_spec,
                     specs.Array((1,), np.float32, 'reward'),
                     specs.Array((1,), np.float32, 'discount'))
-
     # create data storage
     # domain = get_domain(cfg.task)
     # datasets_dir = work_dir / cfg.replay_buffer_dir

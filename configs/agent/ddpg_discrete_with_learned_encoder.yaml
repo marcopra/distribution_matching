@@ -1,0 +1,24 @@
+# @package agent
+_target_: agent.ddpg_discrete_with_learned_encoder.DDPGAgent
+name: ddpg
+reward_free: ${reward_free}
+obs_type: ??? # to be specified later
+obs_shape: ??? # to be specified later
+action_shape: ??? # to be specified later
+device: ${device}
+actor_lr: 1e-4
+critic_lr: 1e-4
+critic_target_tau: 0.01
+update_every_steps: 2
+use_tb: ${use_tb}
+use_wandb: ${use_wandb}
+num_expl_steps: ??? # to be specified later
+update_actor_after_critic_steps: ${update_actor_after_critic_steps}
+hidden_dim: 1024
+feature_dim: 50
+eps_schedule: linear(0.3, 0.01, 200000)
+nstep: 1
+batch_size: 1024 # 256 for pixels
+init_critic: true
+linear_actor: false
+# update_encoder: ${update_encoder}
