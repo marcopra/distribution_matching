@@ -60,7 +60,8 @@ class DDPGAgent:
         if obs_type == 'pixels':
             self.aug = nn.Identity() #utils.RandomShiftsAug(pad=4)
             self.encoder = CNNEncoder(obs_shape, feature_dim=feature_dim ,mode='l1').to(device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
+            # self.obs_dim = self.encoder.repr_dim + meta_dim
+            self.obs_dim = self.feature_dim + meta_dim
         else:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
@@ -114,7 +115,7 @@ class DDPGAgent:
 
     def act(self, obs, meta, step, eval_mode):
         obs = torch.FloatTensor(obs).to(self.device)
-        obs = self.encode_and_project(obs.unsqueeze(0))
+        obs = self.encoder.encode_and_project(obs.unsqueeze(0))
         inputs = [obs]
         for value in meta.values():
             value = torch.as_tensor(value, device=self.device).unsqueeze(0)
@@ -198,7 +199,7 @@ class DDPGAgent:
 
     def aug_and_encode(self, obs):
         obs = self.aug(obs)
-        return self.encode_and_project(obs)
+        return self.encoder.encode_and_project(obs)
 
     def update(self, replay_iter, step):
         metrics = dict()
