@@ -93,12 +93,13 @@ class DDPGAgent:
         self.actor.train(training)
         self.critic.train(training)
 
-    def init_from(self, other):
+    def init_from(self, other, encoder_only=False):
         # copy parameters over
         utils.hard_update_params(other.encoder, self.encoder)
-        utils.hard_update_params(other.actor, self.actor)
-        if self.init_critic:
-            utils.hard_update_params(other.critic.trunk, self.critic.trunk)
+        if not encoder_only:
+            utils.hard_update_params(other.actor, self.actor)
+            if self.init_critic:
+                utils.hard_update_params(other.critic.trunk, self.critic.trunk)
 
     def get_meta_specs(self):
         return tuple()
