@@ -8,9 +8,10 @@ envs=(
 # "four_rooms5_0" 
 # "two_rooms7_0"
 # "pong"
-# "tennis_score_masked"
-# "bowling_score_masked"
-"mariobros_score_masked"
+"pong_score_masked"
+"tennis_score_masked"
+"bowling_score_masked"
+# "mariobros_score_masked"
 )
 obs_types=(
 "pixels"

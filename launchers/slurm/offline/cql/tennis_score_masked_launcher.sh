@@ -1,6 +1,6 @@
 #!/bin/bash
 
-seeds="0 1 2 3 4 5 6"
+seeds=" 7 8 9"
 model_path=(
     "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/random"
     "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/rover"

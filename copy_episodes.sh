@@ -3,7 +3,7 @@
 
 SRC_DIR="$1"
 DST_DIR="$2"
-MAX_TOTAL_LENGTH="${3:-100000}"
+MAX_TOTAL_LENGTH="${3:-1000000}"
 
 if [[ -z "$SRC_DIR" || -z "$DST_DIR" ]]; then
   echo "Uso: $0 <cartella_sorgente> <cartella_destinazione> [max_total_length]"

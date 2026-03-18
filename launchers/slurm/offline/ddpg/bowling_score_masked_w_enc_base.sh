@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py agent=cic_discrete use_wandb=true eval_every_frames=100_000 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="cic_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines" #agent.feature_dim=512
+python train_offline.py agent=ddpg_discrete replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=bowling_score_masked use_wandb=true seed=$SEED num_grad_steps=500000 +encoder_path="${REPLAY_BUFFER_DIR}"

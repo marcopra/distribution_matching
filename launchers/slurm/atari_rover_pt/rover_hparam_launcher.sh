@@ -3,10 +3,10 @@
 seeds="1"
 envs=(
     # "pong"
-    # "pong_score_masked"
-    # "tennis_score_masked"
-    # "bowling_score_masked"
-    "mariobros_score_masked"
+    "pong_score_masked"
+    "tennis_score_masked"
+    "bowling_score_masked"
+    # "mariobros_score_masked"
 )
 lr_actors=(
     # 10 
@@ -20,16 +20,16 @@ lr_actors=(
 #   3 -> linear(0.0, 0.0001, 500_000)
 #   4 -> linear(1.0, 1.0,    100_000)
 
-sink_idxs=( 1) #
+sink_idxs=(1) #
 batch_sizes_actor=(
     # 1030
     5000
     # 8200
 )
 feature_dims=(
-    # 64
+    50
     # 128
-    512
+    # 512
     # 1024
     # 2048
 )

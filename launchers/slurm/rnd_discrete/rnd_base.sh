@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py agent=rnd_discrete use_wandb=true eval_every_frames=100_000 agent.feature_dim=512 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="rnd_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines"
+python pretrain.py agent=rnd_discrete use_wandb=true eval_every_frames=100_000 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="rnd_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines" #agent.feature_dim=512
