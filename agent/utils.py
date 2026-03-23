@@ -22,13 +22,19 @@ class Encoder(nn.Module):
         super().__init__()
 
         assert len(obs_shape) == 3
-        self.repr_dim = 32 * 35 * 35
+        # self.repr_dim = 32 * 35 * 35
 
         self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU())
+        
+        # compute representation dimension after conv layers
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *obs_shape)
+            dummy_output = self.convnet(dummy_input)
+            self.repr_dim = dummy_output.view(1, -1).shape[1]
 
         self.apply(utils.weight_init)
 
