@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /agent: sac_discrete
-  - /env: pong
+  - /env: four_rooms5_3
   # - override hydra/launcher: submitit_local
 
 # mode
@@ -11,9 +11,9 @@ domain: gym
 task_name:  ${env.name} #FourRooms-v0
 obs_type: pixels # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
-action_repeat: 12 # set to 2 for pixels
+action_repeat: 4 # set to 2 for pixels
 discount: 0.99
-resolution: 96 
+resolution: 84  
 random_init: true
 random_goal: true
 

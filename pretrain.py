@@ -220,21 +220,23 @@ class Workspace:
             # if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
             if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
                 self._global_episode += 1
-                self.train_video_recorder.save(f'{self.global_frame}.mp4')
-                # wait until all the metrics schema is populated
-                if metrics is not None:
-                    # log stats
-                    elapsed_time, total_time = self.timer.reset()
-                    episode_frame = episode_step * self.cfg.action_repeat
-                    with self.logger.log_and_dump_ctx(self.global_frame,
-                                                      ty='train') as log:
-                        log('fps', episode_frame / elapsed_time)
-                        log('total_time', total_time)
-                        log('episode_reward', episode_reward)
-                        log('episode_length', episode_frame)
-                        log('episode', self.global_episode)
-                        log('buffer_size', len(self.replay_storage))
-                        log('step', self.global_step)
+                # Print every 10 episodes:
+                if self._global_episode % 10 == 0:
+                    self.train_video_recorder.save(f'{self.global_frame}.mp4')
+                    # wait until all the metrics schema is populated
+                    if metrics is not None:
+                        # log stats
+                        elapsed_time, total_time = self.timer.reset()
+                        episode_frame = episode_step * self.cfg.action_repeat
+                        with self.logger.log_and_dump_ctx(self.global_frame,
+                                                        ty='train') as log:
+                            log('fps', episode_frame / elapsed_time)
+                            log('total_time', total_time)
+                            log('episode_reward', episode_reward)
+                            log('episode_length', episode_frame)
+                            log('episode', self.global_episode)
+                            log('buffer_size', len(self.replay_storage))
+                            log('step', self.global_step)
 
                 if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
                     meta = self.agent.update_meta(meta, self.global_step, time_step)
@@ -323,7 +325,7 @@ class Workspace:
             payload['agent'].visualizer = visualizer_ref
 
 
-@hydra.main(config_path='configs', config_name='pretrain/pretrain_pong', version_base='1.1')
+@hydra.main(config_path='configs', config_name='pretrain/pretrain_atari', version_base='1.1')
 def main(cfg):
     from pretrain import Workspace as W
     root_dir = Path.cwd()
