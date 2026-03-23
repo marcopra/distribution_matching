@@ -1,4 +1,5 @@
 from collections import OrderedDict
+import copy
 import os
 import hydra
 import numpy as np
@@ -1500,6 +1501,9 @@ class RoverAgent:
             hidden_dim,
             self.obs_dim
         ).to(self.device)
+        self.policy_encoder = copy.deepcopy(self.encoder).to(self.device)
+        self._freeze_module(self.policy_encoder)
+        self._policy_is_synced = True
         
         self.distribution_matcher = DistributionMatcher(
             gamma=self.discount,
@@ -1610,6 +1614,7 @@ class RoverAgent:
         self.training = training
         self.encoder.train(training)
         self.project_sa.train(training)
+        self.policy_encoder.eval()
 
     def init_meta(self):
         return OrderedDict()
@@ -1631,6 +1636,27 @@ class RoverAgent:
         # Outer product: [B, d] ⊗ [B, |A|] -> [B, d*|A|]
         encoded_sa = torch.einsum('bd,ba->bda', encoded_obs, action_onehot)
         return encoded_sa.reshape(encoded_obs.shape[0], -1)
+
+    def _freeze_module(self, module: nn.Module) -> None:
+        module.eval()
+        for param in module.parameters():
+            param.requires_grad_(False)
+
+    def _sync_policy_encoder(self) -> None:
+        self.policy_encoder.load_state_dict(self.encoder.state_dict())
+        self._freeze_module(self.policy_encoder)
+        self._policy_is_synced = True
+
+    def ready_for_snapshot(self) -> bool:
+        return self._policy_is_synced
+
+    def _encode_with_module(self, module: nn.Module, obs: torch.Tensor, project: bool = False) -> torch.Tensor:
+        obs = self.aug(obs)
+        if not self.embeddings:
+            return module(obs)
+        if project:
+            return module.encode_and_project(obs)
+        return module(obs)
 
     def _policy_logits_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Compute policy logits for a given kernel matrix H and PMD coefficient vector."""
@@ -1662,7 +1688,7 @@ class RoverAgent:
                 # State observations: [x, y] -> [1, 2]
                 obs_tensor = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)  # [1, obs_dim]
             
-            enc_obs = self.aug_and_encode(obs_tensor, project=True) #.cpu()  # [1, feature_dim]
+            enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
@@ -1688,7 +1714,7 @@ class RoverAgent:
         # Compute action probabilities
         action_probs = self.compute_action_probs(obs)
         self.current_action_probs.append(action_probs)  # Store for visualization
-        
+        print(f"Step {step}: Action probabilities: {action_probs}")
         # Sample action
         return np.random.choice(self.n_actions, p=action_probs)
 
@@ -1770,6 +1796,7 @@ class RoverAgent:
         loss.backward()
         if self.encoder_optimizer is not None:
             self.encoder_optimizer.step()
+            self._policy_is_synced = False
         self.transition_optimizer.step()
         self.encoder_scheduler.step()
 
@@ -1784,7 +1811,8 @@ class RoverAgent:
         metrics = dict()
 
         # Compute features augmented
-        self._cache_features(obs, action, next_obs)
+        self._sync_policy_encoder()
+        self._cache_features(obs, action, next_obs, encoder=self.policy_encoder)
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -1957,13 +1985,14 @@ class RoverAgent:
                           f"mean_norm={mean_norm:.6f}, std={std_norm:.6f}")
 
     
-    def _cache_features(self, obs, action, next_obs):
+    def _cache_features(self, obs, action, next_obs, encoder=None):
         """Pre-compute and cache dataset features."""
+        encoder = self.encoder if encoder is None else encoder
        
         with torch.no_grad():
     
-            self._phi_all_obs = self.aug_and_encode(obs, project=True) #.cpu()
-            self._phi_all_next = self.aug_and_encode(next_obs, project=True) #.cpu()
+            self._phi_all_obs = self._encode_with_module(encoder, obs, project=True)
+            self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True)
 
             action = action #.cpu()
             self._psi_all = self._encode_state_action(self._phi_all_obs, action) #.cpu()
