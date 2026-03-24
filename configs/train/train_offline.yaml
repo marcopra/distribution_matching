@@ -10,8 +10,8 @@ expl_agent: proto
 task_name:  ${env.name}
 obs_type: pixels # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
-action_repeat: 4 # set to 2 for pixels
-resolution: 84
+action_repeat: 12 # set to 2 for pixels
+resolution: 96 
 random_init: true
 random_goal: true
 discount: 0.99
