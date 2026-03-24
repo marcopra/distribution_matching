@@ -1714,7 +1714,7 @@ class RoverAgent:
         # Compute action probabilities
         action_probs = self.compute_action_probs(obs)
         self.current_action_probs.append(action_probs)  # Store for visualization
-        print(f"Step {step}: Action probabilities: {action_probs}")
+        # print(f"Step {step}: Action probabilities: {action_probs}")
         # Sample action
         return np.random.choice(self.n_actions, p=action_probs)
 
