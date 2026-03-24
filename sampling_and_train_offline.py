@@ -23,6 +23,7 @@ from video import TrainVideoRecorder, VideoRecorder
 from copy import deepcopy
 import ale_py
 from omegaconf import open_dict
+import random
 
 torch.backends.cudnn.benchmark = True
 
@@ -264,7 +265,8 @@ class Workspace:
                                       self.cfg.action_repeat)
 
         episode_step, episode_reward = 0, 0
-        time_step = self.train_env.reset()
+        time_step = self.train_env.reset()      
+    
         meta = self.agent.init_meta()
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)
@@ -298,9 +300,11 @@ class Workspace:
                 # self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
                 # self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
                 self.train_video_recorder.init(time_step.image_observation)
-
+                #save image of the first frame of the episode
+            
                 episode_step = 0
                 episode_reward = 0
+                # exit(0)
 
             meta = self.agent.update_meta(meta, self.global_step, time_step)
 
@@ -317,8 +321,10 @@ class Workspace:
             with torch.no_grad(), utils.eval_mode(self.agent):
                 action = self.agent.act(time_step.observation,
                                         meta,
-                                        self.sampling_step,
+                                        np.inf, # self.global_step Need o reduce eps greedyness during DP eval id we use
                                         eval_mode=False)
+                # action=2
+                
             # take env step
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
