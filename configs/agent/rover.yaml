@@ -28,7 +28,7 @@ pmd_adagrad_eps: 1e-8
 pmd_eta_min: 1e-8
 pmd_eta_max: 1e3
 pmd_backtrack_factor: 0.5
-pmd_backtrack_max_trials: 8
+pmd_backtrack_max_trials: 12
 sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15
 mode: l1 # [l1, l2]

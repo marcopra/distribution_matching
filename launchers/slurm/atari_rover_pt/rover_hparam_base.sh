@@ -26,7 +26,15 @@ sink_schedules=(
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
+# If ENV starts with "montezouma", enable non-episodic intrinsic returns
+if [[ "${ENV}" == montezouma* ]]; then
+	EXTRA_FLAGS='--config-name=pretrain/pretrain_montezouma'
+else
+	EXTRA_FLAGS=''
+fi
+
 python pretrain.py \
+    $EXTRA_FLAGS \
     use_wandb=true \
     wandb_project="rover_pong" \
     wandb_tag="rover_hparam2" \
@@ -49,4 +57,5 @@ python pretrain.py \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
     replay_buffer_size=1_000_000 \
     agent.pmd_eta_mode=backtracking \
-    env=${ENV}
+    env=${ENV} \
+

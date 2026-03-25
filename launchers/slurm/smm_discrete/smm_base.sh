@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpua-longrun
 
 cd $SLURM_SUBMIT_DIR
 
@@ -17,5 +17,10 @@ conda activate dist_matching
 
 export HYDRA_FULL_ERROR=1
 
-
-python pretrain.py agent=smm_discrete use_wandb=true eval_every_frames=100_000 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="smm_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines" #agent.feature_dim=512
+# If ENV starts with "montezouma", enable non-episodic intrinsic returns
+if [[ "${ENV}" == montezouma* ]]; then
+	EXTRA_FLAGS='--config-name=pretrain/pretrain_montezouma'
+else
+	EXTRA_FLAGS=''
+fi
+python pretrain.py $EXTRA_FLAGS agent=smm_discrete use_wandb=true eval_every_frames=100_000 num_train_frames=5_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="smm_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines"  #agent.feature_dim=512

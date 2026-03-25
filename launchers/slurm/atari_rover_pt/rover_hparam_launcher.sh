@@ -5,13 +5,14 @@ envs=(
     # "pong"
     # "pong_score_masked"
     # "tennis_score_masked"
-    "bowling_score_masked"
+    # "bowling_score_masked"
     # "mariobros_score_masked"
+    "montezoumarevenge_score_masked"
 )
 lr_actors=(
     # 10 
-    100
-    # 200
+    # 100
+    200
 )
 # Indices into the sink_schedules array defined in rover_hparam_base.sh:
 #   0 -> linear(0.0, 0.0001, 1_000_000)
