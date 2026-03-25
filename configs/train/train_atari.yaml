@@ -14,6 +14,7 @@ frame_stack: 3 # only works if obs_type=pixels
 action_repeat: 12 # set to 2 for pixels
 discount: 0.99
 resolution: 96 
+grayscale: false
 random_init: true
 random_goal: true
 

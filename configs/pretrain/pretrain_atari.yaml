@@ -15,6 +15,7 @@ frame_stack: 3
 action_repeat: 12
 discount: 0.99
 resolution: 96
+grayscale: false
 random_init: true
 random_goal: true
 update_actor_after_critic_steps: 0

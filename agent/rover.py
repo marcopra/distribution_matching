@@ -842,7 +842,7 @@ class EmbeddingDistributionVisualizerV2:
             self._prerendered_states = []
             
             render_resolution = getattr(self.agent.wrapped_env, 'render_resolution', 224)
-            frame_stack = self.agent.obs_shape[0] // 3
+            frame_stack = self.agent.obs_shape[0] // self.agent.image_channels
             
             for s_idx in range(self.n_states):
                 if s_idx % 10 == 0:
@@ -850,6 +850,10 @@ class EmbeddingDistributionVisualizerV2:
                 
                 position = self.env.idx_to_state[s_idx]
                 image = self.env.render_from_position(position)
+                if self.agent.grayscale:
+                    image = np.asarray(
+                        Image.fromarray(image.astype(np.uint8)).convert('L')
+                    )[..., None]
                 
                 # Resize if needed
                 if image.shape[:2] != (render_resolution, render_resolution):
@@ -969,13 +973,17 @@ class EmbeddingDistributionVisualizerV2:
         if self.agent.obs_type == 'pixels':
             # Get render resolution and frame stack
             render_resolution = getattr(self.agent.wrapped_env, 'render_resolution', 224)
-            frame_stack = self.agent.obs_shape[0] // 3  # Assuming RGB (3 channels)
+            frame_stack = self.agent.obs_shape[0] // self.agent.image_channels
             
             # Get position from state index
             position = self.env.idx_to_state[state_idx]
             
             # Render image from position [H, W, C]
             image = self.env.render_from_position(position)
+            if self.agent.grayscale:
+                image = np.asarray(
+                    Image.fromarray(image.astype(np.uint8)).convert('L')
+                )[..., None]
             
             # Auto-resize if needed
             if image.shape[:2] != (render_resolution, render_resolution):
@@ -988,8 +996,10 @@ class EmbeddingDistributionVisualizerV2:
                 image = np.array(pil_img_resized)
             
             # Verify channels
-            if image.shape[2] != 3:
-                raise ValueError(f"Expected 3 channels (RGB), got {image.shape[2]}")
+            if image.shape[2] != self.agent.image_channels:
+                raise ValueError(
+                    f"Expected {self.agent.image_channels} image channels, got {image.shape[2]}"
+                )
             
             # Convert HWC to CHW format [C, H, W]
             image_chw = image.transpose(2, 0, 1).copy()
@@ -1371,6 +1381,7 @@ class RoverAgent:
                  name,
                  obs_type,
                  obs_shape,
+                 grayscale,
                  action_shape,
                  lr_actor,
                  discount,
@@ -1412,6 +1423,7 @@ class RoverAgent:
         self.n_actions = action_shape[0]
         self.obs_type = obs_type
         self.obs_shape = obs_shape
+        self.grayscale = grayscale
         self.feature_dim = feature_dim if feature_dim is not None else self.n_states
         self.action_dim = action_shape[0]
         self.latent_a_dim = int(self.action_dim * 1.25) + 1 # From TACO
@@ -1452,6 +1464,7 @@ class RoverAgent:
 
         self.num_expl_steps = num_expl_steps
         self.lambda_reg = lambda_reg
+        self.image_channels = 1 if self.grayscale else 3
         
         # Track unique state-action pairs from previous dataset
         self._previous_unique_pairs = set()

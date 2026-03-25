@@ -4,6 +4,17 @@ import numpy as np
 import wandb
 
 
+def _format_video_frame(frame):
+    frame = np.asarray(frame)
+    if frame.ndim == 2:
+        frame = frame[..., None]
+    if frame.ndim != 3:
+        raise ValueError(f"Expected 2D or 3D frame, got shape {frame.shape}")
+    if frame.shape[-1] == 1:
+        frame = np.repeat(frame, 3, axis=-1)
+    return frame.astype(np.uint8)
+
+
 class VideoRecorder:
     def __init__(self,
                  root_dir,
@@ -36,7 +47,7 @@ class VideoRecorder:
                                            camera_id=self.camera_id)
             else:
                 frame = env.render()
-            self.frames.append(frame)
+            self.frames.append(_format_video_frame(frame))
 
     def log_to_wandb(self):
         frames = np.transpose(np.array(self.frames), (0, 3, 1, 2))
@@ -61,6 +72,7 @@ class TrainVideoRecorder:
                  fps=20,
                  camera_id=0,
                  is_training_sample=True,
+                 grayscale=False,
                  use_wandb=False):
         if root_dir is not None:
             self.save_dir = root_dir / 'train_video'
@@ -74,6 +86,7 @@ class TrainVideoRecorder:
         self.camera_id = camera_id
         self.use_wandb = use_wandb
         self.is_training_sample = is_training_sample
+        self.grayscale = grayscale
 
     def init(self, obs, enabled=True):
         self.frames = []
@@ -83,12 +96,15 @@ class TrainVideoRecorder:
     def record(self, obs):
         if self.enabled:
             if self.is_training_sample:
-                frame = cv2.resize(obs[-3:].transpose(1, 2, 0),
-                                dsize=(self.render_size, self.render_size),
-                                interpolation=cv2.INTER_CUBIC)
+                channels = 1 if self.grayscale else 3
+                frame = cv2.resize(
+                    obs[-channels:].transpose(1, 2, 0),
+                    dsize=(self.render_size, self.render_size),
+                    interpolation=cv2.INTER_CUBIC
+                )
             else:
                 frame = obs
-            self.frames.append(frame)
+            self.frames.append(_format_video_frame(frame))
 
     def log_to_wandb(self):
         frames = np.transpose(np.array(self.frames), (0, 3, 1, 2))

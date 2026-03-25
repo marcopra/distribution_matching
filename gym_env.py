@@ -29,9 +29,10 @@ from gymnasium.wrappers import AtariPreprocessing
 
 class ResizeRendering(gym.Wrapper):
 
-    def __init__(self, env, resolution=224):
+    def __init__(self, env, resolution=224, grayscale=False):
         super().__init__(env)
         self.resolution = resolution
+        self.grayscale = grayscale
         self.render_resolution = resolution  # Expose for agent access
 
     def render(self):
@@ -39,12 +40,17 @@ class ResizeRendering(gym.Wrapper):
 
         # Convert numpy array to PIL Image
         img = Image.fromarray(img.astype(np.uint8))
+        if self.grayscale:
+            img = img.convert('L')
         
         # Resize the image
         img_resized = img.resize((self.resolution, self.resolution), Image.LANCZOS)
         
         # Convert back to numpy array
-        return np.array(img_resized)
+        img_array = np.array(img_resized)
+        if self.grayscale:
+            img_array = img_array[..., None]
+        return img_array
     
     def set_task(self, task):
         """Set the task for the environment."""
@@ -668,7 +674,7 @@ def action_spec(env):
         max_action = env.action_space.high[0]
         return specs.BoundedArray(shape, np.float32, min_action, max_action, 'action')
 
-def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, discretize=False, cell_size=1.0, lava=False, score_mask=False, score_mask_band=None, score_mask_color=255, **kwargs):
+def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, discretize=False, cell_size=1.0, lava=False, score_mask=False, score_mask_band=None, score_mask_color=255, grayscale=False, **kwargs):
     """
     Create a Gymnasium environment with wrappers.
     
@@ -708,8 +714,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
             frame_skip=action_repeat,          # your "action_repeat" becomes Atari frame-skip
             screen_size=84,
             terminal_on_life_loss=False,
-            grayscale_obs=False,               # True if you want grayscale
-            grayscale_newaxis=False,           # True if grayscale and you want (84,84,1)
+            grayscale_obs=grayscale,
+            grayscale_newaxis=grayscale,
             scale_obs=False,
         )
         if score_mask:
@@ -736,7 +742,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     
     # Add wrappers
     if obs_type == 'pixels' and not is_atari:
-        env = ResizeRendering(env, resolution=resolution)   
+        env = ResizeRendering(env, resolution=resolution, grayscale=grayscale)
     env = ActionDTypeWrapper(env, np.float32)
     
     # Add relabelling wrappers if requested
@@ -767,6 +773,8 @@ def make_kwargs(cfg):
         env_kwargs['dense_reward'] = cfg.env.dense_reward
     if hasattr(cfg.env, 'num_actions'):
         env_kwargs['num_actions'] = cfg.env.num_actions
+    if hasattr(cfg, 'grayscale'):
+        env_kwargs['grayscale'] = cfg.grayscale
         
     # Add discretization parameters
     if hasattr(cfg.env, 'discretize') and cfg.env.discretize:

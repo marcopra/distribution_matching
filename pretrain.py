@@ -32,6 +32,7 @@ def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
     cfg.obs_type = obs_type
     cfg.obs_shape = obs_spec.shape if obs_spec.shape else (1,)
     
+    
     # Determine mode based on action spec
     if hasattr(action_spec, 'num_values'):
         # Discrete action space
@@ -50,6 +51,9 @@ class Workspace:
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
+        if not hasattr(self.cfg, 'grayscale'):
+            with open_dict(self.cfg):
+                self.cfg.grayscale = False
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
 
@@ -143,6 +147,7 @@ class Workspace:
             self.work_dir if cfg.save_train_video else None,
             camera_id=0 if 'quadruped' not in self.cfg.domain else 2,
             use_wandb=self.cfg.use_wandb,
+            grayscale=self.cfg.grayscale,
             is_training_sample=False)
         
         self.snapshot_steps = cfg.snapshots

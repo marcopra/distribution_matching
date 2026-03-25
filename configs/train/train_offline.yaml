@@ -15,6 +15,7 @@ resolution: 96
 random_init: true
 random_goal: true
 discount: 0.99
+grayscale: false
 reward_free: false
 update_actor_after_critic_steps: 0
 # train settings

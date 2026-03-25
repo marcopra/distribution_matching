@@ -3,6 +3,7 @@ _target_: agent.rover.RoverAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
+grayscale: ${grayscale}
 action_shape: ??? # to be specified later
 lr_actor: 10 # eta
 discount: ${discount} # gamma
