@@ -73,7 +73,7 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "BowlingNoFrameskip-v4" : 25,
         "MarioBrosNoFrameskip-v4" : 7,
         "ALE/MarioBros-v5" : 7,
-        "ALE/MontezumaRevenge-v5" : 10,
+        "ALE/MontezumaRevenge-v5" : 0,
 
     }
 
@@ -702,14 +702,12 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     if is_atari and obs_type == "pixels":
         # IMPORTANT: base env must have frameskip=1, otherwise you double-skip [web:69]
         print(f"Applying AtariPreprocessing wrapper for {name} with action_repeat={action_repeat} and resolution={resolution}")
-        terminal_on_life_loss = True if name.startswith("ALE/MontezumaRevenge-v5") else False  # Only terminate on life loss for Pong, not for Montezuma
-        print(f"terminal_on_life_loss set to {terminal_on_life_loss} for {name}")
         env = AtariPreprocessing(
             env,
             noop_max=0,
             frame_skip=action_repeat,          # your "action_repeat" becomes Atari frame-skip
             screen_size=84,
-            terminal_on_life_loss=terminal_on_life_loss,
+            terminal_on_life_loss=False,
             grayscale_obs=False,               # True if you want grayscale
             grayscale_newaxis=False,           # True if grayscale and you want (84,84,1)
             scale_obs=False,
