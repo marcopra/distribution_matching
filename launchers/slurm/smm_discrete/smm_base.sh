@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpuv
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 

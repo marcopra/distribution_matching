@@ -152,6 +152,24 @@ class Workspace:
         self._global_episode = 0
 
     @property
+    def is_montezuma(self):
+        return 'MontezumaRevenge' in str(self.cfg.task_name)
+
+    def _get_time_step_info(self, time_step):
+        info = getattr(time_step, 'info', None)
+        return info if isinstance(info, dict) else {}
+
+    def _log_montezuma_episode_metrics(self, log, time_step):
+        if not self.is_montezuma:
+            return
+        info = self._get_time_step_info(time_step)
+        if 'montezuma_visited_second_room' in info:
+            log('montezuma_visited_second_room',
+                float(info['montezuma_visited_second_room']))
+        if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
+            log('montezuma_max_room_id', info['montezuma_max_room_id'])
+
+    @property
     def global_step(self):
         return self._global_step
 
@@ -198,6 +216,13 @@ class Workspace:
             log('episode_length', step * self.cfg.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
+            if self.is_montezuma and episode > 0:
+                info = self._get_time_step_info(time_step)
+                if 'montezuma_visited_second_room' in info:
+                    log('montezuma_visited_second_room',
+                        float(info['montezuma_visited_second_room']))
+                if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
+                    log('montezuma_max_room_id', info['montezuma_max_room_id'])
 
     def train(self):
         # predicates
@@ -237,6 +262,7 @@ class Workspace:
                             log('episode', self.global_episode)
                             log('buffer_size', len(self.replay_storage))
                             log('step', self.global_step)
+                            self._log_montezuma_episode_metrics(log, time_step)
 
                 if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
                     meta = self.agent.update_meta(meta, self.global_step, time_step)

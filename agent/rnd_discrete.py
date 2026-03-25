@@ -56,10 +56,17 @@ class RND(nn.Module):
 
 
 class RNDAgent(DDPGAgent):
-    def __init__(self, rnd_rep_dim, update_encoder, rnd_lr, rnd_scale=1., **kwargs):
+    def __init__(self,
+                 rnd_rep_dim,
+                 update_encoder,
+                 rnd_lr,
+                 rnd_scale=1.,
+                 non_episodic_intrinsic_returns=False,
+                 **kwargs):
         super().__init__(**kwargs)
         self.rnd_scale = rnd_scale
         self.update_encoder = update_encoder
+        self.non_episodic_intrinsic_returns = non_episodic_intrinsic_returns
 
         self.rnd = RND(self.obs_dim, self.hidden_dim, rnd_rep_dim,
                        self.encoder, self.aug, self.obs_shape,
@@ -119,8 +126,11 @@ class RNDAgent(DDPGAgent):
             if self.use_tb or self.use_wandb:
                 metrics['intr_reward'] = intr_reward.mean().item()
             reward = intr_reward
+            critic_discount = (torch.ones_like(discount) if self.non_episodic_intrinsic_returns
+                               else discount)
         else:
             reward = extr_reward
+            critic_discount = discount
 
         # augment and encode
         obs = self.aug_and_encode(obs)
@@ -140,7 +150,7 @@ class RNDAgent(DDPGAgent):
 
         # update critic
         metrics.update(
-            self.update_critic(obs.detach(), action, reward, discount,
+            self.update_critic(obs.detach(), action, reward, critic_discount,
                                next_obs.detach(), step))
 
         # update actor

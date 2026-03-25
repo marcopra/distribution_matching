@@ -72,7 +72,9 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "TennisNoFrameskip-v4" : 8,
         "BowlingNoFrameskip-v4" : 25,
         "MarioBrosNoFrameskip-v4" : 7,
-        "ALE/MarioBros-v5" : 7
+        "ALE/MarioBros-v5" : 7,
+        "ALE/MontezumaRevenge-v5" : 10,
+
     }
 
     def __init__(self, env, band_height=None, color=255):
@@ -108,6 +110,7 @@ class ExtendedTimeStep(NamedTuple):
     image_observation: Any
     action: Any
     success: Any = None
+    info: Any = None
 
     def first(self):
         return self.step_type == StepType.FIRST
@@ -161,18 +164,69 @@ class DiscreteObservationWrapper(gym.Wrapper):
         return getattr(self.env, name)
 
 class ActionRepeatWrapper(gym.Wrapper):
+    MONTEZUMA_ROOM_RAM_INDEX = 3
+
     def __init__(self, env, num_repeats, obs_type='pixels', data_collection=False):
         super().__init__(env)
         self._num_repeats = num_repeats
         self.data_collection = data_collection
         self.obs_type = obs_type
         self.obs_keys = None
+        self._is_montezuma = self._check_is_montezuma()
+        self._montezuma_initial_room = None
+        self._montezuma_max_room = None
+        self._montezuma_visited_second_room = False
         
         # Expose render_resolution if available
         if hasattr(env, 'render_resolution'):
             self.render_resolution = env.render_resolution
         elif hasattr(env, 'resolution'):
             self.render_resolution = env.resolution
+
+    def _check_is_montezuma(self):
+        spec = getattr(self.env.unwrapped, 'spec', None)
+        env_id = spec.id if spec is not None else ''
+        return 'MontezumaRevenge' in env_id
+
+    def _get_montezuma_room_id(self):
+        if not self._is_montezuma:
+            return None
+        ale = getattr(self.env.unwrapped, 'ale', None)
+        if ale is None:
+            return None
+        ram = ale.getRAM()
+        if ram is None or len(ram) <= self.MONTEZUMA_ROOM_RAM_INDEX:
+            return None
+        return int(ram[self.MONTEZUMA_ROOM_RAM_INDEX])
+
+    def _reset_montezuma_tracking(self):
+        room_id = self._get_montezuma_room_id()
+        self._montezuma_initial_room = room_id
+        self._montezuma_max_room = room_id
+        self._montezuma_visited_second_room = False
+        return room_id
+
+    def _update_montezuma_tracking(self):
+        room_id = self._get_montezuma_room_id()
+        if room_id is None:
+            return None
+        if self._montezuma_initial_room is None:
+            self._montezuma_initial_room = room_id
+        if self._montezuma_max_room is None:
+            self._montezuma_max_room = room_id
+        else:
+            self._montezuma_max_room = max(self._montezuma_max_room, room_id)
+        if self._montezuma_initial_room is not None and room_id != self._montezuma_initial_room:
+            self._montezuma_visited_second_room = True
+        return room_id
+
+    def _augment_info(self, info, room_id):
+        info = dict(info) if info is not None else {}
+        if self._is_montezuma:
+            info['montezuma_room_id'] = room_id
+            info['montezuma_visited_second_room'] = self._montezuma_visited_second_room
+            info['montezuma_max_room_id'] = self._montezuma_max_room
+        return info
 
     def _process_proprio_obs(self, obs):
         """Process proprioceptive observation, concatenating dict values if needed."""
@@ -198,9 +252,11 @@ class ActionRepeatWrapper(gym.Wrapper):
         discount = 1.0
         done = False
         info = {}
+        montezuma_room_id = self._get_montezuma_room_id()
         
         for i in range(self._num_repeats):
             obs, reward_step, terminated, truncated, info = self.env.step(action)
+            montezuma_room_id = self._update_montezuma_tracking()
             
             done = terminated or truncated
             
@@ -223,6 +279,7 @@ class ActionRepeatWrapper(gym.Wrapper):
             image_obs = self.env.render()
 
         proprio_obs = self._process_proprio_obs(obs)
+        info = self._augment_info(info, montezuma_room_id)
         return ExtendedTimeStep(
             step_type=step_type,
             reward=reward,
@@ -232,16 +289,19 @@ class ActionRepeatWrapper(gym.Wrapper):
             image_observation=image_obs,
             action=action,
             success=info['success'] if 'success' in info else terminated,
+            info=info,
         )
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
+        montezuma_room_id = self._reset_montezuma_tracking()
         # For Atari (or other envs where obs is already pixels), use obs directly
         if self.obs_type == 'pixels' and len(obs.shape) == 3:
             image_obs = obs
         else:
             image_obs = self.env.render()
         proprio_obs = self._process_proprio_obs(obs)
+        info = self._augment_info(info, montezuma_room_id)
         # Convert gym reset to dm_env format
         return ExtendedTimeStep(
             step_type=StepType.FIRST,
@@ -251,7 +311,8 @@ class ActionRepeatWrapper(gym.Wrapper):
             proprio_observation=proprio_obs,
             image_observation=image_obs,
             action=np.zeros(self.env.action_space.shape, dtype=self.env.action_space.dtype),
-            success=False
+            success=False,
+            info=info,
         )
     
     @property
@@ -641,12 +702,14 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     if is_atari and obs_type == "pixels":
         # IMPORTANT: base env must have frameskip=1, otherwise you double-skip [web:69]
         print(f"Applying AtariPreprocessing wrapper for {name} with action_repeat={action_repeat} and resolution={resolution}")
+        terminal_on_life_loss = True if name.startswith("ALE/MontezumaRevenge-v5") else False  # Only terminate on life loss for Pong, not for Montezuma
+        print(f"terminal_on_life_loss set to {terminal_on_life_loss} for {name}")
         env = AtariPreprocessing(
             env,
             noop_max=0,
             frame_skip=action_repeat,          # your "action_repeat" becomes Atari frame-skip
             screen_size=84,
-            terminal_on_life_loss=True,
+            terminal_on_life_loss=terminal_on_life_loss,
             grayscale_obs=False,               # True if you want grayscale
             grayscale_newaxis=False,           # True if grayscale and you want (84,84,1)
             scale_obs=False,
@@ -778,7 +841,7 @@ def make_kwargs(cfg):
 if __name__ == "__main__":
     # Simple visual test: save a few masked Pong frames
     test_env = make(
-        "ALE/MarioBros-v5",
+        "ALE/MontezumaRevenge-v5",
         obs_type="pixels",
         frame_stack=1,
         action_repeat=4,
