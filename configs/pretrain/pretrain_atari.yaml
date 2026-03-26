@@ -13,7 +13,7 @@ task_name: ${env.name}
 obs_type: pixels
 frame_stack: 3
 action_repeat: 4
-discount: 0.99
+discount: 0.999
 resolution: 84
 grayscale: true
 random_init: true

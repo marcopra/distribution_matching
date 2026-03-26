@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpuv
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
@@ -26,15 +26,9 @@ sink_schedules=(
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
-# If ENV starts with "montezouma", enable non-episodic intrinsic returns
-if [[ "${ENV}" == montezouma* ]]; then
-	EXTRA_FLAGS='--config-name=pretrain/pretrain_montezouma'
-else
-	EXTRA_FLAGS=''
-fi
 
 python pretrain.py \
-    $EXTRA_FLAGS \
+    --config-name=pretrain/pretrain_montezouma \
     use_wandb=true \
     wandb_project="rover_pong" \
     wandb_tag="rover_hparam2" \
@@ -44,7 +38,7 @@ python pretrain.py \
     num_train_frames=3_000_000 \
     agent.T_init_steps=10000 \
     agent.update_every_steps=5 \
-    agent.update_actor_every_steps=25000 \
+    agent.update_actor_every_steps=10000 \
     env=pong \
     device=cuda \
     seed=${SEED} \

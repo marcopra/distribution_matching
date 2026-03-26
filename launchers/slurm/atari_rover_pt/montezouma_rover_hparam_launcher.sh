@@ -21,7 +21,7 @@ lr_actors=(
 #   3 -> linear(0.0, 0.0001, 500_000)
 #   4 -> linear(1.0, 1.0,    100_000)
 
-sink_idxs=(0 1) #
+sink_idxs=(1) #
 batch_sizes_actor=(
     # 1030
     5000
