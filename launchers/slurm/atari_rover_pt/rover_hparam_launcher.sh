@@ -4,10 +4,10 @@ seeds="1"
 envs=(
     # "pong"
     # "pong_score_masked"
-    # "tennis_score_masked"
+    "tennis_score_masked"
     # "bowling_score_masked"
     # "mariobros_score_masked"
-    "montezoumarevenge_score_masked"
+    # "montezoumarevenge_score_masked"
 )
 lr_actors=(
     # 10 
