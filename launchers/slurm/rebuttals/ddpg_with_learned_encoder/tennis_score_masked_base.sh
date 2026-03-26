@@ -18,4 +18,8 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=tennis_score_masked use_wandb=true agent.feature_dim=128 seed=$SEED num_grad_steps=500000 +encoder_path=/home/mprattico/distribution_matching/data_offline/tennis_score_masked/grayscale/1M/rover/models/pixels/gym/dist_matching/1/snapshot.pt
+: "${REPLAY_BUFFER_DIR:?REPLAY_BUFFER_DIR is not set}"
+: "${ENCODER_PATH:?ENCODER_PATH is not set}"
+
+
+python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=tennis_score_masked use_wandb=true agent.feature_dim=128 seed=$SEED num_grad_steps=500000 +encoder_path="${ENCODER_PATH}"
