@@ -11,10 +11,10 @@ domain: gym
 task_name:  ${env.name} #FourRooms-v0
 obs_type: pixels # [discrete_states, states, pixels]
 frame_stack: 3 # only works if obs_type=pixels
-action_repeat: 12 # set to 2 for pixels
+action_repeat: 4 # set to 2 for pixels
 discount: 0.99
-resolution: 96 
-grayscale: false
+resolution: 84
+grayscale: true
 random_init: true
 random_goal: true
 
@@ -25,7 +25,7 @@ update_actor_after_critic_steps: 0
 num_agent_updates_per_env_step: 1
 # eval
 eval_every_frames: 25000
-num_eval_episodes: 10
+num_eval_episodes: 1
 # pretrained
 snapshot_ts: 0 #100000
 snapshot_base_dir: ./pretrained_models

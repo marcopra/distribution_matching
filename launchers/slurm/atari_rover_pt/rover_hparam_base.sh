@@ -44,7 +44,7 @@ python pretrain.py \
     num_train_frames=1_000_000 \
     agent.T_init_steps=10000 \
     agent.update_every_steps=5 \
-    agent.update_actor_every_steps=5000 \
+    agent.update_actor_every_steps=15000 \
     env=pong \
     device=cuda \
     seed=${SEED} \
