@@ -1,8 +1,8 @@
 from collections import deque
 from typing import Any, NamedTuple
 import os
+import minigrid
 import utils
-
 import gymnasium as gym
 from env.rooms import *
 from env.multiple_rooms import MultipleRoomsEnv
@@ -169,6 +169,170 @@ class DiscreteObservationWrapper(gym.Wrapper):
     def __getattr__(self, name):
         return getattr(self.env, name)
 
+
+class MiniGridInterfaceMixin:
+    """
+    Shared MiniGrid state metadata for wrappers.
+
+    The discrete state space enumerates agent poses `(x, y, dir)` over all non-wall
+    cells. This is exact for static-layout tasks. For tasks with mutable objects
+    such as doors or keys, callers should use pixel observations instead.
+    """
+
+    DEAD_STATE = None
+    _UNSUPPORTED_DYNAMIC_OBJECTS = {"door", "key", "ball", "box"}
+
+    def _init_minigrid_interface(self):
+        self._build_minigrid_state_space()
+
+    def _build_minigrid_state_space(self):
+        base_env = self.env.unwrapped
+        self.cells = []
+        self.state_to_idx = {}
+        self.idx_to_state = {}
+        self.plot_cells = []
+        self.plot_state_to_idx = {}
+
+        for y in range(base_env.height):
+            for x in range(base_env.width):
+                cell = base_env.grid.get(x, y)
+                if getattr(cell, "type", None) == "wall":
+                    continue
+
+                plot_cell = (x, y)
+                if plot_cell not in self.plot_state_to_idx:
+                    self.plot_state_to_idx[plot_cell] = len(self.plot_cells)
+                    self.plot_cells.append(plot_cell)
+
+                for direction in range(4):
+                    state = (x, y, direction)
+                    idx = len(self.cells)
+                    self.cells.append(state)
+                    self.state_to_idx[state] = idx
+                    self.idx_to_state[idx] = state
+
+        self.n_states = len(self.cells)
+
+    def _validate_discrete_minigrid_support(self):
+        base_env = self.env.unwrapped
+        unsupported = set()
+        for y in range(base_env.height):
+            for x in range(base_env.width):
+                cell = base_env.grid.get(x, y)
+                cell_type = getattr(cell, "type", None)
+                if cell_type in self._UNSUPPORTED_DYNAMIC_OBJECTS:
+                    unsupported.add(cell_type)
+
+        if unsupported:
+            unsupported_str = ", ".join(sorted(unsupported))
+            raise ValueError(
+                "MiniGrid discrete one-hot observations are only supported for static-layout "
+                f"tasks. Found mutable object types: {unsupported_str}. Use obs_type='pixels' instead."
+            )
+
+    def _get_minigrid_state(self):
+        base_env = self.env.unwrapped
+        pos = tuple(int(v) for v in np.asarray(base_env.agent_pos).tolist())
+        direction = int(base_env.agent_dir)
+        state = (pos[0], pos[1], direction)
+        if state not in self.state_to_idx:
+            raise KeyError(f"Agent state {state} is not part of the MiniGrid state space")
+        return state
+
+    def _augment_info(self, info):
+        info = dict(info) if info is not None else {}
+        state = self._get_minigrid_state()
+        info.setdefault("agent_position", state[:2])
+        info.setdefault("agent_direction", state[2])
+        info.setdefault("state_index", self.state_to_idx[state])
+        return info
+
+    def render_from_position(self, position):
+        """
+        Render the current MiniGrid layout from a given agent pose.
+
+        We only vary the agent pose here; the rest of the grid stays unchanged.
+        That means for environments with mutable objects this is a snapshot-based
+        debugging view rather than an exhaustive rendering of every latent state.
+        """
+        base_env = self.env.unwrapped
+        state = tuple(position)
+        if len(state) == 2:
+            state = (state[0], state[1], int(base_env.agent_dir))
+        if len(state) != 3:
+            raise ValueError(f"Expected MiniGrid state as (x, y, dir), got {position}")
+
+        original_pos = np.array(base_env.agent_pos, copy=True)
+        original_dir = int(base_env.agent_dir)
+        try:
+            base_env.agent_pos = np.array(state[:2], dtype=np.int64)
+            base_env.agent_dir = int(state[2])
+            return self.env.render()
+        finally:
+            base_env.agent_pos = original_pos
+            base_env.agent_dir = original_dir
+
+
+class MiniGridDiscreteStateWrapper(MiniGridInterfaceMixin, gym.Wrapper):
+    """Expose MiniGrid as a discrete fully observable agent-pose MDP."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self._init_minigrid_interface()
+        self._validate_discrete_minigrid_support()
+        self.observation_space = spaces.Discrete(self.n_states)
+
+    def reset(self, **kwargs):
+        _, info = self.env.reset(**kwargs)
+        state = self._get_minigrid_state()
+        return self.state_to_idx[state], self._augment_info(info)
+
+    def step(self, action):
+        _, reward, terminated, truncated, info = self.env.step(action)
+        state = self._get_minigrid_state()
+        return self.state_to_idx[state], reward, terminated, truncated, self._augment_info(info)
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
+class MiniGridTopDownObservationWrapper(MiniGridInterfaceMixin, gym.Wrapper):
+    """Return fully observable top-down RGB observations for MiniGrid."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self._init_minigrid_interface()
+        sample = None
+        try:
+            sample = self.env.render()
+        except Exception:
+            sample = None
+
+        if not isinstance(sample, np.ndarray) or sample.ndim != 3:
+            base_env = self.env.unwrapped
+            tile_size = int(getattr(base_env, "tile_size", 32))
+            sample = np.zeros(
+                (base_env.height * tile_size, base_env.width * tile_size, 3),
+                dtype=np.uint8,
+            )
+        self.observation_space = spaces.Box(
+            low=0,
+            high=255,
+            shape=sample.shape,
+            dtype=np.uint8,
+        )
+
+    def reset(self, **kwargs):
+        _, info = self.env.reset(**kwargs)
+        return self.env.render(), self._augment_info(info)
+
+    def step(self, action):
+        _, reward, terminated, truncated, info = self.env.step(action)
+        return self.env.render(), reward, terminated, truncated, self._augment_info(info)
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
 class ActionRepeatWrapper(gym.Wrapper):
     MONTEZUMA_ROOM_RAM_INDEX = 3
 
@@ -247,7 +411,12 @@ class ActionRepeatWrapper(gym.Wrapper):
             # Concatenate all values in the dictionary
             arrays = []
             for key in self.obs_keys:
-                arrays.append(obs[key].flatten())
+                value = obs[key]
+                if isinstance(value, str):
+                    # Text fields such as MiniGrid missions are not part of the numeric
+                    # proprio observation. We skip them in this generic fallback path.
+                    continue
+                arrays.append(np.asarray(value, dtype=np.float32).reshape(-1))
             assert self.obs_keys == list(obs.keys()), f"Expected keys {self.obs_keys}, but got {list(obs.keys())}"  
             return np.concatenate(arrays, dtype=np.float32)
         else:
@@ -674,6 +843,116 @@ def action_spec(env):
         max_action = env.action_space.high[0]
         return specs.BoundedArray(shape, np.float32, min_action, max_action, 'action')
 
+
+def _normalize_obs_type(obs_type):
+    if obs_type is None:
+        return obs_type
+
+    normalized = str(obs_type).strip().lower()
+    aliases = {
+        "state": "discrete_states",
+        "states": "discrete_states",
+        "discrete_state": "discrete_states",
+        "discerete_states": "discrete_states",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _is_minigrid_env(env, name):
+    spec = getattr(env.unwrapped, "spec", None)
+    env_id = getattr(spec, "id", None) or str(name)
+    module_name = getattr(env.unwrapped.__class__, "__module__", "").lower()
+    return "minigrid" in env_id.lower() or "minigrid" in module_name
+
+
+def _is_atari_env(env, name):
+    return isinstance(env.unwrapped, ale_py.env.AtariEnv) or str(name).startswith("ALE/")
+
+
+def _build_make_kwargs(name, obs_type, kwargs):
+    make_kwargs = dict(kwargs)
+    if obs_type == 'pixels' and 'render_mode' not in make_kwargs and 'minigrid' in str(name).lower():
+        make_kwargs['render_mode'] = 'rgb_array'
+    return make_kwargs
+
+
+def _wrap_atari_pixels(env, name, action_repeat, grayscale, score_mask, score_mask_band, score_mask_color, resolution):
+    print(f"Applying AtariPreprocessing wrapper for {name} with action_repeat={action_repeat} and resolution={resolution}")
+    env = AtariPreprocessing(
+        env,
+        noop_max=0,
+        frame_skip=action_repeat,
+        screen_size=84,
+        terminal_on_life_loss=False,
+        grayscale_obs=grayscale,
+        grayscale_newaxis=grayscale,
+        scale_obs=False,
+    )
+    if score_mask:
+        env = AtariScoreMaskWrapper(env, band_height=score_mask_band, color=score_mask_color)
+    return env, 1
+
+
+def _apply_family_wrappers(env, name, obs_type, action_repeat, resolution, grayscale, score_mask, score_mask_band, score_mask_color):
+    is_atari = _is_atari_env(env, name)
+    is_minigrid = _is_minigrid_env(env, name)
+
+    if is_atari and obs_type == 'pixels':
+        env, action_repeat = _wrap_atari_pixels(
+            env,
+            name,
+            action_repeat,
+            grayscale,
+            score_mask,
+            score_mask_band,
+            score_mask_color,
+            resolution,
+        )
+    elif is_minigrid:
+        if obs_type == 'pixels':
+            env = ResizeRendering(env, resolution=resolution, grayscale=grayscale)
+            env = MiniGridTopDownObservationWrapper(env)
+        elif obs_type == 'discrete_states':
+            env = MiniGridDiscreteStateWrapper(env)
+            env = DiscreteObservationWrapper(env)
+
+    return env, action_repeat, is_atari, is_minigrid
+
+
+def _reset_for_observation_detection(env, seed):
+    if seed is not None:
+        return env.reset(seed=seed)
+    return env.reset()
+
+
+def _maybe_wrap_discrete_observation(env, obs_type, is_minigrid, initial_state):
+    if not is_minigrid and (obs_type == 'discrete_states' or isinstance(initial_state, (int, np.integer))):
+        return DiscreteObservationWrapper(env)
+    return env
+
+
+def _apply_common_wrappers(env, name, obs_type, action_repeat, frame_stack, resolution, grayscale, url, is_atari, is_minigrid, enable_relabelling):
+    if url and not is_atari:
+        env = IgnoreSuccessTerminationWrapper(env)
+
+    if obs_type == 'pixels' and not is_atari and not is_minigrid:
+        env = ResizeRendering(env, resolution=resolution, grayscale=grayscale)
+
+    env = ActionDTypeWrapper(env, np.float32)
+
+    if enable_relabelling:
+        assert name.startswith('PointMaze'), "Relabelling wrappers are only implemented for PointMaze environments"
+        env = PhysicsStateWrapper(env)
+        env = RewardSpecWrapper(env)
+
+    env = ActionRepeatWrapper(env, action_repeat, obs_type)
+
+    print(f"Action repeat wrapper applied with num_repeats={action_repeat} and obs_type={obs_type}, frame_stack={frame_stack}")
+    if obs_type == 'pixels':
+        env = FrameStackWrapper(env, frame_stack)
+
+    return ExtendedTimeStepWrapper(env)
+
 def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, random_init=True, randomize_goal=True, enable_relabelling=False, url = False, discretize=False, cell_size=1.0, lava=False, score_mask=False, score_mask_band=None, score_mask_color=255, grayscale=False, **kwargs):
     """
     Create a Gymnasium environment with wrappers.
@@ -694,72 +973,42 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     Returns:
         Wrapped environment
     """
-    
-    
-    env = gym.make(name, **kwargs)
-    
-    # # Apply discretization wrapper for continuous environments
-    # if discretize:
-    #     env = DiscretizedContinuousEnv(env, cell_size=cell_size, lava=lava)
+    obs_type = _normalize_obs_type(obs_type)
+    make_kwargs = _build_make_kwargs(name, obs_type, kwargs)
+    env = gym.make(name, **make_kwargs)
+    env, action_repeat, is_atari, is_minigrid = _apply_family_wrappers(
+        env,
+        name,
+        obs_type,
+        action_repeat,
+        resolution,
+        grayscale,
+        score_mask,
+        score_mask_band,
+        score_mask_color,
+    )
 
-    is_atari = isinstance(env.unwrapped, ale_py.env.AtariEnv) or str(name).startswith("ALE/")
-
-    # If Atari pixels: use AtariPreprocessing instead of custom ResizeRendering + ActionRepeat
-    if is_atari and obs_type == "pixels":
-        # IMPORTANT: base env must have frameskip=1, otherwise you double-skip [web:69]
-        print(f"Applying AtariPreprocessing wrapper for {name} with action_repeat={action_repeat} and resolution={resolution}")
-        env = AtariPreprocessing(
-            env,
-            noop_max=0,
-            frame_skip=action_repeat,          # your "action_repeat" becomes Atari frame-skip
-            screen_size=84,
-            terminal_on_life_loss=False,
-            grayscale_obs=grayscale,
-            grayscale_newaxis=grayscale,
-            scale_obs=False,
-        )
-        if score_mask:
-            env = AtariScoreMaskWrapper(env, band_height=score_mask_band, color=score_mask_color)
-        action_repeat = 1  # don't repeat again later
-        # if url:
-        #     env = TerminateOnPoint(env)  # Termina episodio se punto perso o guadagnato in Pong    
-    
     # Assert that render_mode is 'rgb_array' if pixels observation is requested
     if obs_type == 'pixels':
         assert env.render_mode == 'rgb_array', \
             f"render_mode must be 'rgb_array' for pixel observations, got {env.render_mode}"
 
-    if seed is not None:
-        state, _ = env.reset(seed=seed)
-    else:
-        state, _ = env.reset()
+    state, _ = _reset_for_observation_detection(env, seed)
+    env = _maybe_wrap_discrete_observation(env, obs_type, is_minigrid, state)
 
-    if obs_type == 'discrete_states' or type(state) == int:
-        env = DiscreteObservationWrapper(env)
-    
-    if url and not is_atari:
-        env = IgnoreSuccessTerminationWrapper(env)
-    
-    # Add wrappers
-    if obs_type == 'pixels' and not is_atari:
-        env = ResizeRendering(env, resolution=resolution, grayscale=grayscale)
-    env = ActionDTypeWrapper(env, np.float32)
-    
-    # Add relabelling wrappers if requested
-    if enable_relabelling:
-        assert name.startswith('PointMaze'), "Relabelling wrappers are only implemented for PointMaze environments"
-        env = PhysicsStateWrapper(env)
-        env = RewardSpecWrapper(env)
-    
-    env = ActionRepeatWrapper(env, action_repeat, obs_type)
-    
-    print(f"Action repeat wrapper applied with num_repeats={action_repeat} and obs_type={obs_type}, frame_stack={frame_stack}")
-    if obs_type == 'pixels':
-        env = FrameStackWrapper(env, frame_stack)
-    
-    env = ExtendedTimeStepWrapper(env)
-    
-    return env
+    return _apply_common_wrappers(
+        env,
+        name,
+        obs_type,
+        action_repeat,
+        frame_stack,
+        resolution,
+        grayscale,
+        url,
+        is_atari,
+        is_minigrid,
+        enable_relabelling,
+    )
 def make_kwargs(cfg):
     """Return default kwargs for make function."""
     env_kwargs = {}
@@ -845,7 +1094,62 @@ def make_kwargs(cfg):
 
 
 if __name__ == "__main__":
-    # Simple visual test: save a few masked Pong frames
+    def _save_hwc_image(image, filename):
+        if image.ndim == 3 and image.shape[0] in (1, 3, 4):
+            image = image.transpose(1, 2, 0)
+        if image.ndim == 3 and image.shape[-1] == 1:
+            image = image[..., 0]
+        Image.fromarray(image.astype(np.uint8)).save(filename)
+
+    def _run_minigrid_one_hot_test():
+        env = make(
+            "MiniGrid-Empty-16x16-v0",
+            obs_type="discrete_states",
+            render_mode="rgb_array",
+            grayscale=True,
+        )
+        try:
+            time_step = env.reset()
+            obs = time_step.observation
+            print(f"MiniGrid pixel observation shape: {obs.shape}, dtype: {obs.dtype}, observation: {obs}")
+
+            assert obs.ndim == 1, f"Expected 1D one-hot observation, got shape {obs.shape}"
+            assert np.issubdtype(obs.dtype, np.floating), f"Expected float one-hot observation, got {obs.dtype}"
+            assert np.isclose(obs.sum(), 1.0), f"Expected one-hot sum 1.0, got {obs.sum()}"
+            assert np.count_nonzero(obs) == 1, f"Expected a unique active entry, got {np.count_nonzero(obs)}"
+            active_idx = int(np.argmax(obs))
+            info_idx = int(time_step.info["state_index"])
+            assert active_idx == info_idx, f"One-hot index {active_idx} does not match info state_index {info_idx}"
+            print(f"[MiniGrid one-hot] OK: shape={obs.shape}, active_index={active_idx}")
+        finally:
+            env.close()
+
+    def _run_minigrid_pixel_test():
+        env = make(
+            "MiniGrid-Empty-16x16-v0",
+            obs_type="pixels",
+            frame_stack=1,
+            resolution=96,
+            render_mode="rgb_array",
+        )
+        try:
+            time_step = env.reset()
+            obs = time_step.observation
+            assert obs.ndim == 3, f"Expected stacked image observation, got shape {obs.shape}"
+            assert obs.shape[0] in (1, 3), f"Expected CHW image with 1 or 3 channels, got shape {obs.shape}"
+            assert obs.dtype == np.uint8, f"Expected uint8 image observation, got {obs.dtype}"
+            out_path = os.path.join(os.getcwd(), "minigrid_empty_pixels.png")
+            _save_hwc_image(obs, out_path)
+            print(f"[MiniGrid pixels] OK: shape={obs.shape}, saved={out_path}")
+        finally:
+            env.close()
+
+    try:
+        _run_minigrid_one_hot_test()
+        _run_minigrid_pixel_test()
+    except Exception as exc:
+        print(f"MiniGrid smoke tests failed: {exc}")
+
     test_env = make(
         "ALE/MontezumaRevenge-v5",
         obs_type="pixels",
@@ -861,6 +1165,7 @@ if __name__ == "__main__":
     def to_hwc(obs):
         if isinstance(obs, np.ndarray) and obs.ndim == 3 and obs.shape[0] in (1, 3, 4):
             return obs.transpose(1, 2, 0)
+        
         return obs
 
     time_step = test_env.reset()

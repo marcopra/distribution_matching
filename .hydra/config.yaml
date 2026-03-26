@@ -1,0 +1,27 @@
+env:
+  name: MultipleRooms-v0
+  num_rooms: 5
+  room_size: 4
+  corridor_height: 1
+  connector_length: 1
+  max_steps: 500
+  render_mode: rgb_array
+  show_coordinates: false
+  dense_reward: false
+  goal_position:
+  - 21
+  - 4
+  start_position:
+  - 0
+  - 0
+task_name: ${env.name}
+obs_type: states
+frame_stack: 1
+action_repeat: 1
+resolution: 84
+grayscale: false
+random_init: false
+random_goal: false
+seed: 1
+replay_buffer_dir: /home/mprattico-iit.local/distribution_matching/exp_local/2026.03.26/142355_637718_icm_apt/buffer
+output_path: replay_buffer_heatmap.png

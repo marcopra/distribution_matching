@@ -775,6 +775,127 @@ class ExplorationVisualizer:
 # ============================================================================
 # Gridworld-Specific Visualizer (Adapted for v2)
 # ============================================================================
+class DiscreteStateVisualizationAdapter:
+    """Small adapter that turns different discrete env APIs into one plotting surface."""
+
+    def __init__(self, env):
+        self.env = self._find_discrete_env(env)
+        self.n_states = self.env.n_states
+        self.dead_state = getattr(self.env, "DEAD_STATE", None)
+        self.state_plot_cells = {}
+        self.plot_cells = []
+        seen_plot_cells = set()
+
+        for state_idx in range(self.n_states):
+            state = self.env.idx_to_state[state_idx]
+            plot_cell = self._state_to_plot_cell(state)
+            if plot_cell is None:
+                continue
+            self.state_plot_cells[state_idx] = plot_cell
+            if plot_cell not in seen_plot_cells:
+                seen_plot_cells.add(plot_cell)
+                self.plot_cells.append(plot_cell)
+
+        if not self.plot_cells:
+            raise ValueError("No plottable states found for discrete visualization")
+
+        self.min_x = min(cell[0] for cell in self.plot_cells)
+        self.min_y = min(cell[1] for cell in self.plot_cells)
+        self.max_x = max(cell[0] for cell in self.plot_cells)
+        self.max_y = max(cell[1] for cell in self.plot_cells)
+        self.grid_width = self.max_x - self.min_x + 1
+        self.grid_height = self.max_y - self.min_y + 1
+        self.plot_cell_to_idx = {cell: idx for idx, cell in enumerate(self.plot_cells)}
+
+    def _find_discrete_env(self, env):
+        current = env
+        while current is not None:
+            if hasattr(current, "n_states") and hasattr(current, "idx_to_state") and hasattr(current, "state_to_idx"):
+                return current
+
+            if hasattr(current, "env"):
+                current = current.env
+            elif hasattr(current, "unwrapped") and current.unwrapped is not current:
+                current = current.unwrapped
+            else:
+                break
+
+        raise AttributeError(
+            "Could not find a discrete environment interface. "
+            "Expected attributes 'n_states', 'idx_to_state', and 'state_to_idx'."
+        )
+
+    def _state_to_plot_cell(self, state):
+        if self.dead_state is not None and state == self.dead_state:
+            return None
+        if isinstance(state, np.ndarray):
+            state = tuple(state.tolist())
+        if isinstance(state, (tuple, list)) and len(state) >= 2:
+            return (int(state[0]), int(state[1]))
+        return None
+
+    def values_to_grid(self, values: np.ndarray, reduce: str = "sum") -> np.ndarray:
+        grid = np.zeros((self.grid_height, self.grid_width), dtype=np.float32)
+        counts = np.zeros_like(grid)
+
+        for state_idx, value in enumerate(values):
+            plot_cell = self.state_plot_cells.get(state_idx)
+            if plot_cell is None:
+                continue
+            x = plot_cell[0] - self.min_x
+            y = plot_cell[1] - self.min_y
+            grid[y, x] += value
+            counts[y, x] += 1
+
+        if reduce == "mean":
+            np.divide(grid, np.maximum(counts, 1.0), out=grid)
+        elif reduce != "sum":
+            raise ValueError(f"Unsupported reduction: {reduce}")
+        return grid
+
+    def aggregate_policy_per_cell(self, policy_per_state: np.ndarray) -> np.ndarray:
+        policy_per_cell = np.zeros((len(self.plot_cells), policy_per_state.shape[1]), dtype=np.float32)
+        counts = np.zeros(len(self.plot_cells), dtype=np.float32)
+
+        for state_idx, probs in enumerate(policy_per_state):
+            plot_cell = self.state_plot_cells.get(state_idx)
+            if plot_cell is None:
+                continue
+            cell_idx = self.plot_cell_to_idx[plot_cell]
+            policy_per_cell[cell_idx] += probs
+            counts[cell_idx] += 1
+
+        policy_per_cell /= np.maximum(counts[:, None], 1.0)
+        return policy_per_cell
+
+    def iter_plot_cells(self):
+        for plot_cell in self.plot_cells:
+            yield plot_cell, self.plot_cell_to_idx[plot_cell]
+
+    def state_label(self, state_idx: int) -> str:
+        return str(self.env.idx_to_state[state_idx])
+
+    def state_components(self, state_idx: int):
+        state = self.env.idx_to_state[state_idx]
+        if isinstance(state, np.ndarray):
+            state = tuple(state.tolist())
+        if not isinstance(state, (tuple, list)):
+            return None, None, ()
+
+        plot_cell = self._state_to_plot_cell(state)
+        orientation = int(state[2]) if len(state) >= 3 else None
+        extras = tuple(state[3:]) if len(state) > 3 else ()
+        return plot_cell, orientation, extras
+
+    def is_orientation_augmented(self) -> bool:
+        orientations = []
+        for state_idx in range(self.n_states):
+            _, orientation, _ = self.state_components(state_idx)
+            if orientation is not None:
+                orientations.append(orientation)
+        return len(set(orientations)) > 1
+
+
 class EmbeddingDistributionVisualizerV2:
     """Visualizer for embedding-based distribution matching results (adapted for v2)."""
     def __init__(self, agent):
@@ -785,52 +906,59 @@ class EmbeddingDistributionVisualizerV2:
             agent: DistMatchingEmbeddingAgentv2 instance
         """
         self.agent = agent
-        self.env = agent.env
-        self.n_states = self.env.n_states
+        self.state_adapter = DiscreteStateVisualizationAdapter(agent.env)
+        self.env = self.state_adapter.env
+        self.n_states = self.state_adapter.n_states
         self.n_actions = agent.n_actions
-
-        # Get grid dimensions
-        valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
-        min_x = min(cell[0] for cell in valid_cells)
-        min_y = min(cell[1] for cell in valid_cells)
-        max_x = max(cell[0] for cell in valid_cells)
-        max_y = max(cell[1] for cell in valid_cells)
-
-        valid_ids = [self.env.state_to_idx[cell] for cell in valid_cells]
-        print(f"self.n_states: {self.n_states}, len(valid_ids): {len(valid_ids)}")
-        self.all_state_ids_one_hot = torch.eye(self.n_states)[valid_ids].to(self.agent.device)
-
-        if hasattr(self.env, 'lava') and self.env.lava:
-            min_x = min(min_x, -1)
-            min_y = min(min_y, -1)
-        
-        self.min_x = min_x
-        self.min_y = min_y
-        self.grid_width = max_x - min_x + 1
-        self.grid_height = max_y - min_y + 1
+        self.all_state_ids_one_hot = torch.eye(self.n_states, device=self.agent.device)
+        self.min_x = self.state_adapter.min_x
+        self.min_y = self.state_adapter.min_y
+        self.grid_width = self.state_adapter.grid_width
+        self.grid_height = self.state_adapter.grid_height
+        self.is_minigrid_style = self.state_adapter.is_orientation_augmented() and self.n_actions == 7
         
         # Action symbols and colors - support both 4 and 8 actions
         if self.n_actions == 4:
             self.action_symbols = ['↑', '↓', '←', '→']  # 0=up, 1=down, 2=left, 3=right
             self.action_names = ['Up', 'Down', 'Left', 'Right']
-            self.action_colors = ['red', 'blue', 'green', 'orange']
+            self.action_colors = ['#D81B60', '#1E88E5', '#43A047', '#FB8C00']
         elif self.n_actions == 8:
             self.action_symbols = ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗']
             self.action_names = ['Right', 'Down-Right', 'Down', 'Down-Left', 'Left', 'Up-Left', 'Up', 'Up-Right']
             self.action_colors = [
-                'orange',      # 0: right
-                'salmon',   # 1: down-right
-                'blue',     # 2: down
-                'cyan',     # 3: down-left
-                'green',    # 4: left
-                'lime',     # 5: up-left
-                'red',   # 6: up
-                'gold'      # 7: up-right
+                '#FB8C00',  # 0: right
+                '#E53935',  # 1: down-right
+                '#1E88E5',  # 2: down
+                '#00ACC1',  # 3: down-left
+                '#43A047',  # 4: left
+                '#7CB342',  # 5: up-left
+                '#D81B60',  # 6: up
+                '#8E24AA',  # 7: up-right
             ]
         elif self.n_actions == 2:
             self.action_symbols = ['→', '↓']
             self.action_names = ['Right', 'Down']
-            self.action_colors = ['red', 'blue']
+            self.action_colors = ['#D81B60', '#1E88E5']
+        elif self.n_actions == 7:
+            self.action_symbols = ['↺', '↻', '↑', 'P', 'D', 'T', '✓']
+            self.action_names = [
+                '0 left: Turn left',
+                '1 right: Turn right',
+                '2 forward: Move forward',
+                '3 pickup: Pick up an object',
+                '4 drop: Unused',
+                '5 toggle: Toggle/activate an object',
+                '6 done: Unused',
+            ]
+            self.action_colors = [
+                '#D81B60',
+                '#1E88E5',
+                '#FB8C00',
+                '#43A047',
+                '#E53935',
+                '#8E24AA',
+                '#6D4C41',
+            ]
         else:
             self.action_symbols = [str(i) for i in range(self.n_actions)]
             self.action_names = [f'Action {i}' for i in range(self.n_actions)]
@@ -848,8 +976,7 @@ class EmbeddingDistributionVisualizerV2:
                 if s_idx % 10 == 0:
                     print(f"  Rendering state {s_idx}/{self.n_states}...")
                 
-                position = self.env.idx_to_state[s_idx]
-                image = self.env.render_from_position(position)
+                image = self.env.render_from_position(self.env.idx_to_state[s_idx])
                 if self.agent.grayscale:
                     image = np.asarray(
                         Image.fromarray(image.astype(np.uint8)).convert('L')
@@ -878,17 +1005,54 @@ class EmbeddingDistributionVisualizerV2:
             print(f"✓ Pre-rendered {self.n_states} states with shape {self._prerendered_states.shape}")
         else:
             self._prerendered_states = None                
+
+    def _orientation_label(self, orientation: int) -> str:
+        mapping = {
+            0: "dir=0 (right)",
+            1: "dir=1 (down)",
+            2: "dir=2 (left)",
+            3: "dir=3 (up)",
+        }
+        return mapping.get(int(orientation), f"dir={orientation}")
+
+    def _format_extra_value(self, value) -> str:
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if value is None:
+            return "none"
+        return str(value)
+
+    def _extra_state_label(self, extras: tuple) -> str:
+        if not extras:
+            return "base state"
+
+        if len(extras) == 1:
+            # Generic label: many MiniGrid variants add a carried-object indicator here.
+            return f"extra={self._format_extra_value(extras[0])}"
+
+        parts = [self._format_extra_value(value) for value in extras]
+        return "extras=" + ", ".join(parts)
+
+    def _build_minigrid_policy_panels(self, policy_per_state: np.ndarray):
+        panel_map = {}
+        orientations = set()
+        extras_set = set()
+
+        for state_idx in range(self.n_states):
+            plot_cell, orientation, extras = self.state_adapter.state_components(state_idx)
+            if plot_cell is None or orientation is None:
+                continue
+            orientations.add(int(orientation))
+            extras_set.add(tuple(extras))
+            panel_map.setdefault((tuple(extras), int(orientation)), {})[plot_cell] = policy_per_state[state_idx]
+
+        return panel_map, sorted(extras_set), sorted(orientations)
         
     def _state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
         """Convert state distribution vector to 2D grid."""
-        grid = np.zeros((self.grid_height, self.grid_width))
-        
-        for s_idx in range(self.n_states):
-            cell = self.env.idx_to_state[s_idx]
-            x, y = cell[0] - self.min_x, cell[1] - self.min_y
-            grid[y, x] = nu[s_idx]
-        
-        return grid
+        return self.state_adapter.values_to_grid(nu, reduce="sum")
     
     def _compute_initial_distribution(self) -> np.ndarray:
         """Compute initial distribution using φ(unique_states) @ alpha."""
@@ -898,8 +1062,7 @@ class EmbeddingDistributionVisualizerV2:
                 enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach() #.cpu()
             else:
                 # Use one-hot encodings
-                all_states = self.all_state_ids_one_hot.to(self.agent.device)
-                enc_all_states = self.agent.encoder(all_states)
+                enc_all_states = self.agent.encoder(self.all_state_ids_one_hot)
             
             if hasattr(self.agent, '_alpha') and self.agent._alpha is not None:
                 alpha = self.agent._alpha
@@ -927,8 +1090,7 @@ class EmbeddingDistributionVisualizerV2:
             enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach()
         else:
             # Use one-hot encodings
-            all_states = self.all_state_ids_one_hot.to(self.agent.device)
-            enc_all_states = self.agent.encoder(all_states).detach()
+            enc_all_states = self.agent.encoder(self.all_state_ids_one_hot).detach()
         
         with torch.no_grad():
             # Add augmented dimension
@@ -976,10 +1138,7 @@ class EmbeddingDistributionVisualizerV2:
             frame_stack = self.agent.obs_shape[0] // self.agent.image_channels
             
             # Get position from state index
-            position = self.env.idx_to_state[state_idx]
-            
-            # Render image from position [H, W, C]
-            image = self.env.render_from_position(position)
+            image = self.env.render_from_position(self.env.idx_to_state[state_idx])
             if self.agent.grayscale:
                 image = np.asarray(
                     Image.fromarray(image.astype(np.uint8)).convert('L')
@@ -1011,7 +1170,7 @@ class EmbeddingDistributionVisualizerV2:
             return stacked_image
         else:
             # For state observations, return one-hot encoding
-            obs_onehot = np.eye(self.n_states)[state_idx]
+            obs_onehot = np.eye(self.n_states, dtype=np.float32)[state_idx]
             return obs_onehot
 
     def _get_policy_per_state(self) -> np.ndarray:
@@ -1059,13 +1218,15 @@ class EmbeddingDistributionVisualizerV2:
     def plot_embeddings_2d(self, save_path: str, use_tsne: bool = False, project=False):
         """Plot 2D projection of state embeddings using PCA or t-SNE."""
         with torch.no_grad():
-            all_states = self.all_state_ids_one_hot.to(self.agent.device)
-            if project:
-                embeddings = self.agent.encoder.encode_and_project(all_states).detach().cpu().numpy()
+            if self.agent.obs_type == 'pixels':
+                observations = self._prerendered_states
             else:
-                embeddings = self.agent.encoder(all_states).detach().cpu().numpy()
-        
-        valid_cells = [cell for cell in self.env.cells if cell != self.env.DEAD_STATE]
+                observations = self.all_state_ids_one_hot
+
+            if project:
+                embeddings = self.agent.encoder.encode_and_project(observations).detach().cpu().numpy()
+            else:
+                embeddings = self.agent.encoder(observations).detach().cpu().numpy()
         
         # Dimensionality reduction
         if use_tsne:
@@ -1083,9 +1244,16 @@ class EmbeddingDistributionVisualizerV2:
         # Color code by state ID or grid position
         colors = plt.cm.viridis(np.linspace(0, 1, len(embeddings)))
         
-        for idx, (cell, embedding_2d) in enumerate(zip(valid_cells, embeddings_2d)):
+        for idx, embedding_2d in enumerate(embeddings_2d):
             ax.scatter(embedding_2d[0], embedding_2d[1], c=[colors[idx]], s=100, alpha=0.7)
-            ax.text(embedding_2d[0], embedding_2d[1], f"{cell}", fontsize=8, ha='center', va='center')
+            ax.text(
+                embedding_2d[0],
+                embedding_2d[1],
+                self.state_adapter.state_label(idx),
+                fontsize=8,
+                ha='center',
+                va='center'
+            )
         
         obs_type_str = "Image" if self.agent.obs_type == 'pixels' else "State"
         ax.set_xlabel(f'{method_name} Component 1')
@@ -1100,7 +1268,7 @@ class EmbeddingDistributionVisualizerV2:
     
     def plot_results(self, step: int, save_path: str = None):
         """Create comprehensive visualization of learning progress."""
-        figsize = (22, 10)
+        figsize = (28, 15)
         fig = plt.figure(figsize=figsize)
 
         # Add parameter text with dataset novelty info
@@ -1116,17 +1284,17 @@ class EmbeddingDistributionVisualizerV2:
         fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        gs = fig.add_gridspec(2, 5, hspace=0.35, wspace=0.35)
+        gs = fig.add_gridspec(3, 6, hspace=0.35, wspace=0.4, height_ratios=[1.0, 1.2, 1.2])
         
-        # Row 1: Initial dist, Policy arrows (bigger), Policy bars (bigger), Correlation matrix
+        # Top row: initial distribution, policy arrows, correlation matrix
         ax_init = fig.add_subplot(gs[0, 0])
-        ax_policy = fig.add_subplot(gs[0, 1:3])  # Span 2 columns
-        ax_policy_bars = fig.add_subplot(gs[1, 1:3])  # Span 2 columns
-        ax_corr = fig.add_subplot(gs[0, 3:5])  # Span 2 columns
+        ax_policy = fig.add_subplot(gs[0, 1:3])
+        ax_corr = fig.add_subplot(gs[0, 3:6])
         
-        # Row 2: Sample occupancy, State correlations (smaller)
+        # Lower rows: give the policy bar chart most of the vertical space
         ax_sample_occ = fig.add_subplot(gs[1, 0])
-        ax_state_corr = fig.add_subplot(gs[1, 3:5])  # Span 2 columns
+        ax_state_corr = fig.add_subplot(gs[2, 0])
+        ax_policy_bars = fig.add_subplot(gs[1:, 1:5])
         
         # Compute distributions
         nu_init = self._compute_initial_distribution()
@@ -1135,12 +1303,27 @@ class EmbeddingDistributionVisualizerV2:
         # Plot distributions
         self._plot_distribution(ax_init, nu_init, 'Initial Distribution')
         
-        # Plot policy arrows with grid cells
-        self._plot_policy_arrows(ax_policy, policy_per_state)
-        ax_policy.set_title(f'Policy (Step {step})', fontsize=12, fontweight='bold')
-        
-        # Plot policy bars per cell
-        self._plot_policy_bars_per_cell(ax_policy_bars, policy_per_state)
+        if self.is_minigrid_style:
+            self._plot_minigrid_policy_summary(
+                ax_policy,
+                step,
+                'Policy summary is saved separately.\n'
+                'Main plot omits per-cell policy aggregation because MiniGrid states\n'
+                'depend on orientation and may depend on additional discrete factors.'
+            )
+            self._plot_minigrid_policy_summary(
+                ax_policy_bars,
+                step,
+                'See the separate MiniGrid policy debug image for orientation-conditioned\n'
+                'action probabilities. Batch occupancy remains meaningful here.'
+            )
+        else:
+            # Plot policy arrows with grid cells
+            self._plot_policy_arrows(ax_policy, policy_per_state)
+            ax_policy.set_title(f'Policy (Step {step})', fontsize=12, fontweight='bold')
+            
+            # Plot policy bars per cell
+            self._plot_policy_bars_per_cell(ax_policy_bars, policy_per_state)
         
         # Plot correlation matrix
         correlation_matrix = self._compute_state_correlation_matrix()
@@ -1159,8 +1342,16 @@ class EmbeddingDistributionVisualizerV2:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Gridworld visualization saved to: {save_path}")
+            if self.is_minigrid_style:
+                self._save_minigrid_policy_debug_plot(step, policy_per_state, save_path)
         
         plt.close(fig)
+
+    def _action_legend_elements(self):
+        return [
+            Patch(facecolor=self.action_colors[i], edgecolor='black', label=self.action_names[i])
+            for i in range(self.n_actions)
+        ]
 
     def _plot_policy_bars_per_cell(self, ax, policy_per_state):
         """Plot policy bars inside each grid cell, similar to action probabilities grid."""
@@ -1168,10 +1359,10 @@ class EmbeddingDistributionVisualizerV2:
         ax.set_ylim(self.min_y - 0.5, self.min_y + self.grid_height - 0.5)
         ax.set_aspect('equal')
         ax.invert_yaxis()  # Invert Y axis so (0,0) is top-left
-        ax.set_title('Policy Action Probabilities per Cell', fontsize=12, fontweight='bold')
+        ax.set_title('Policy Action Probabilities per Cell', fontsize=13, fontweight='bold')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.25, linewidth=0.6)
         
         # Draw environment structure
         if hasattr(self.env, 'walkable_areas'):
@@ -1182,38 +1373,41 @@ class EmbeddingDistributionVisualizerV2:
         
         # Cell size and bar parameters
         cell_size = 1.0
-        bar_width = cell_size / (self.n_actions + 1)
-        bar_spacing = cell_size / self.n_actions
-        max_bar_height = cell_size * 0.8
+        inner_padding = 0.08
+        usable_width = cell_size - (2 * inner_padding)
+        bar_spacing = usable_width / self.n_actions
+        bar_width = bar_spacing * 0.9
+        max_bar_height = cell_size * 0.92
         
-        # For each state, draw bars inside the cell
-        for s_idx in range(self.n_states):
-            cell = self.env.idx_to_state[s_idx]
-            x, y = cell[0], cell[1]
+        # MiniGrid has multiple heading-specific states per cell, so we average them
+        # to obtain one robust per-cell debugging view.
+        policy_per_cell = self.state_adapter.aggregate_policy_per_cell(policy_per_state)
+
+        for (x, y), cell_idx in self.state_adapter.iter_plot_cells():
             
             # Draw cell background
             rect = Rectangle(
                 (x - cell_size/2, y - cell_size/2), 
                 cell_size, cell_size,
-                linewidth=1.5,
+                linewidth=1.8,
                 edgecolor='black',
-                facecolor='lightgray',
-                alpha=0.3
+                facecolor='#F3F4F6',
+                alpha=0.95
             )
             ax.add_patch(rect)
             
             # Get action probabilities
-            probs = policy_per_state[s_idx]
+            probs = policy_per_cell[cell_idx]
             
             # Draw bars for each action
-            start_x = x - cell_size/2 + bar_width/2
+            start_x = x - cell_size/2 + inner_padding + bar_width / 2
             
             for a_idx in range(self.n_actions):
                 bar_x = start_x + a_idx * bar_spacing
                 bar_height = probs[a_idx] * max_bar_height
                 
                 # Bars start from bottom of cell (y + cell_size/2) and grow upward
-                bar_y = y + cell_size/2 - bar_height - 0.1
+                bar_y = y + cell_size/2 - bar_height - 0.04
                 
                 bar_rect = Rectangle(
                     (bar_x - bar_width/2, bar_y),
@@ -1221,7 +1415,7 @@ class EmbeddingDistributionVisualizerV2:
                     bar_height,
                     facecolor=self.action_colors[a_idx],
                     edgecolor='black', 
-                    linewidth=0.5
+                    linewidth=0.8
                 )
                 ax.add_patch(bar_rect)
         
@@ -1230,9 +1424,129 @@ class EmbeddingDistributionVisualizerV2:
         ax.set_yticks(np.arange(self.min_y, self.min_y + self.grid_height))
         
         # Add legend
-        legend_elements = [Patch(facecolor=self.action_colors[i], label=self.action_names[i])
-                        for i in range(self.n_actions)]
-        ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+        ax.legend(
+            handles=self._action_legend_elements(),
+            loc='upper left',
+            bbox_to_anchor=(1.01, 1.0),
+            title='Action Mapping',
+            fontsize=9,
+            title_fontsize=10,
+            frameon=True
+        )
+
+    def _plot_minigrid_policy_summary(self, ax, step: int, text: str):
+        ax.axis('off')
+        ax.set_title(f'MiniGrid Policy Summary (Step {step})', fontsize=12, fontweight='bold')
+        ax.text(
+            0.5,
+            0.5,
+            text,
+            ha='center',
+            va='center',
+            fontsize=12,
+            linespacing=1.4,
+            bbox=dict(boxstyle='round', facecolor='#F3F4F6', edgecolor='black', alpha=0.95),
+            transform=ax.transAxes,
+        )
+
+    def _plot_policy_bars_for_state_subset(self, ax, subset_probs, title: str):
+        ax.set_xlim(self.min_x - 0.5, self.min_x + self.grid_width - 0.5)
+        ax.set_ylim(self.min_y - 0.5, self.min_y + self.grid_height - 0.5)
+        ax.set_aspect('equal')
+        ax.invert_yaxis()
+        ax.set_title(title, fontsize=11, fontweight='bold')
+        ax.set_xticks(np.arange(self.min_x, self.min_x + self.grid_width))
+        ax.set_yticks(np.arange(self.min_y, self.min_y + self.grid_height))
+        ax.grid(True, alpha=0.2, linewidth=0.5)
+
+        cell_size = 1.0
+        inner_padding = 0.08
+        usable_width = cell_size - (2 * inner_padding)
+        bar_spacing = usable_width / self.n_actions
+        bar_width = bar_spacing * 0.9
+        max_bar_height = cell_size * 0.92
+
+        for plot_cell in self.state_adapter.plot_cells:
+            x, y = plot_cell
+            rect = Rectangle(
+                (x - cell_size / 2, y - cell_size / 2),
+                cell_size,
+                cell_size,
+                linewidth=1.3,
+                edgecolor='black',
+                facecolor='#F3F4F6',
+                alpha=0.95
+            )
+            ax.add_patch(rect)
+
+            probs = subset_probs.get(plot_cell)
+            if probs is None:
+                continue
+
+            start_x = x - cell_size / 2 + inner_padding + bar_width / 2
+            for a_idx in range(self.n_actions):
+                bar_x = start_x + a_idx * bar_spacing
+                bar_height = probs[a_idx] * max_bar_height
+                bar_y = y + cell_size / 2 - bar_height - 0.04
+                bar_rect = Rectangle(
+                    (bar_x - bar_width / 2, bar_y),
+                    bar_width,
+                    bar_height,
+                    facecolor=self.action_colors[a_idx],
+                    edgecolor='black',
+                    linewidth=0.6
+                )
+                ax.add_patch(bar_rect)
+
+    def _save_minigrid_policy_debug_plot(self, step: int, policy_per_state: np.ndarray, save_path: str):
+        panel_map, extras_values, orientations = self._build_minigrid_policy_panels(policy_per_state)
+        if not orientations:
+            return
+
+        n_rows = max(1, len(extras_values))
+        n_cols = len(orientations)
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(5.5 * n_cols + 4, 4.8 * n_rows),
+            squeeze=False
+        )
+
+        for row_idx, extras in enumerate(extras_values):
+            for col_idx, orientation in enumerate(orientations):
+                ax = axes[row_idx][col_idx]
+                subset_probs = panel_map.get((extras, orientation), {})
+                title = f"{self._orientation_label(orientation)}\n{self._extra_state_label(extras)}"
+                self._plot_policy_bars_for_state_subset(ax, subset_probs, title)
+                if row_idx == n_rows - 1:
+                    ax.set_xlabel('X')
+                if col_idx == 0:
+                    ax.set_ylabel('Y')
+
+        legend_ax = axes[0][-1]
+        legend_ax.legend(
+            handles=self._action_legend_elements(),
+            loc='upper left',
+            bbox_to_anchor=(1.02, 1.0),
+            title='Action Mapping',
+            fontsize=9,
+            title_fontsize=10,
+            frameon=True
+        )
+
+        fig.suptitle(
+            f'MiniGrid Policy Debug Panels (Step {step})\n'
+            'Panels are split by agent orientation and extra discrete state factors when present.',
+            fontsize=15,
+            y=0.995
+        )
+        plt.tight_layout()
+
+        root, ext = os.path.splitext(save_path)
+        panel_save_path = f"{root}_minigrid_policy{ext}"
+        plt.savefig(panel_save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"MiniGrid policy debug visualization saved to: {panel_save_path}")
 
     def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
         """Plot state occupancy from the current batch.
@@ -1312,25 +1626,27 @@ class EmbeddingDistributionVisualizerV2:
         # Create background grid
         grid = np.zeros((self.grid_height, self.grid_width))
         ax.imshow(grid, cmap='gray', alpha=0.05, interpolation='nearest')
-        
-        # Draw cell boundaries
-        for s_idx in range(self.n_states):
-            cell = self.env.idx_to_state[s_idx]
-            x, y = cell[0] - self.min_x, cell[1] - self.min_y
+
+        # MiniGrid has multiple heading-specific states per cell, so we average them
+        # to obtain one robust per-cell debugging view.
+        policy_per_cell = self.state_adapter.aggregate_policy_per_cell(policy_per_state)
+
+        for (cell_x, cell_y), cell_idx in self.state_adapter.iter_plot_cells():
+            x, y = cell_x - self.min_x, cell_y - self.min_y
             
             # Draw rectangle around each cell
             rect = Rectangle(
                 (x - 0.5, y - 0.5), 
                 1, 1,
-                linewidth=1.5,
+                linewidth=1.8,
                 edgecolor='black',
-                facecolor='lightgray',
-                alpha=0.3
+                facecolor='#F3F4F6',
+                alpha=0.95
             )
             ax.add_patch(rect)
             
             # Draw arrow for most likely action
-            probs = policy_per_state[s_idx]
+            probs = policy_per_cell[cell_idx]
             max_action = np.argmax(probs)
             
             ax.text(x, y, self.action_symbols[max_action],
@@ -1345,6 +1661,15 @@ class EmbeddingDistributionVisualizerV2:
         ax.set_xticks(np.arange(self.grid_width))
         ax.set_yticks(np.arange(self.grid_height))
         ax.grid(True, which='both', color='black', linewidth=0.5, alpha=0.3)
+        ax.legend(
+            handles=self._action_legend_elements(),
+            loc='upper left',
+            bbox_to_anchor=(1.01, 1.0),
+            title='Action Mapping',
+            fontsize=9,
+            title_fontsize=10,
+            frameon=True
+        )
 
 
 
@@ -1358,12 +1683,7 @@ class EmbeddingDistributionVisualizerV2:
 
     def _plot_state_to_states_correlation(self, ax, state_correlations):
         """Plot per-state average correlation WITHOUT text annotations."""
-        grid = np.zeros((self.grid_height, self.grid_width))
-        
-        for s_idx in range(self.n_states):
-            cell = self.env.idx_to_state[s_idx]
-            x, y = cell[0] - self.min_x, cell[1] - self.min_y
-            grid[y, x] = state_correlations[s_idx]
+        grid = self.state_adapter.values_to_grid(state_correlations, reduce="mean")
         
         im = ax.imshow(grid, cmap='RdYlGn_r', interpolation='nearest', vmin=0, vmax=1)
         ax.set_title('State Orthogonality Deviation\n(Lower = More Orthogonal)', fontsize=12, fontweight='bold')
@@ -1604,6 +1924,20 @@ class RoverAgent:
         }
         self.current_eta = 0.0
         self._adagrad_accum = None
+
+    def _find_discrete_env(self, env):
+        current = env
+        while current is not None:
+            if hasattr(current, "n_states") and hasattr(current, "idx_to_state") and hasattr(current, "state_to_idx"):
+                return current
+
+            if hasattr(current, "env"):
+                current = current.env
+            elif hasattr(current, "unwrapped") and current.unwrapped is not current:
+                current = current.unwrapped
+            else:
+                break
+        return env.unwrapped
     
     def insert_env(self, env):
         """
@@ -1611,7 +1945,7 @@ class RoverAgent:
         Call this from pretrain.py after agent creation.
         """       
         self.wrapped_env = env
-        self.env = env.unwrapped  # Get the base environment
+        self.env = self._find_discrete_env(env)
         
         # Initialize gridworld visualizer
         try:
@@ -2275,8 +2609,8 @@ class RoverAgent:
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
-           
-        metrics.update(self.update_encoders(obs, action, next_obs, reward))
+        if self.embeddings:
+            metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   

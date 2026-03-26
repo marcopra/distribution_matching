@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - /env: two_rooms7_0
+
+task_name: ${env.name}
+obs_type: states
+frame_stack: 1
+action_repeat: 1
+resolution: 84
+grayscale: false
+random_init: false
+random_goal: false
+seed: 1
+
+replay_buffer_dir: ???
+output_path: replay_buffer_heatmap.png
+
+hydra:
+  run:
+    dir: .

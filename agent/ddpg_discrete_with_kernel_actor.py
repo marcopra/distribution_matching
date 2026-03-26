@@ -178,7 +178,7 @@ class DDPGAgent:
             print("✓ Initialized from another DDPG agent")
         
         # Caso 2: DistMatchingEmbeddingAgent
-        elif type(other).__name__ == 'DistMatchingEmbeddingAgent':
+        elif type(other).__name__ == 'DistMatchingEmbeddingAgent' or type(other).__name__ == 'RoverAgent':
             # Carica encoder
             self.encoder.load_state_dict(other.encoder.state_dict())
             print("✓ Encoder loaded from DistMatchingEmbeddingAgent")
@@ -201,11 +201,14 @@ class DDPGAgent:
                 eta=other.lr_actor,
                 E=E.to(self.device)  # Pass E matrix for proper initialization
             )
-            print("✓ KernelActorDiscrete initialized from pretrained weights")
-            print(f"  Dataset size: {other.dataset.size}")
-            print(f"  Feature dim: {other.feature_dim}")
-            print(f"  Eta: {other.lr_actor}")
-            print(f"  E matrix shape: {E.shape}")
+            try:
+                print("✓ KernelActorDiscrete initialized from pretrained weights")
+                print(f"  Dataset size: {other.dataset.size}")
+                print(f"  Feature dim: {other.feature_dim}")
+                print(f"  Eta: {other.lr_actor}")
+                print(f"  E matrix shape: {E.shape}")
+            except Exception as e:
+                print(f"✓ KernelActorDiscrete initialized, but failed to print details: {e}")
                   
         else:
             raise ValueError(

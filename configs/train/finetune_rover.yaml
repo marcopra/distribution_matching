@@ -1,40 +1,35 @@
 # @package _global_
 defaults:
-  - /agent: cql
-  - /env: pong
+  - /agent: ddpg_discrete_with_kernel_actor
+  - /env: multiplerooms5_4x4_0
   # - override hydra/launcher: submitit_local
-  
 
 # mode
 reward_free: false
 # task settings
 domain: gym
-task_name:  ${env.name}
-obs_type: pixels # [discrete_states, states, pixels]
-frame_stack: 3 # only works if obs_type=pixels
-action_repeat: 4 # set to 2 for pixels
+task_name:  ${env.name} #FourRooms-v0
+obs_type: discrete_states # [discrete_states, states, pixels]
+frame_stack: 1 # only works if obs_type=pixels
+action_repeat: 1 # set to 2 for pixels
 discount: 0.99
-grayscale: false
 resolution: 84  
+grayscale: false
 random_init: true
 random_goal: true
-# agent settings
-pretrained_path: null
-# agent:
-#   update_every_steps: 1
-#   nstep: 1
+
 # train settings
-num_train_frames: 8_800_000
-# num_seed_frames_array: [601, 1201, 2401, 3601, 4801, 6001, 7201, 8401, 9601, 10801, 12001, 13201, 14401, 15601, 16801, 18001, 20001] # number of seed frames for each cycle
-num_seed_frames_array: [8_500_000] # number of seed frames for each cycle
-num_seed_frames: null # will be set dynamically in the code
+num_train_frames: 60000
+num_seed_frames: 2000
+update_actor_after_critic_steps: 7999
+num_agent_updates_per_env_step: 1
 # eval
-eval_every_frames: 1_000_000
-num_eval_episodes: 5
-num_eval_dp_episodes: 10
+eval_every_frames: 5000
+num_eval_episodes: 1
 # pretrained
 snapshot_ts: 0 #100000
 snapshot_base_dir: ./pretrained_models
+p_path: "none" # path to policy weights .npy file for loading into linear actor
 # replay buffer
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 1
@@ -46,22 +41,27 @@ seed: 1
 device: cuda
 save_video: true
 save_train_video: false
-use_tb: true
+use_tb: false
 use_wandb: false
 wandb_id: null
-wandb_project: "offline_rl"
+wandb_project: "finetune_rebuttals"
 wandb_entity: "urlb"
-wandb_tag: none
+wandb_tag: "rover"
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}
+wandb_mode: online # online, offline, disabled
 # experiment
 experiment: exp
 
+agent:
+  actor_lr: 1e-7
+  dataset_dim: 4096
+  feature_dim: 200
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}_${experiment}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
   sweep:
-    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
     subdir: ${hydra.job.num}
   # launcher:
   #   timeout_min: 4300

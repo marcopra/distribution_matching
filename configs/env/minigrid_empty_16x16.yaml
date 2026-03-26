@@ -1,0 +1,8 @@
+# @package _global_
+# Pong Environment Configuration
+
+env:
+  name: "MiniGrid-Empty-16x16-v0"
+  render_mode: rgb_array
+  max_episode_steps: 100
+  

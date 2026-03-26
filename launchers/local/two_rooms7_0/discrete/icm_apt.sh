@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+CUDA_DEVICE=${1:-0}
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=0
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=1
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=2
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=3
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=4
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=5
+python train.py --config-name=train/finetune agent=icm_apt_discrete configs/env=two_rooms7_0 device=cuda:${CUDA_DEVICE} wandb_tag=icm_apt p_path=/home/mprattico/distribution_matching/models/discrete/two_rooms/icm_apt/142713_904631_icm_apt/models/discrete/gym/icm_apt/1/snapshot.pt seed=6
