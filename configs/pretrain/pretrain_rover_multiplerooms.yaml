@@ -42,7 +42,7 @@ update_encoder: true
 # misc
 seed: 1
 device: cuda
-save_video: true
+save_video: false
 save_train_video: false
 save_buffer: true
 use_tb: true
@@ -64,7 +64,7 @@ agent:
   curl: false
   lr_actor: 10
   pmd_steps: 250
-  sink_schedule: "linear(0.0, 0.5, 50_000)"
+  sink_schedule: "linear(0.0, 0.05, 50_000)"
   batch_size_actor: 5000
   T_init_steps: 300
   embedding_sum_loss: 0
