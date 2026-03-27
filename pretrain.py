@@ -8,6 +8,7 @@ os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
 
 from pathlib import Path
+import inspect
 
 import hydra
 from omegaconf import OmegaConf
@@ -130,11 +131,13 @@ class Workspace:
                                                   self.work_dir / 'buffer')
 
         # create replay buffer
+        first_transition = type(self.agent).__name__ == 'RoverAgent'
         self.replay_loader = make_replay_loader(self.replay_storage,
                                                 cfg.replay_buffer_size,
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
-                                                cfg.save_buffer, cfg.nstep, cfg.discount, first_transition=True)
+                                                cfg.save_buffer, cfg.nstep, cfg.discount,
+                                                first_transition=first_transition)
         
         self._replay_iter = None
 
@@ -300,7 +303,15 @@ class Workspace:
 
             # try to update the agent
             if not seed_until_step(self.global_step):
-                metrics = self.agent.update(self.replay_iter, self.global_step)
+                update_signature = inspect.signature(self.agent.update)
+                if 'replay_buffer' in update_signature.parameters:
+                    metrics = self.agent.update(
+                        self.replay_iter,
+                        self.global_step,
+                        replay_buffer=self.replay_loader.dataset,
+                    )
+                else:
+                    metrics = self.agent.update(self.replay_iter, self.global_step)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
             # take env step

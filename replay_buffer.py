@@ -96,6 +96,13 @@ class ReplayBuffer(IterableDataset):
         self._save_snapshot = save_snapshot
         self._first_transition = first_transition
         self._batch_size = batch_size
+        self._transition_cache = dict()
+        self._all_data_cache = None
+        self._all_data_cache_key = None
+
+    def _invalidate_transition_views(self):
+        self._all_data_cache = None
+        self._all_data_cache_key = None
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -111,11 +118,13 @@ class ReplayBuffer(IterableDataset):
             early_eps_fn = self._episode_fns.pop(0)
             early_eps = self._episodes.pop(early_eps_fn)
             self._size -= episode_len(early_eps)
+            self._transition_cache.pop(early_eps_fn, None)
             early_eps_fn.unlink(missing_ok=True)
         self._episode_fns.append(eps_fn)
         self._episode_fns.sort()
         self._episodes[eps_fn] = episode
         self._size += eps_len
+        self._invalidate_transition_views()
 
         if not self._save_snapshot:
             eps_fn.unlink(missing_ok=True)
@@ -168,6 +177,91 @@ class ReplayBuffer(IterableDataset):
             discount *= episode['discount'][idx + i] * self._discount
         
         return (obs, action, reward, discount, next_obs, *meta)
+
+    def _episode_to_transitions(self, eps_fn):
+        if eps_fn in self._transition_cache:
+            return self._transition_cache[eps_fn]
+
+        episode = self._episodes[eps_fn]
+        transition_count = episode_len(episode) - self._nstep + 1
+        if transition_count <= 0:
+            return None
+
+        obs = episode['observation'][:transition_count]
+        action = episode['action'][1:transition_count + 1]
+        next_obs = episode['observation'][self._nstep:transition_count + self._nstep]
+
+        reward = np.zeros_like(episode['reward'][1:transition_count + 1])
+        discount = np.ones_like(episode['discount'][1:transition_count + 1])
+        for i in range(self._nstep):
+            reward += discount * episode['reward'][1 + i:transition_count + 1 + i]
+            discount *= episode['discount'][1 + i:transition_count + 1 + i] * self._discount
+
+        meta = [episode[spec.name][:transition_count] for spec in self._storage._meta_specs]
+        transitions = (obs, action, reward, discount, next_obs, *meta)
+        self._transition_cache[eps_fn] = transitions
+        return transitions
+
+    def _get_all_transitions(self):
+        cache_key = tuple(self._episode_fns)
+        if self._all_data_cache_key == cache_key and self._all_data_cache is not None:
+            return self._all_data_cache
+
+        transition_batches = []
+        for eps_fn in self._episode_fns:
+            transitions = self._episode_to_transitions(eps_fn)
+            if transitions is not None:
+                transition_batches.append(transitions)
+
+        if not transition_batches:
+            raise RuntimeError('Replay buffer is empty')
+
+        all_transitions = tuple(
+            np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
+            for field_idx in range(len(transition_batches[0]))
+        )
+        self._all_data_cache = all_transitions
+        self._all_data_cache_key = cache_key
+        return all_transitions
+
+    def get_all_data(self, last_n=None):
+        try:
+            self._try_fetch()
+        except:
+            traceback.print_exc()
+
+        if last_n is not None and last_n <= 0:
+            raise ValueError('last_n must be positive when provided')
+
+        if last_n is None:
+            return self._get_all_transitions()
+
+        transition_batches = []
+        remaining = last_n
+        for eps_fn in reversed(self._episode_fns):
+            if remaining == 0:
+                break
+
+            transitions = self._episode_to_transitions(eps_fn)
+            if transitions is None:
+                continue
+
+            batch_size = transitions[0].shape[0]
+            if batch_size > remaining:
+                transitions = tuple(field[-remaining:] for field in transitions)
+                batch_size = remaining
+
+            transition_batches.append(transitions)
+            remaining -= batch_size
+
+        if not transition_batches:
+            raise RuntimeError('Replay buffer is empty')
+
+        transition_batches.reverse()
+        return tuple(
+            np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
+            for field_idx in range(len(transition_batches[0]))
+        )
 
     def __iter__(self):
         while True:
