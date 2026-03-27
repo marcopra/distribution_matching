@@ -153,6 +153,39 @@ class DistributionMatcher:
         self.gamma = gamma
         self.lambda_reg = lambda_reg
         self.device = device    
+
+    def _regularized_solve(
+            self,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            tag: str,
+            jitter_scale: float = 1e-8,
+            max_tries: int = 6,
+        ) -> torch.Tensor:
+        """Solve AX=B robustly when A is singular/ill-conditioned."""
+        if A.shape[0] != A.shape[1]:
+            X = torch.linalg.lstsq(A, B).solution
+            return torch.nan_to_num(X)
+
+        eye = torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
+        a_norm = torch.linalg.matrix_norm(A, ord='fro')
+        base_jitter = jitter_scale * (a_norm / max(A.shape[0], 1) + 1.0)
+
+        for trial in range(max_tries):
+            jitter = base_jitter * (10.0 ** trial)
+            A_reg = A + jitter * eye
+            try:
+                X = torch.linalg.solve(A_reg, B)
+            except RuntimeError:
+                continue
+            if torch.isfinite(X).all():
+                if trial > 0:
+                    logger.debug(f"Applied jitter={jitter:.2e} while solving {tag}")
+                return X
+
+        logger.warning(f"Falling back to pinv for {tag}")
+        X = torch.linalg.pinv(A + base_jitter * eye) @ B
+        return torch.nan_to_num(X)
             
     def compute_nu_pi(
             self, 
@@ -211,17 +244,18 @@ class DistributionMatcher:
         """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
        
         N = K.shape[0]
+        subsamples = psi_sub_obs_action.shape[0]
        
         # α̃ augmented to be [α; 1]
         tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
         tilde_alpha[:-1] = alpha
 
-        K_nm = psi_all_obs_action.T @ psi_sub_obs_action # [n, m]
-        K_mm = psi_sub_obs_action.T @ psi_sub_obs_action # [m, m]
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
         A_nystrom = K_nm.T @ K_nm + self.lambda_reg * N * K_mm # [m, m]
-        B = torch.linalg.solve(A_nystrom, K_nm.T) # [m, n]
-       
 
+        B = self._regularized_solve(A_nystrom, K_nm.T, tag="A_nystrom (compute_nu_pi_nystrom)") # [m, n]
+       
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
         # A = K + self.lambda_reg * torch.eye(N, device=self.device)
@@ -235,7 +269,11 @@ class DistributionMatcher:
         tilde_BM[:-1, :-1] = BM
         tilde_BM[-1, -1] = 1.0
 
-        inv_term = torch.linalg.solve( torch.eye(N+1, device=self.device) - self.gamma * tilde_BM, tilde_alpha)
+        inv_term = self._regularized_solve(
+            torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
+            tilde_alpha,
+            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
+        )
         
         sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
         sink_state[-1] = sink_norm
@@ -370,10 +408,11 @@ class DistributionMatcher:
 
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
-        K_nm = psi_all_obs_action.T @ psi_sub_obs_action # [n, m]
-        K_mm = psi_sub_obs_action.T @ psi_sub_obs_action # [m, m]
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
         A_nystrom = K_nm.T @ K_nm + self.lambda_reg * n * K_mm # [m, m]
-        B = torch.linalg.solve(A_nystrom, K_nm.T) # [m, n]
+
+        B = self._regularized_solve(A_nystrom, K_nm.T, tag="A_nystrom (compute_gradient_coefficient_nystrom)") # [m, n]
         tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
         tilde_B[:-1, :-1] = B
 
@@ -399,7 +438,11 @@ class DistributionMatcher:
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
         tilde_B_tilde_M = tilde_B @ tilde_M
         I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
-        symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_sub_next_obs)
+        symmetric_term = self._regularized_solve(
+            (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
+            tilde_phi_sub_next_obs,
+            tag="(I - gamma*tilde_B_tilde_M)^T",
+        )
         # symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_all_next_obs)
 
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
@@ -1220,40 +1263,62 @@ class EmbeddingDistributionVisualizerV2:
         if self.agent.gradient_coeff is None:
             return np.ones(self.n_states) / self.n_states
         
-        nu_current = torch.zeros(self.n_states)
         if self.agent.obs_type == 'pixels':
             # Use pre-rendered images
             enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach()
         else:
             # Use one-hot encodings
             enc_all_states = self.agent.encoder(self.all_state_ids_one_hot).detach()
+        enc_all_states_cpu = enc_all_states.detach().cpu()
         
         with torch.no_grad():
-            # Add augmented dimension
-            zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
-            enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1)
-            
-            H = enc_all_states_aug @ self.agent._phi_all_obs.T
-            pi_all = self.agent._policy_from_H(H)
-            
-            M = H * (self.agent.E @ pi_all.T)
-            
-            alpha_all = torch.zeros(self.n_states, 1)
-            alpha_all[0] = 1.0
-            
-            nu_current = self.agent.distribution_matcher.compute_nu_pi(
-                phi_all_next_obs=self.agent._phi_all_next,
-                psi_all_obs_action=self.agent._psi_all,
-                K=self.agent.K,
-                M=M,
-                alpha=alpha_all,
-                sink_norm=utils.schedule(self.agent.sink_schedule, 0)
+            if self.agent.subsamples is not None and hasattr(self.agent, '_phi_sub_next'):
+                nu_current = self.agent.distribution_matcher.compute_nu_pi_nystrom(
+                    phi_sub_next_obs=self.agent._phi_sub_next,
+                    psi_sub_obs_action=self.agent._psi_sub,
+                    psi_all_obs_action=self.agent._psi_all,
+                    K=self.agent.K_sub,
+                    M=self.agent.sub_H * (self.agent.E @ self.agent.pi.T),
+                    alpha=self.agent._sub_alpha,
+                    sink_norm=utils.schedule(self.agent.sink_schedule, 0)
+                )
+                support_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
+            else:
+                # Add augmented dimension
+                zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
+                enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1)
+
+                H = enc_all_states_aug @ self.agent._phi_all_obs.T
+                pi_all = self.agent._policy_from_H(H)
+                M = H * (self.agent.E @ pi_all.T)
+
+                alpha_all = torch.zeros(self.n_states, 1, device=enc_all_states.device)
+                alpha_all[0] = 1.0
+
+                nu_current = self.agent.distribution_matcher.compute_nu_pi(
+                    phi_all_next_obs=self.agent._phi_all_next,
+                    psi_all_obs_action=self.agent._psi_all,
+                    K=self.agent.K,
+                    M=M,
+                    alpha=alpha_all,
+                    sink_norm=utils.schedule(self.agent.sink_schedule, 0)
+                )
+                support_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
+
+        support_weights = nu_current[:-1].flatten().detach().cpu().numpy()
+        state_dist = np.zeros(self.n_states, dtype=np.float32)
+
+        for support_embedding, weight in zip(support_embeddings, support_weights):
+            similarities = F.cosine_similarity(
+                support_embedding.unsqueeze(0),
+                enc_all_states_cpu,
+                dim=1
             )
-        
-        # Normalize
-        nu_current = nu_current[:-1].flatten()  # Remove sink state
-        nu_current = nu_current / (nu_current.sum() + 1e-10)
-        return nu_current.numpy()
+            closest_state = torch.argmax(similarities).item()
+            state_dist[closest_state] += float(weight)
+
+        state_dist = state_dist / (state_dist.sum() + 1e-10)
+        return state_dist
     
     def render_observation_from_state(self, state_idx: int) -> np.ndarray:
         """
@@ -1714,7 +1779,10 @@ class EmbeddingDistributionVisualizerV2:
                 enc_all_states = self.agent.encoder(all_states).detach().cpu()
                 
             # Get batch embeddings (remove augmented dimension)
-            batch_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
+            if self.agent.subsamples is not None and hasattr(self.agent, '_phi_sub_next'):
+                batch_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
+            else:
+                batch_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
             
             # Find closest state for each batch sample
             for batch_emb in batch_embeddings:
@@ -2328,6 +2396,7 @@ class RoverAgent:
 
         self._adagrad_accum = 0.0
 
+        print(f"Starting PMD actor update for {self.pmd_steps} steps with base eta {base_eta:.6g} and sink norm {sink_norm:.6g}")
         for iteration in range(self.pmd_steps):
             grad_update = self.distribution_matcher.compute_gradient_coefficient(
                 M, 
@@ -2424,13 +2493,31 @@ class RoverAgent:
    
         return metrics
 
-    def update_actor_nystrom(self, full_obs, full_action, full_next_obs, sub_obs, sub_action, sub_next_obs, step, rewards=None):
+    def update_actor_nystrom(self,
+                             full_obs,
+                             full_action,
+                             full_next_obs,
+                             step,
+                             rewards=None,
+                             sub_obs=None,
+                             sub_action=None,
+                             sub_next_obs=None,
+                             sub_rewards=None):
         """Update policy using Projected Mirror Descent and Nystrom Approximation."""
         metrics = dict()
+        if sub_obs is None or sub_action is None or sub_next_obs is None:
+            raise ValueError("Nyström actor update requires subsampled observations, actions, and next observations.")
 
         # Compute features augmented
         self._sync_policy_encoder()
-        self._cache_features(full_obs, full_action, full_next_obs, encoder=self.policy_encoder, sub_obs=sub_obs, sub_next_obs=sub_next_obs)
+        self._cache_features(
+            full_obs, 
+            full_action, 
+            full_next_obs, 
+            encoder=self.policy_encoder, 
+            sub_obs=sub_obs, 
+            sub_action=sub_action,
+            sub_next_obs=sub_next_obs)
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -2447,14 +2534,15 @@ class RoverAgent:
         M = self.sub_H*(self.E@self.pi.T) # [n, ]
         sub_M = self.sub_H*(self.E@self.pi.T) # [n, m]
 
-        nu_pi = self.distribution_matcher._compute_nu_pi_nystrom(
-                phi_all_next_obs = self._phi_all_next,
-                psi_all_obs_action= self._psi_all,
-                K= self.K,
-                M = M,
-                alpha=self._sub_alpha,
-                sink_norm=sink_norm 
-        )
+        nu_pi = self.distribution_matcher.compute_nu_pi_nystrom(
+                    phi_sub_next_obs = self._phi_sub_next,
+                    psi_sub_obs_action = self._psi_sub,
+                    psi_all_obs_action = self._psi_all,
+                    K= self.K,
+                    M = sub_M,
+                    alpha=self._sub_alpha,
+                    sink_norm=sink_norm 
+                )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
         best_loss = actor_loss
@@ -2465,18 +2553,19 @@ class RoverAgent:
 
         for iteration in range(self.pmd_steps):
             grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom(
-                sub_M, 
-                phi_all_next_obs = self._phi_all_next, 
+                M=sub_M, 
+                phi_all_next_obs = self._phi_all_next,
                 phi_sub_next_obs = self._phi_sub_next,
-                psi_all_obs_action = self._psi_all, 
+                psi_all_obs_action = self._psi_all,
                 psi_sub_obs_action = self._psi_sub,
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm
-            ) 
+            )
+           
 
-            # Track gradient norms by reward (only on final iteration)
-            if iteration == self.pmd_steps - 1 and rewards is not None:
-                self._track_gradient_norms(grad_update, rewards, step)
+            # # Track gradient norms by reward (only on final iteration)
+            # if iteration == self.pmd_steps - 1 and sub_rewards is not None:
+            #     self._track_gradient_norms(grad_update, sub_rewards, step)
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -2500,16 +2589,17 @@ class RoverAgent:
                 eta_t = base_eta
 
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
-            candidate_pi = self._policy_from_H(self.H.T, coeff=candidate_coeff)
-            candidate_M = self.H * (self.E @ candidate_pi.T)
-            candidate_nu = self.distribution_matcher.compute_nu_pi(
-                phi_all_next_obs=self._phi_all_next,
-                psi_all_obs_action=self._psi_all,
-                K=self.K,
-                M=candidate_M,
-                alpha=self._alpha,
-                sink_norm=sink_norm
-            )
+            candidate_pi = self._policy_from_H(self.sub_H.T, coeff=candidate_coeff)
+            candidate_M = self.sub_H * (self.E @ candidate_pi.T)
+            candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
+                    phi_sub_next_obs = self._phi_sub_next,
+                    psi_sub_obs_action = self._psi_sub,
+                    psi_all_obs_action = self._psi_all,
+                    K= self.K,
+                    M = sub_M,
+                    alpha=self._sub_alpha,
+                    sink_norm=sink_norm 
+                )
             candidate_loss = torch.linalg.norm(candidate_nu) ** 2
 
             if self.pmd_eta_mode == "backtracking":
@@ -2519,15 +2609,16 @@ class RoverAgent:
                     trial_eta *= self.pmd_backtrack_factor
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
-                    candidate_pi = self._policy_from_H(self.H.T, coeff=candidate_coeff)
-                    candidate_M = self.H * (self.E @ candidate_pi.T)
-                    candidate_nu = self.distribution_matcher.compute_nu_pi(
-                        phi_all_next_obs=self._phi_all_next,
-                        psi_all_obs_action=self._psi_all,
-                        K=self.K,
-                        M=candidate_M,
-                        alpha=self._alpha,
-                        sink_norm=sink_norm
+                    candidate_pi = self._policy_from_H(self.sub_H.T, coeff=candidate_coeff)
+                    candidate_M = self.sub_H * (self.E @ candidate_pi.T)
+                    candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
+                        phi_sub_next_obs = self._phi_sub_next,
+                        psi_sub_obs_action = self._psi_sub,
+                        psi_all_obs_action = self._psi_all,
+                        K= self.K,
+                        M = sub_M,
+                        alpha=self._sub_alpha,
+                        sink_norm=sink_norm 
                     )
                     candidate_loss = torch.linalg.norm(candidate_nu) ** 2
                     trial += 1
@@ -2560,6 +2651,7 @@ class RoverAgent:
             metrics['actor_best_loss'] = float(best_loss)
    
         return metrics
+
 
     def _track_gradient_norms(self, gradient, rewards, step):
         """
@@ -3031,6 +3123,7 @@ class RoverAgent:
                 replay_buffer=replay_buffer,
             )
 
+            print(f"samples for actor update: full {all_obs_actor.shape[0]}, subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}")
             if self.subsamples is None:
                 metrics.update(
                     self.update_actor(
@@ -3042,21 +3135,23 @@ class RoverAgent:
                     )
                 )
                 visualizer_obs = all_obs_actor
+                visualizer_z = self._phi_all_obs[:, :-1]
             else:
                 metrics.update(
                     self.update_actor_nystrom(
                         all_obs_actor,
                         all_action_actor,
                         all_next_obs_actor,
+                        step=step,
                         rewards=all_reward_actor,
                         sub_obs=subsampled_obs_actor,
                         sub_action=subsampled_action_actor,
                         sub_next_obs=subsampled_next_obs_actor,
-                        rewards=subsampled_reward_actor,
-                        step=step,
+                        sub_rewards=subsampled_reward_actor,
                     )
                 )
-                visualizer_obs = subsampled_obs_actor
+                visualizer_obs = all_obs_actor
+                visualizer_z = self._phi_all_obs[:, :-1]
 
 
             # === UPDATE VISUALIZER ===
@@ -3064,7 +3159,7 @@ class RoverAgent:
                 # Update metrics with current batch
                 vis_metrics = self.visualizer.update(
                     obs_batch=visualizer_obs,  # Raw pixels for hashing
-                    z_batch=self._phi_all_obs[:, :-1],  # Learned embeddings (remove augmented dimension)
+                    z_batch=visualizer_z,  # Learned embeddings (remove augmented dimension)
                     step=step
                 )
                 metrics.update(vis_metrics)
@@ -3087,7 +3182,7 @@ class RoverAgent:
                 if step % (self.update_actor_every_steps * 3) == 0:
                     try:
                         self.visualizer.plot_tsne(
-                            self._phi_all_obs[:, :-1],  # Remove augmented dim
+                            visualizer_z,  # Remove augmented dim
                             step,
                             method='tsne'
                         )
