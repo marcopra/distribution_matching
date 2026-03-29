@@ -130,8 +130,8 @@ class ReplayBuffer(IterableDataset):
             eps_fn.unlink(missing_ok=True)
         return True
 
-    def _try_fetch(self):
-        if self._samples_since_last_fetch < self._fetch_every:
+    def _try_fetch(self, force=False):
+        if not force and self._samples_since_last_fetch < self._fetch_every:
             return
         self._samples_since_last_fetch = 0
         try:
@@ -224,9 +224,17 @@ class ReplayBuffer(IterableDataset):
         self._all_data_cache_key = cache_key
         return all_transitions
 
-    def get_all_data(self, last_n=None):
+    def _get_first_stored_transition(self):
+        for eps_fn in self._episode_fns:
+            transitions = self._episode_to_transitions(eps_fn)
+            if transitions is None:
+                continue
+            return tuple(field[:1] for field in transitions)
+        raise RuntimeError('Replay buffer is empty')
+
+    def get_all_data(self, last_n=None, first=False):
         try:
-            self._try_fetch()
+            self._try_fetch(force=True)
         except:
             traceback.print_exc()
 
@@ -236,8 +244,13 @@ class ReplayBuffer(IterableDataset):
         if last_n is None:
             return self._get_all_transitions()
 
+        if first:
+            first_transition = self._get_first_stored_transition()
+            if last_n == 1:
+                return first_transition
+
         transition_batches = []
-        remaining = last_n
+        remaining = last_n - 1 if first else last_n
         for eps_fn in reversed(self._episode_fns):
             if remaining == 0:
                 break
@@ -255,12 +268,22 @@ class ReplayBuffer(IterableDataset):
             remaining -= batch_size
 
         if not transition_batches:
+            if first:
+                return first_transition
             raise RuntimeError('Replay buffer is empty')
 
         transition_batches.reverse()
-        return tuple(
+        all_transitions = tuple(
             np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
             for field_idx in range(len(transition_batches[0]))
+        )
+
+        if not first:
+            return all_transitions
+
+        return tuple(
+            np.concatenate([first_transition[field_idx], all_transitions[field_idx]], axis=0)
+            for field_idx in range(len(first_transition))
         )
 
     def __iter__(self):
@@ -302,7 +325,7 @@ def make_replay_loader(storage, max_size, batch_size, num_workers,
                                          worker_init_fn=_worker_init_fn)
     return loader
 
-def relable_episode(env, episode):
+def _relable_mujoco_episode(env, episode):
     rewards = []
     reward_spec = env.reward_spec()
     states = episode['physics']
@@ -314,6 +337,27 @@ def relable_episode(env, episode):
         rewards.append(reward)
     episode['reward'] = np.array(rewards, dtype=reward_spec.dtype)
     return episode
+
+
+def _relable_from_observation_episode(env, episode):
+    rewards = []
+    reward_spec = env.reward_spec()
+    for observation in episode['observation']:
+        reward = env.compute_reward_from_observation(observation)
+        reward = np.full(reward_spec.shape, reward, reward_spec.dtype)
+        rewards.append(reward)
+    episode['reward'] = np.array(rewards, dtype=reward_spec.dtype)
+    return episode
+
+
+def relable_episode(env, episode):
+    if 'physics' in episode and hasattr(env, 'physics') and hasattr(env, 'task'):
+        return _relable_mujoco_episode(env, episode)
+    if hasattr(env, 'compute_reward_from_observation') and 'observation' in episode:
+        return _relable_from_observation_episode(env, episode)
+    raise NotImplementedError(
+        f'Relabelling is not supported for environment type {type(env.unwrapped).__name__}'
+    )
 
 
 class OfflineReplayBuffer(IterableDataset):
@@ -330,7 +374,8 @@ class OfflineReplayBuffer(IterableDataset):
         self._relable = relable
 
     def _load(self, relable=True):
-        print('Labeling data...')
+        if relable:
+            print(f'Relabeling offline data for {type(self._env.unwrapped).__name__}...')
         try:
             worker_id = torch.utils.data.get_worker_info().id
         except:

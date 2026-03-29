@@ -122,6 +122,8 @@ def main(cfg):
     else:
         env_kwargs = {}
 
+    relable = bool(getattr(cfg, 'relable', False))
+
     env = gym_env.make(cfg.task_name, cfg.obs_type, cfg.frame_stack,
                     cfg.action_repeat, cfg.seed, cfg.resolution, cfg.random_init, 
                     cfg.random_goal, url=False, **env_kwargs)
@@ -163,7 +165,7 @@ def main(cfg):
                                        cfg.batch_size,
                                        cfg.replay_buffer_num_workers,
                                        cfg.discount, 
-                                       relable=False)
+                                       relable=relable)
     replay_iter = iter(replay_loader)
 
     # create video recorders

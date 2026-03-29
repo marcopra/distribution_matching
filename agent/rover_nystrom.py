@@ -160,7 +160,7 @@ class DistributionMatcher:
             B: torch.Tensor,
             tag: str,
             jitter_scale: float = 1e-8,
-            max_tries: int = 0,
+            max_tries: int = 3,
         ) -> torch.Tensor:
         """Solve AX=B robustly when A is singular/ill-conditioned."""
         if A.shape[0] != A.shape[1]:
@@ -171,7 +171,7 @@ class DistributionMatcher:
         a_norm = torch.linalg.matrix_norm(A, ord='fro')
         base_jitter = jitter_scale * (a_norm / max(A.shape[0], 1) + 1.0)
 
-        for trial in range(max_tries):
+        for trial in range(max_tries + 1):
             jitter = base_jitter * (10.0 ** trial)
             A_reg = A + jitter * eye
             try:
@@ -264,17 +264,20 @@ class DistributionMatcher:
 
         K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
         K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
-        A_nystrom = K_nm.T @ K_nm + self.lambda_reg * N * K_mm # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
 
-        # svd of A_nystrom for debugging
-        B = self.pseudo_inversa_svd(A_nystrom) @ K_nm.T # [m, n]
-        #self._regularized_solve(A_nystrom, K_nm.T, tag="A_nystrom (compute_nu_pi_nystrom)") # [m, n]
+        B = self._regularized_solve(
+            A_nystrom,
+            K_nm.T,
+            tag="A_nystrom (compute_nu_pi_nystrom)",
+        ) # [m, n]
        
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
         # A = K + self.lambda_reg * torch.eye(N, device=self.device)
         # L = torch.linalg.cholesky(A)
         # BM = torch.cholesky_solve(M, L)
+
 
         BM = B @ M
         
@@ -283,12 +286,11 @@ class DistributionMatcher:
         tilde_BM[:-1, :-1] = BM
         tilde_BM[-1, -1] = 1.0
 
-        inv_term = self.pseudo_inversa_svd( torch.eye(subsamples+1, device=self.device) - self.gamma * tilde_BM) @ tilde_alpha
-        # self._regularized_solve(
-        #     torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
-        #     tilde_alpha,
-        #     tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
-        # )
+        inv_term = self._regularized_solve(
+            torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
+            tilde_alpha,
+            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
+        )
         
         sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
         sink_state[-1] = sink_norm
@@ -398,7 +400,7 @@ class DistributionMatcher:
         """Compute gradient coefficient for policy update."""
         # Identity matrix
         I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
-        n = psi_all_obs_action.shape[0]
+        N = psi_all_obs_action.shape[0]
 
         sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
         sink_state[-1] = sink_norm
@@ -425,9 +427,12 @@ class DistributionMatcher:
         # Symmetric positive definite matrix A = ψψᵀ + λI
         K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
         K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
-        A_nystrom = K_nm.T @ K_nm + self.lambda_reg * n * K_mm # [m, m]
-        B = self.pseudo_inversa_svd(A_nystrom) @ K_nm.T # [m, n]
-        # B = self._regularized_solve(A_nystrom, K_nm.T, tag="A_nystrom (compute_gradient_coefficient_nystrom)") # [m, n]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
+        B = self._regularized_solve(
+            A_nystrom,
+            K_nm.T,
+            tag="A_nystrom (compute_gradient_coefficient_nystrom)",
+        ) # [m, n]
         tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
         tilde_B[:-1, :-1] = B
 
@@ -453,14 +458,11 @@ class DistributionMatcher:
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
         tilde_B_tilde_M = tilde_B @ tilde_M
         I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
-        symmetric_term = self.pseudo_inversa_svd(I_n_plus1 - self.gamma * tilde_B_tilde_M) @ tilde_phi_sub_next_obs
-        
-        # self._regularized_solve(
-        #     (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
-        #     tilde_phi_sub_next_obs,
-        #     tag="(I - gamma*tilde_B_tilde_M)^T",
-        # )
-        # symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_all_next_obs)
+        symmetric_term = self._regularized_solve(
+            (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
+            tilde_phi_sub_next_obs,
+            tag="(I - gamma*tilde_B_tilde_M)^T",
+        )
 
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
         # Solve Ãᵀ x = left_term_without_b using Cholesky
@@ -2547,7 +2549,7 @@ class RoverAgent:
         sink_norm = utils.schedule(self.sink_schedule, step)
         self.pi = self._policy_from_H(self.sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
-        M = self.sub_H*(self.E@self.pi.T) # [n, ]
+        # M = self.H*(self.E@self.pi.T) # [n, ]
         sub_M = self.sub_H*(self.E@self.pi.T) # [n, m]
 
         nu_pi = self.distribution_matcher.compute_nu_pi_nystrom(
@@ -2576,10 +2578,9 @@ class RoverAgent:
                 psi_sub_obs_action = self._psi_sub,
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm
-            )
-           
+            )           
 
-            # # Track gradient norms by reward (only on final iteration)
+            # Track gradient norms by reward (only on final iteration)
             # if iteration == self.pmd_steps - 1 and sub_rewards is not None:
             #     self._track_gradient_norms(grad_update, sub_rewards, step)
 
@@ -2612,7 +2613,7 @@ class RoverAgent:
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
                     K= self.K,
-                    M = sub_M,
+                    M =candidate_M,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
                 )
@@ -2767,7 +2768,10 @@ class RoverAgent:
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
     def _load_actor_batch_from_replay_buffer(self, replay_buffer):
-        actor_batch = replay_buffer.get_all_data(last_n=self.batch_size_actor)
+        if self.subsamples is None:
+            actor_batch = replay_buffer.get_all_data(last_n=self.batch_size_actor, first=True)
+        else:
+            actor_batch = replay_buffer.get_all_data(last_n=None)
         obs_actor_full, action_actor_full, reward_actor_full, _, next_obs_actor_full = utils.to_torch(
             actor_batch[:5], self.device
         )
@@ -3139,7 +3143,7 @@ class RoverAgent:
                 replay_buffer=replay_buffer,
             )
 
-            print(f"samples for actor update: full {all_obs_actor.shape[0]}, subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}")
+            utils.ColorPrint.red(f"samples for actor update: full {all_obs_actor.shape[0]}, subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}")
             if self.subsamples is None:
                 metrics.update(
                     self.update_actor(

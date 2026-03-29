@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover
+  - /agent: rover 
   - /env: minigrid_empty_16x16
   # - override hydra/launcher: submitit_local
   

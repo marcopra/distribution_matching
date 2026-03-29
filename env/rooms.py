@@ -184,6 +184,22 @@ class BaseRoomEnv(gym.Env, ABC):
     def _get_obs(self) -> int:
         """Get current observation (state index)."""
         return self.state_to_idx[self._agent_location]
+
+    def compute_reward_from_observation(self, observation: int) -> float:
+        """Compute the reward associated with a stored observation under the current goal."""
+        cell = self.idx_to_state[int(np.asarray(observation).item())]
+        terminated = cell == self.goal_position
+        in_dead_state = self.lava and cell == self.DEAD_STATE
+
+        if self.dense_reward:
+            if terminated:
+                return 0.0
+            if in_dead_state:
+                return -1.0
+            distance = abs(cell[0] - self.goal_position[0]) + abs(cell[1] - self.goal_position[1])
+            return -distance
+
+        return 0.0 if terminated else -1.0
     
     def _get_info(self) -> Dict:
         """Get auxiliary information."""
@@ -739,4 +755,3 @@ gym.register(
     entry_point="env:FourRoomsEnv",
     max_episode_steps=300,
 )
-
