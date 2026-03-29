@@ -21,12 +21,12 @@ random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
-num_train_frames: 40_000_000
+num_train_frames: 1_000_000
 num_seed_frames: 8000
 
 # eval
 eval_every_frames: 25000
-num_eval_episodes: 5
+num_eval_episodes: 1
 
 # snapshot
 snapshots: [500000000000]
@@ -47,7 +47,7 @@ save_train_video: false
 save_buffer: true
 use_tb: true
 use_wandb: false
-wandb_project: "pretrain_gym"
+wandb_project: "montezouma_test"
 wandb_entity: "urlb"
 wandb_tag: none
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${task_name}
