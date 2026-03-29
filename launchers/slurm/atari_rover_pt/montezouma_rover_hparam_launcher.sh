@@ -5,9 +5,9 @@ envs=(
     # "pong"
     # "pong_score_masked"
     # "tennis_score_masked"
-    # "bowling_score_masked"
+    "bowling_score_masked"
     # "mariobros_score_masked"
-    "montezoumarevenge_score_masked"
+    # "montezoumarevenge_score_masked"
 )
 lr_actors=(
     # 10 
@@ -30,7 +30,7 @@ batch_sizes_actor=(
 feature_dims=(
     50
     128
-    512
+    # 512
     # 1024
     # 2048
 )

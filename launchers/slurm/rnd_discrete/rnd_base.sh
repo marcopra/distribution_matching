@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua-longrun
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
@@ -24,4 +24,4 @@ else
 	EXTRA_FLAGS=''
 fi
 
-python pretrain.py $EXTRA_FLAGS agent=rnd_discrete use_wandb=true eval_every_frames=20_000 num_train_frames=5_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="rnd_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines" #agent.feature_dim=512
+python pretrain.py $EXTRA_FLAGS agent=rnd_discrete use_wandb=true eval_every_frames=20_000 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="rnd_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines" agent.feature_dim=${FEATURE_DIM}

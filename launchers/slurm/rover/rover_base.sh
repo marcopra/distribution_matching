@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python pretrain.py use_wandb=true wandb_project="rover_pong" agent.lr_actor=10  agent.pmd_steps=500 eval_every_frames=100_000 num_train_frames=8_100_000 agent.update_every_steps=5 agent.update_actor_every_steps=10000 configs/env=${ENV} device=cuda seed=${SEED} save_video=false wandb_tag="rover" env.render_mode="rgb_array" agent.batch_size_actor=${BATCH_SIZE_ACTOR} 
+python pretrain.py use_wandb=true wandb_project="rover_pong" agent.lr_actor=10  agent.pmd_steps=500 eval_every_frames=100_000 num_train_frames=1_000_000 agent.update_every_steps=5 agent.update_actor_every_steps=10000 configs/env=${ENV} device=cuda seed=${SEED} save_video=false wandb_tag="rover" env.render_mode="rgb_array" agent.batch_size_actor=${BATCH_SIZE_ACTOR} 

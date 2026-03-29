@@ -20,11 +20,17 @@ obs_types=(
 # "discrete_states"
 )
 
+feature_dims=(
+    # "50"
+    "512"
+    )
 
 for seed in $seeds; do   
     for env in "${envs[@]}"; do
         for obs_type in "${obs_types[@]}"; do
-            sbatch --export=SEED="${seed}",ENV="${env}",OBS_TYPE="${obs_type}" launchers/slurm/rnd_discrete/rnd_base.sh
+            for feature_dim in "${feature_dims[@]}"; do
+                sbatch --export=SEED="${seed}",ENV="${env}",OBS_TYPE="${obs_type}",FEATURE_DIM="${feature_dim}"  launchers/slurm/rnd_discrete/rnd_base.sh
+            done
         done
     done
 done

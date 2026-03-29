@@ -23,4 +23,4 @@ if [[ "${ENV}" == montezouma* ]]; then
 else
 	EXTRA_FLAGS=''
 fi
-python pretrain.py $EXTRA_FLAGS agent=smm_discrete use_wandb=true eval_every_frames=20_000 num_train_frames=5_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="smm_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines"  #agent.feature_dim=512
+python pretrain.py $EXTRA_FLAGS agent=smm_discrete use_wandb=true eval_every_frames=20_000 num_train_frames=1_000_000 env=${ENV} device=cuda seed=${SEED} wandb_tag="smm_discrete" obs_type=${OBS_TYPE} env.render_mode="rgb_array" wandb_project="url_atari_baselines"  agent.feature_dim=${FEATURE_DIM}

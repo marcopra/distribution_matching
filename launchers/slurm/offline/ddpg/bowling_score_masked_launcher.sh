@@ -1,14 +1,14 @@
 #!/bin/bash
 
-seeds="6"
+seeds="0 1 2 3 4 5 6"
 model_path=(
-    "/home/mprattico/distribution_matching/data_offline/new_bowling_score_masked/1M/random"
+    # "/home/mprattico/distribution_matching/data_offline/new_bowling_score_masked/1M/random"
     # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/rover"
-    # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/rover_64"
+    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/rover_50"
     # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/cic"
     # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/rnd"
     # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/smm"
-    # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/icm_apt"
+    # "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/icm_apt50"
     )
 
 

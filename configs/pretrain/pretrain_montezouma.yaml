@@ -11,7 +11,7 @@ reward_free: true
 domain: gym
 task_name: ${env.name}
 obs_type: pixels
-frame_stack: 4
+frame_stack: 3
 action_repeat: 4
 discount: 0.999
 resolution: 84
