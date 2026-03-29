@@ -11,6 +11,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from PIL import Image, ImageDraw, ImageFont
+from dm_env import specs
 
 
 class BaseRoomEnv(gym.Env, ABC):
@@ -185,9 +186,21 @@ class BaseRoomEnv(gym.Env, ABC):
         """Get current observation (state index)."""
         return self.state_to_idx[self._agent_location]
 
+    def reward_spec(self):
+        return specs.Array(shape=(1,), dtype=np.float32, name='reward')
+
+    def discount_spec(self):
+        return specs.Array(shape=(1,), dtype=np.float32, name='discount')
+
     def compute_reward_from_observation(self, observation: int) -> float:
         """Compute the reward associated with a stored observation under the current goal."""
-        cell = self.idx_to_state[int(np.asarray(observation).item())]
+        observation = np.asarray(observation)
+        if observation.ndim == 0 or observation.size == 1:
+            state_idx = int(observation.item())
+        else:
+            state_idx = int(np.argmax(observation))
+
+        cell = self.idx_to_state[state_idx]
         terminated = cell == self.goal_position
         in_dead_state = self.lava and cell == self.DEAD_STATE
 

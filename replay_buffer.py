@@ -351,12 +351,14 @@ def _relable_from_observation_episode(env, episode):
 
 
 def relable_episode(env, episode):
+    base_env = getattr(env, 'unwrapped', env)
+
     if 'physics' in episode and hasattr(env, 'physics') and hasattr(env, 'task'):
         return _relable_mujoco_episode(env, episode)
-    if hasattr(env, 'compute_reward_from_observation') and 'observation' in episode:
-        return _relable_from_observation_episode(env, episode)
+    if 'observation' in episode and hasattr(base_env, 'compute_reward_from_observation'):
+        return _relable_from_observation_episode(base_env, episode)
     raise NotImplementedError(
-        f'Relabelling is not supported for environment type {type(env.unwrapped).__name__}'
+        f'Relabelling is not supported for environment type {type(base_env).__name__}'
     )
 
 
