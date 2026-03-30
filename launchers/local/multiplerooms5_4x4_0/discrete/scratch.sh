@@ -7,4 +7,4 @@ python train.py --config-name=train/finetune env=multiplerooms5_4x4_0 device=cud
 python train.py --config-name=train/finetune env=multiplerooms5_4x4_0 device=cuda:${CUDA_DEVICE} wandb_tag=from_scratch num_train_frames=50_000 seed=3
 python train.py --config-name=train/finetune env=multiplerooms5_4x4_0 device=cuda:${CUDA_DEVICE} wandb_tag=from_scratch num_train_frames=50_000 seed=4
 python train.py --config-name=train/finetune env=multiplerooms5_4x4_0 device=cuda:${CUDA_DEVICE} wandb_tag=from_scratch num_train_frames=50_000 seed=5
-python train.py --config-name=train/finetune env=multiplerooms5_4x4_0 wandb_tag=from_scratch num_train_frames=50_000 seed=6
+python train.py --config-name=train/finetune env=multiplerooms5_4x4_0 device=cuda:${CUDA_DEVICE} wandb_tag=from_scratch num_train_frames=50_000 seed=6
