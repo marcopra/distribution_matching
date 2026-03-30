@@ -22,4 +22,4 @@ export HYDRA_FULL_ERROR=1
 : "${ENCODER_PATH:?ENCODER_PATH is not set}"
 
 
-python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=tennis_score_masked use_wandb=true agent.feature_dim=128 seed=$SEED num_grad_steps=500000 +encoder_path="${ENCODER_PATH}"
+python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=tennis_score_masked use_wandb=true agent.feature_dim=128 seed=$SEED num_grad_steps=200000 +encoder_path="${ENCODER_PATH}"

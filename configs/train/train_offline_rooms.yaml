@@ -62,3 +62,4 @@ hydra:
   #   mem_gb: 160
   #   nodes: 1
   #   submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}/.slurm
+

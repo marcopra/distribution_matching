@@ -18,4 +18,4 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 
-python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong_score_masked use_wandb=true seed=$SEED num_grad_steps=500000 +encoder_path=/home/mprattico/distribution_matching/data_offline/pong_score_masked/190830_971691_dist_matching/models/pixels/gym/dist_matching/1/snapshot.pt agent.feature_dim=512
+python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir="${REPLAY_BUFFER_DIR}" env=pong_score_masked use_wandb=true seed=$SEED num_grad_steps=200000 +encoder_path=/home/mprattico/distribution_matching/data_offline/pong_score_masked/190830_971691_dist_matching/models/pixels/gym/dist_matching/1/snapshot.pt agent.feature_dim=512
