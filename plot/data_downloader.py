@@ -12,6 +12,7 @@ python /home/mprattico/Pretrain-TACO/plot/download_data_from_wandb.py --csv_path
 
 python plot/data_downloader.py --csv_path data_plot/states/multirooms --filter_by_config "env/name=MultipleRooms-v0&obs_type=pixels" --group_by_config agent/_target_ --project finetune_gym --download --processing --n_points 80
 python plot/data_downloader.py --csv_path data_plot/states/two_rooms/goal_1 --filter_by_config "env/name=TwoRooms-v0&obs_type=discrete_states" --group_by_config agent/p_path --project old_finetune --download
+python plot/data_downloader.py --csv_path data_plot/states/two_rooms/goal_1 --filter_by_config "agent/actor_lr=0.0000001" --filter_by_tags goal_1 --group_by_config p_path --project finetune_rebuttals --download
 
 
 """
@@ -291,7 +292,7 @@ def main():
     parser.add_argument('--max_x', type=int, default=1000000, help='maximum x axis value of points to plot')
     parser.add_argument('--min_x', type=int, default=0, help='minimum x axis value of points to plot')
     parser.add_argument('--group_by_config', type=str, default="pretrained_path", help='Config parameter to use for grouping and naming saved files')
-    parser.add_argument('--max_runs_per_group', type=int, default=15, 
+    parser.add_argument('--max_runs_per_group', type=int, default=None, 
                         help='Maximum number of runs to download per group (based on group_by_config). If None, download all runs')
 
     args = parser.parse_args()
