@@ -2633,7 +2633,7 @@ class RoverAgent:
                         psi_sub_obs_action = self._psi_sub,
                         psi_all_obs_action = self._psi_all,
                         K= self.K,
-                        M = sub_M,
+                        M = candidate_M,
                         alpha=self._sub_alpha,
                         sink_norm=sink_norm 
                     )
@@ -2645,7 +2645,7 @@ class RoverAgent:
             self.gradient_coeff = candidate_coeff
             prev_gradient_coeff = grad_update.clone()
             self.pi = candidate_pi
-            M = candidate_M
+            sub_M = candidate_M
             actor_loss = candidate_loss
 
             if actor_loss < best_loss:

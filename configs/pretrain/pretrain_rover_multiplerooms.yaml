@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /agent: rover
-  - /env: two_rooms7_0 #multiplerooms5_4x4_0
+  - /env: multiplerooms5_4x4_0
   # - override hydra/launcher: submitit_local
   
 # mode
@@ -61,7 +61,6 @@ agent:
   feature_dim: 200
   lambda_reg: 1e-6
   embeddings: true
-  curl: false
   lr_actor: 10
   pmd_steps: 250
   sink_schedule: "linear(0.0, 0.05, 50_000)"

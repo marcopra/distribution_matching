@@ -874,7 +874,11 @@ class EmbeddingDistributionVisualizer:
         legend_elements = [Patch(facecolor=self.action_colors[i], 
                                 label=self.action_names[i])
                           for i in range(self.n_actions)]
-        ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+        ax.legend(handles=legend_elements,
+                  loc='upper left',
+                  bbox_to_anchor=(1.02, 1.0),
+                  borderaxespad=0.0,
+                  fontsize=8)
     
     def _plot_action_heatmaps(self, axes_list, policy_per_state):
         """Plot heatmaps for each action's probability distribution."""
@@ -1839,4 +1843,3 @@ class DistMatchingEmbeddingAgent:
                     self.visualizer.plot_embeddings_2d(save_path=save_path, use_tsne=True, project=True)
                 print(f"Visualization saved to: {save_path}")
         return metrics
-
