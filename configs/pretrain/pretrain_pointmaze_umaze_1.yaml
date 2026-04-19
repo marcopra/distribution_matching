@@ -50,7 +50,7 @@ save_train_video: false
 save_buffer: true
 use_tb: true
 use_wandb: false
-wandb_project: "pretrain_gym"
+wandb_project: "pretrain_pointmaze"
 wandb_entity: "urlb"
 wandb_tag: none
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${task_name}
