@@ -4,7 +4,9 @@
 env:
   name: "ALE/MarioBros-v5"
   render_mode: rgb_array
-  score_mask: true
+  atari:
+    score_mask:
+      enabled: true
   frameskip: 1
 
 # agent:

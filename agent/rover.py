@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import copy
 import os
+from textwrap import shorten
 import hydra
 import numpy as np
 import numpy.ma as ma
@@ -25,6 +26,7 @@ from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
 import logging
+from agent.debug_visualization import build_debug_visualizer_suite
 # set logging level to info
 import logging
 
@@ -976,7 +978,7 @@ class EmbeddingDistributionVisualizerV2:
                 if s_idx % 10 == 0:
                     print(f"  Rendering state {s_idx}/{self.n_states}...")
                 
-                image = self.env.render_from_position(self.env.idx_to_state[s_idx])
+                image = self.env.render_from_position(self.env.idx_to_state[s_idx], show_goal=False)
                 if self.agent.grayscale:
                     image = np.asarray(
                         Image.fromarray(image.astype(np.uint8)).convert('L')
@@ -1138,7 +1140,7 @@ class EmbeddingDistributionVisualizerV2:
             frame_stack = self.agent.obs_shape[0] // self.agent.image_channels
             
             # Get position from state index
-            image = self.env.render_from_position(self.env.idx_to_state[state_idx])
+            image = self.env.render_from_position(self.env.idx_to_state[state_idx], show_goal=False)
             if self.agent.grayscale:
                 image = np.asarray(
                     Image.fromarray(image.astype(np.uint8)).convert('L')
@@ -1893,18 +1895,12 @@ class RoverAgent:
         self.policy_deviation_history = []  # List of [step, deviation_value]
 
     
-        self.visualizer = ExplorationVisualizer(
-            obs_shape=obs_shape,
-            obs_type=obs_type,  # Pass obs_type here!
-            feature_dim=self.feature_dim,
-            hash_dim=1024,
-            k_neighbors=5,
-            occupancy_window=self.update_actor_every_steps*3,
-            save_dir=os.path.join("exploration_plots", os.getcwd()),
-            device=self.device
+        self.debug_visualizer = build_debug_visualizer_suite(
+            agent=self,
+            exploration_visualizer_cls=ExplorationVisualizer,
+            gridworld_visualizer_cls=EmbeddingDistributionVisualizerV2,
         )
-
-        # Gridworld-specific visualizer (initialized later via insert_env)
+        self.visualizer = self.debug_visualizer.exploration_visualizer
         self.gridworld_visualizer = None
         self.env = None
         self.wrapped_env = None
@@ -1947,12 +1943,12 @@ class RoverAgent:
         self.wrapped_env = env
         self.env = self._find_discrete_env(env)
         
-        # Initialize gridworld visualizer
         try:
-            self.gridworld_visualizer = EmbeddingDistributionVisualizerV2(self)
-            print("✓ Gridworld-specific visualizer initialized")
+            self.gridworld_visualizer = self.debug_visualizer.attach_env(env)
+            if self.gridworld_visualizer is not None:
+                print("✓ Domain-specific debug visualizer initialized")
         except Exception as e:
-            print(f"⚠ Could not initialize gridworld visualizer: {e}")
+            print(f"⚠ Could not initialize domain-specific debug visualizer: {e}")
             self.gridworld_visualizer = None
 
 
@@ -2645,18 +2641,7 @@ class RoverAgent:
             metrics.update(self.update_actor(obs_actor, action_actor, next_obs_actor, step, rewards=reward_actor))
 
 
-            # === UPDATE VISUALIZER ===
-            if self.visualizer is not None:
-                # Update metrics with current batch
-                vis_metrics = self.visualizer.update(
-                    obs_batch=obs_actor,  # Raw pixels for hashing
-                    z_batch=self._phi_all_obs[:, :-1],  # Learned embeddings (remove augmented dimension)
-                    step=step
-                )
-                metrics.update(vis_metrics)
-                
-                #add text
-                  
+            if self.debug_visualizer is not None:
                 param_text = (
                     f"Step: {step}\n"
                     f"γ = {self.discount}\n"
@@ -2664,29 +2649,15 @@ class RoverAgent:
                     f"λ = {self.lambda_reg}\n"
                     f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
                     f"PMD steps = {self.pmd_steps}\n"
-                    
                 )
-                        # Generate plots periodically
-                self.visualizer.plot_all(step, param_text=param_text)
-                    
-                # Generate t-SNE less frequently (expensive)
-                if step % (self.update_actor_every_steps * 3) == 0:
-                    try:
-                        self.visualizer.plot_tsne(
-                            self._phi_all_obs[:, :-1],  # Remove augmented dim
-                            step,
-                            method='tsne'
-                        )
-                    except Exception as e:
-                        print(f"⚠ Could not generate t-SNE plot at step {step}: {e}")
-
-                try:
-                    save_path = f"gridworld_plots/step_{step}.png"
-                    os.makedirs("gridworld_plots", exist_ok=True)
-                    self.gridworld_visualizer.plot_results(step, save_path)
-                    print(f"✓ Gridworld plot saved: {save_path}")
-                except Exception as e:
-                    print(f"⚠ Could not generate gridworld plot at step {step}: {e}")
+                metrics.update(
+                    self.debug_visualizer.save(
+                        step=step,
+                        obs_batch=obs_actor,
+                        z_batch=self._phi_all_obs[:, :-1],
+                        param_text=param_text,
+                    )
+                )
         
         
             with torch.no_grad():

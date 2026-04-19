@@ -82,16 +82,31 @@ class Workspace:
                              use_tb=cfg.use_tb,
                              use_wandb=cfg.use_wandb)
         # create envs
-        task = cfg.task_name
-        if hasattr(cfg, 'env'):
-            env_kwargs = gym_env.make_kwargs(cfg)
-        else:
-            env_kwargs = {}
+        env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
+        env_kwargs.pop('name', None)
 
-        self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
-        self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
+        self.train_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=True,
+            **env_kwargs,
+        )
+        self.eval_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=True,
+            **env_kwargs,
+        )
        
         # TODO: modify the make function to work with cfg and modify inplace the cfg values, this is a temporary solution to avoid modifying the make function
         if isinstance(self.train_env.unwrapped, ale_py.env.AtariEnv) or str(self.cfg.task_name).startswith("ALE/"):
@@ -115,8 +130,8 @@ class Workspace:
 
     
         if hasattr(self.agent, 'insert_env'):
-            # Pass the wrapped train_env, not unwrapped
-            self.agent.insert_env(self.train_env)
+            # Use eval_env for debug rollouts so visualization does not disturb training.
+            self.agent.insert_env(self.eval_env)
     
 
         # create replay buffer
@@ -253,24 +268,23 @@ class Workspace:
             # if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
             if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
                 self._global_episode += 1
-                # Print every 10 episodes:
-                if self._global_episode % 10 == 0:
-                    self.train_video_recorder.save(f'{self.global_frame}.mp4')
-                    # wait until all the metrics schema is populated
-                    if metrics is not None:
-                        # log stats
-                        elapsed_time, total_time = self.timer.reset()
-                        episode_frame = episode_step * self.cfg.action_repeat
-                        with self.logger.log_and_dump_ctx(self.global_frame,
-                                                        ty='train') as log:
-                            log('fps', episode_frame / elapsed_time)
-                            log('total_time', total_time)
-                            log('episode_reward', episode_reward)
-                            log('episode_length', episode_frame)
-                            log('episode', self.global_episode)
-                            log('buffer_size', len(self.replay_storage))
-                            log('step', self.global_step)
-                            self._log_montezuma_episode_metrics(log, time_step)
+                
+                self.train_video_recorder.save(f'{self.global_frame}.mp4')
+                # wait until all the metrics schema is populated
+                if metrics is not None:
+                    # log stats
+                    elapsed_time, total_time = self.timer.reset()
+                    episode_frame = episode_step * self.cfg.action_repeat
+                    with self.logger.log_and_dump_ctx(self.global_frame,
+                                                    ty='train') as log:
+                        log('fps', episode_frame / elapsed_time)
+                        log('total_time', total_time)
+                        log('episode_reward', episode_reward)
+                        log('episode_length', episode_frame)
+                        log('episode', self.global_episode)
+                        log('buffer_size', len(self.replay_storage))
+                        log('step', self.global_step)
+                        self._log_montezuma_episode_metrics(log, time_step)
 
                 if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
                     meta = self.agent.update_meta(meta, self.global_step, time_step)

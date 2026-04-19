@@ -4,8 +4,9 @@
 env:
   name: "BowlingNoFrameskip-v4"
   render_mode: rgb_array
-  score_mask: true
-  score_mask_band: 14
+  atari:
+    score_mask:
+      enabled: true
 
 # agent:
 #   feature_dim: 512

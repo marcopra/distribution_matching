@@ -1,10 +1,9 @@
 # @package _global_
-# Classical MiniGrid benchmark configuration.
 defaults:
-  - /agent: rover 
-  - /env: minigrid_empty_16x16
+  - /agent: rover
+  - /env: fetch/fetch_reach_goal_1
   # - override hydra/launcher: submitit_local
-  
+
 # mode
 reward_free: true
 
@@ -15,15 +14,15 @@ obs_type: pixels
 frame_stack: 1
 action_repeat: 1
 discount: 0.99
+resolution: 96
 grayscale: false
-resolution: 84
 random_init: true
 random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
 num_train_frames: 500_000
-num_seed_frames: 500
+num_seed_frames: 2000
 
 # eval
 eval_every_frames: 10000
@@ -43,7 +42,7 @@ update_encoder: true
 # misc
 seed: 1
 device: cuda
-save_video: true
+save_video: false
 save_train_video: false
 save_buffer: true
 use_tb: true
@@ -56,19 +55,6 @@ wandb_id: none
 
 # experiment
 experiment: exp
-
-# agent overrides
-agent:
-  feature_dim: 200
-  lambda_reg: 1e-3
-  embeddings: false
-  curl: false
-  lr_actor: 100
-  pmd_steps: 250
-  sink_schedule: "linear(0.0, 0.01, 500_000)"
-  batch_size_actor: 8000
-  T_init_steps: 100
-  embedding_sum_loss: 0
 
 hydra:
   run:

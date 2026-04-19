@@ -80,16 +80,31 @@ class Workspace:
                 
 
         # create envs
-        task = cfg.task_name
-        if hasattr(cfg, 'env'):
-            env_kwargs = gym_env.make_kwargs(cfg)
-        else:
-            env_kwargs = {}
+        env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
+        env_kwargs.pop('name', None)
 
-        self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
-        self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
+        self.train_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=True,
+            **env_kwargs,
+        )
+        self.eval_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=False,
+            **env_kwargs,
+        )
        
         # TODO: modify the make function to work with cfg and modify inplace the cfg values, this is a temporary solution to avoid modifying the make function
         if isinstance(self.train_env.unwrapped, ale_py.env.AtariEnv) or str(self.cfg.task_name).startswith("ALE/"):

@@ -117,16 +117,22 @@ def main(cfg):
                 mode='online')
                 
     # create envs
-    if hasattr(cfg, 'env'):
-        env_kwargs = gym_env.make_kwargs(cfg)
-    else:
-        env_kwargs = {}
+    env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
+    env_kwargs.pop('name', None)
 
     relable = bool(getattr(cfg, 'relable', False))
 
-    env = gym_env.make(cfg.task_name, cfg.obs_type, cfg.frame_stack,
-                    cfg.action_repeat, cfg.seed, cfg.resolution, cfg.random_init, 
-                    cfg.random_goal, url=False, **env_kwargs)
+    env = gym_env.make(
+        cfg.task_name,
+        cfg.obs_type,
+        frame_stack=cfg.frame_stack,
+        action_repeat=cfg.action_repeat,
+        seed=cfg.seed,
+        resolution=cfg.resolution,
+        grayscale=cfg.grayscale,
+        url=False,
+        **env_kwargs,
+    )
     
     
 

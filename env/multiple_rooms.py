@@ -58,7 +58,7 @@ class MultipleRoomsEnv(BaseRoomEnv):
         room_size: int,
         corridor_height: int,
         connector_length: int,
-        connector_position: Optional[int],
+        connector_position: Optional[int] = None,
         goal_position: Optional[Tuple[int, int]] = None,
         start_position: Optional[Tuple[int, int]] = None,
         max_steps: int = 300,

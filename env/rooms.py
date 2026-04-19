@@ -158,12 +158,17 @@ class BaseRoomEnv(gym.Env, ABC):
             else:
                 return cell  # Stay in place if hitting a wall
     
-    def render_from_position(self, position: Tuple[int, int]) -> np.ndarray:
+    def render_from_position(
+        self,
+        position: Tuple[int, int],
+        show_goal: bool = False,
+    ) -> np.ndarray:
         """
         Render the environment from a specific agent position without modifying state.
         
         Args:
             position: (x, y) tuple representing agent position
+            show_goal: Whether to render the goal marker
             
         Returns:
             RGB image array of shape (H, W, 3)
@@ -175,7 +180,7 @@ class BaseRoomEnv(gym.Env, ABC):
         self._agent_location = position
         
         # Render the image
-        img = self._render_rgb()
+        img = self._render_rgb(show_goal=show_goal)
         
         # Restore original agent location
         self._agent_location = original_location
@@ -327,16 +332,24 @@ class BaseRoomEnv(gym.Env, ABC):
         
         return observation, reward, terminated, truncated, info
     
-    def render(self):
+    def render(self, show_goal: bool = True):
         """Render the environment."""
         if self.render_mode is None:
             return None
         elif self.render_mode == "ansi" or self.render_mode == "human":
-            return self._render_ansi()
+            return self._render_ansi(show_goal=show_goal)
         elif self.render_mode == "rgb_array":
-            return self._render_rgb()
+            return self._render_rgb(show_goal=show_goal)
+
+    def render_observation(self) -> np.ndarray:
+        """Render the pixel observation consumed by the agent."""
+        return self._render_rgb(show_goal=False)
+
+    def render_image_observation(self) -> np.ndarray:
+        """Render an auxiliary image observation with the goal visible."""
+        return self._render_rgb(show_goal=True)
     
-    def _render_ansi(self) -> Optional[str]:
+    def _render_ansi(self, show_goal: bool = True) -> Optional[str]:
         """Render the environment as ASCII art."""
         # Don't include dead state in rendering bounds
         valid_cells = [cell for cell in self.cells if cell != self.DEAD_STATE]
@@ -355,7 +368,7 @@ class BaseRoomEnv(gym.Env, ABC):
                     row.append('L')
                 elif (x, y) == self._agent_location and self._agent_location != self.DEAD_STATE:
                     row.append('A')
-                elif (x, y) == self.goal_position:
+                elif show_goal and (x, y) == self.goal_position:
                     row.append('G')
                 elif (x, y) in self.state_to_idx:
                     row.append('.')
@@ -371,7 +384,7 @@ class BaseRoomEnv(gym.Env, ABC):
         
         return output
     
-    def _render_rgb(self) -> np.ndarray:
+    def _render_rgb(self, show_goal: bool = True) -> np.ndarray:
         """Render the environment as RGB image."""
         cell_size = 64
         cell_padding = 2  # Padding to create gray lines between cells
@@ -494,7 +507,7 @@ class BaseRoomEnv(gym.Env, ABC):
                     )
                     
                     # Check if this is the goal or agent position
-                    is_goal = (x, y) == self.goal_position
+                    is_goal = show_goal and (x, y) == self.goal_position
                     is_agent = (x, y) == self._agent_location and self._agent_location != self.DEAD_STATE
                     
                     center_x = px + cell_size // 2

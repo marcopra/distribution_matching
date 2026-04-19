@@ -4,7 +4,9 @@
 env:
   name: "ALE/MontezumaRevenge-v5"
   render_mode: rgb_array
-  score_mask: true
+  atari:
+    score_mask:
+      enabled: true
   frameskip: 1
   repeat_action_probability: 0.0
   max_episode_steps: 18000
