@@ -95,6 +95,8 @@ class ContinuousCoverageVisualizer(BaseDomainDebugVisualizer):
         self.save_dir = Path(save_dir)
         self.rollout_steps = rollout_steps
         self.bins = bins
+        self._running_lower_bounds: Optional[np.ndarray] = None
+        self._running_upper_bounds: Optional[np.ndarray] = None
 
     def _sample_policy_rollout(self, step: int) -> np.ndarray:
         rng = np.random.default_rng(int(step))
@@ -124,6 +126,80 @@ class ContinuousCoverageVisualizer(BaseDomainDebugVisualizer):
     def _extract_coordinates(self, time_step) -> Optional[np.ndarray]:
         raise NotImplementedError
 
+    def _get_env_plot_bounds(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        if not self._use_env_plot_bounds():
+            return None
+
+        method = _get_env_method(self.env, "get_debug_plot_bounds")
+        if not callable(method):
+            return None
+
+        bounds = method()
+        if isinstance(bounds, dict):
+            lower = bounds.get("lower")
+            upper = bounds.get("upper")
+        elif isinstance(bounds, (tuple, list)) and len(bounds) == 2:
+            lower, upper = bounds
+        else:
+            return None
+
+        if lower is None or upper is None:
+            return None
+
+        lower = np.asarray(lower, dtype=np.float32).reshape(-1)
+        upper = np.asarray(upper, dtype=np.float32).reshape(-1)
+        if lower.shape != upper.shape:
+            return None
+        return self._expand_bounds(lower, upper)
+
+    def _update_running_bounds(self, coords: np.ndarray) -> None:
+        if coords.size == 0:
+            return
+
+        coords_min = coords.min(axis=0)
+        coords_max = coords.max(axis=0)
+        if self._running_lower_bounds is None:
+            self._running_lower_bounds = coords_min.copy()
+            self._running_upper_bounds = coords_max.copy()
+            return
+
+        self._running_lower_bounds = np.minimum(self._running_lower_bounds, coords_min)
+        self._running_upper_bounds = np.maximum(self._running_upper_bounds, coords_max)
+
+    def _get_plot_bounds(self, coords: np.ndarray) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        env_bounds = self._get_env_plot_bounds()
+        if env_bounds is not None:
+            return env_bounds
+
+        self._update_running_bounds(coords)
+        if self._running_lower_bounds is None or self._running_upper_bounds is None:
+            return None
+        return self._expand_bounds(self._running_lower_bounds, self._running_upper_bounds)
+
+    @staticmethod
+    def _expand_bounds(
+        lower: np.ndarray,
+        upper: np.ndarray,
+        relative_margin: float = 0.05,
+        minimum_margin: float = 1e-3,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        lower = lower.astype(np.float32, copy=True)
+        upper = upper.astype(np.float32, copy=True)
+
+        span = upper - lower
+        margin = np.maximum(np.abs(span) * relative_margin, minimum_margin)
+        lower -= margin
+        upper += margin
+
+        degenerate = upper <= lower
+        if np.any(degenerate):
+            lower[degenerate] -= minimum_margin
+            upper[degenerate] += minimum_margin
+        return lower, upper
+
+    def _use_env_plot_bounds(self) -> bool:
+        return True
+
 
 class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
     def __init__(self, agent, env, save_dir: str = "fetch_plots", rollout_steps: int = 256, bins: int = 36):
@@ -147,6 +223,10 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
         coords = self._sample_policy_rollout(step)
         if coords.size == 0:
             return
+        bounds = self._get_plot_bounds(coords)
+        if bounds is None:
+            return
+        lower, upper = bounds
 
         self.save_dir.mkdir(parents=True, exist_ok=True)
         fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
@@ -161,18 +241,21 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
                 coords[:, i],
                 coords[:, j],
                 bins=self.bins,
+                range=[[lower[i], upper[i]], [lower[j], upper[j]]],
             )
             im = ax.imshow(
                 heatmap.T,
                 origin="lower",
                 aspect="auto",
-                extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+                extent=[lower[i], upper[i], lower[j], upper[j]],
                 cmap="magma",
             )
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabel)
             ax.set_title(title)
+            ax.set_xlim(lower[i], upper[i])
+            ax.set_ylim(lower[j], upper[j])
 
         fig.suptitle(f"Fetch coverage rollout at step {step}", fontsize=14)
         save_path = self.save_dir / f"step_{step}.png"
@@ -199,25 +282,39 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
             return proprio[:2]
         return None
 
+    def _use_env_plot_bounds(self) -> bool:
+        return False
+
     def save(self, step: int) -> None:
         coords = self._sample_policy_rollout(step)
         if coords.size == 0:
             return
+        bounds = self._get_plot_bounds(coords)
+        if bounds is None:
+            return
+        lower, upper = bounds
 
         self.save_dir.mkdir(parents=True, exist_ok=True)
         fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
-        heatmap, xedges, yedges = np.histogram2d(coords[:, 0], coords[:, 1], bins=self.bins)
+        heatmap, xedges, yedges = np.histogram2d(
+            coords[:, 0],
+            coords[:, 1],
+            bins=self.bins,
+            range=[[lower[0], upper[0]], [lower[1], upper[1]]],
+        )
         im = ax.imshow(
             heatmap.T,
             origin="lower",
             aspect="auto",
-            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+            extent=[lower[0], upper[0], lower[1], upper[1]],
             cmap="viridis",
         )
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_title(f"PointMaze XY coverage at step {step}")
+        ax.set_xlim(lower[0], upper[0])
+        ax.set_ylim(lower[1], upper[1])
 
         save_path = self.save_dir / f"step_{step}.png"
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -243,9 +340,9 @@ class RoverDebugVisualizerSuite:
                 self._gridworld_visualizer_factory(self.agent)
             )
         elif _is_fetch_env(env):
-            self.domain_visualizer = FetchCoverageVisualizer(self.agent, env)
+            self.domain_visualizer = FetchCoverageVisualizer(self.agent, env, rollout_steps=500, bins=10)
         elif _is_point_maze_env(env):
-            self.domain_visualizer = PointMazeCoverageVisualizer(self.agent, env)
+            self.domain_visualizer = PointMazeCoverageVisualizer(self.agent, env, rollout_steps=1200, bins=20)
         else:
             self.domain_visualizer = None
         return self.domain_visualizer

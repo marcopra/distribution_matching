@@ -26,7 +26,7 @@ from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
 import logging
-from agent.debug_visualization import build_debug_visualizer_suite
+from agent.utils_debug_visualization import build_debug_visualizer_suite
 # set logging level to info
 import logging
 

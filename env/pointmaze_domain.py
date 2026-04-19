@@ -1,9 +1,9 @@
-import mujoco
 import numpy as np
 import gymnasium as gym
-from dm_env import specs
+from gymnasium import spaces
 
-from env.domain_utils import get_env_id, get_env_module
+import utils
+from env.domain_utils import coerce_dict, get_env_id, get_env_module
 
 
 def is_point_maze_env(reference):
@@ -12,136 +12,165 @@ def is_point_maze_env(reference):
     return "pointmaze" in env_id or "point_maze" in module_name
 
 
-def prepare_point_maze_make_kwargs(name, env_kwargs):
-    raise NotImplementedError(
-        "PointMaze environment support is only scaffolded right now. "
-        "Fill in the family-specific kwargs handling and wrappers in env/pointmaze_domain.py."
+def pop_point_maze_kwargs(env_kwargs):
+    return coerce_dict(env_kwargs.pop("pointmaze", {}), "pointmaze")
+
+
+def prepare_point_maze_make_kwargs(name, env_kwargs, url=False):
+    del name
+    pointmaze_kwargs = pop_point_maze_kwargs(env_kwargs)
+    env_kwargs["reward_type"] = "dense"
+    env_kwargs["reset_target"] = True
+    env_kwargs.setdefault("continuing_task", False)
+    if url:
+        env_kwargs["continuing_task"] = True
+    return env_kwargs, pointmaze_kwargs
+
+
+class PointMazeDiscreteActions(gym.ActionWrapper):
+    ACTIONS = np.array(
+        [
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+        ],
+        dtype=np.float32,
     )
-
-
-def wrap_point_maze_env(env, obs_type, action_repeat, resolution, grayscale):
-    raise NotImplementedError(
-        "PointMaze environment support is only scaffolded right now. "
-        "Fill in the family-specific wrappers in env/pointmaze_domain.py."
-    )
-
-
-class PhysicsStateWrapper(gym.Wrapper):
-    """Wrapper that simulates the CDMC physics interface for PointMaze."""
 
     def __init__(self, env):
         super().__init__(env)
-        self._physics_state = None
+        self.action_space = spaces.Discrete(len(self.ACTIONS))
 
-    def _get_physics_state(self):
-        if hasattr(self.env, "unwrapped"):
-            unwrapped = self.env.unwrapped
-            if hasattr(unwrapped, "point_env"):
-                point_env = unwrapped.point_env
-                qpos = point_env.data.qpos.copy()
-                qvel = point_env.data.qvel.copy()
-                return np.concatenate([qpos, qvel])
-
-        return self._physics_state if self._physics_state is not None else np.zeros(4)
-
-    def _set_physics_state(self, state):
-        if hasattr(self.env, "unwrapped"):
-            unwrapped = self.env.unwrapped
-            if hasattr(unwrapped, "point_env"):
-                point_env = unwrapped.point_env
-                mid = len(state) // 2
-                point_env.data.qpos[:] = state[:mid]
-                point_env.data.qvel[:] = state[mid:]
-                mujoco.mj_forward(point_env.model, point_env.data)
-
-    def reset(self, **kwargs):
-        time_step = self.env.reset(**kwargs)
-        self._physics_state = self._get_physics_state()
-        return time_step
-
-    def step(self, action):
-        time_step = self.env.step(action)
-        self._physics_state = self._get_physics_state()
-        return time_step
-
-    @property
-    def physics(self):
-        class PhysicsInterface:
-            def __init__(self, wrapper):
-                self.wrapper = wrapper
-
-            def state(self):
-                return self.wrapper._get_physics_state()
-
-            def set_state(self, state):
-                self.wrapper._set_physics_state(state)
-
-            class ResetContext:
-                def __init__(self, physics_interface):
-                    self.physics = physics_interface
-                    self.original_state = None
-
-                def __enter__(self):
-                    self.original_state = self.physics.state()
-                    return self
-
-                def __exit__(self, exc_type, exc_val, exc_tb):
-                    if self.original_state is not None:
-                        self.physics.set_state(self.original_state)
-
-            def reset_context(self):
-                return self.ResetContext(self)
-
-        return PhysicsInterface(self)
-
-
-class RewardSpecWrapper(gym.Wrapper):
-    """Add reward and discount specs compatible with CDMC for PointMaze."""
-
-    def __init__(self, env):
-        super().__init__(env)
-        if not hasattr(self.env, "unwrapped") or not hasattr(self.env.unwrapped, "compute_reward"):
-            raise NotImplementedError("RewardSpecWrapper is currently only implemented for PointMaze environments")
-
-    def reward_spec(self):
-        return specs.Array(shape=(1,), dtype=np.float32, name="reward")
-
-    def discount_spec(self):
-        return specs.Array(shape=(1,), dtype=np.float32, name="discount")
-
-    def compute_reward_from_state_and_action(self, physics_state, action, desired_goal=None):
-        unwrapped = self.env.unwrapped
-        original_state = self.physics.state()
-        original_goal = unwrapped.goal.copy()
-
-        try:
-            if desired_goal is not None:
-                goal_to_use = desired_goal.copy()
-            else:
-                goal_to_use = physics_state[-2:].copy()
-
-            achieved_goal = physics_state[:2].copy()
-            if hasattr(unwrapped, "compute_reward"):
-                reward = unwrapped.compute_reward(achieved_goal, goal_to_use, {})
-                return np.array([reward], dtype=np.float32)
-            raise NotImplementedError("compute_reward method not found in environment")
-        finally:
-            self.physics.set_state(original_state)
-            unwrapped.goal = original_goal
-            if hasattr(unwrapped, "update_target_site_pos"):
-                unwrapped.update_target_site_pos()
-
-    def compute_reward_from_obs_dict(self, obs_dict, action=None):
-        if not all(key in obs_dict for key in ["achieved_goal", "desired_goal"]):
-            raise ValueError("obs_dict must contain 'achieved_goal' and 'desired_goal' keys")
-
-        achieved_goal = obs_dict["achieved_goal"]
-        desired_goal = obs_dict["desired_goal"]
-        unwrapped = self.env.unwrapped
-        if hasattr(unwrapped, "compute_reward"):
-            reward = unwrapped.compute_reward(achieved_goal, desired_goal, {})
-            return np.array([reward], dtype=np.float32)
-        raise NotImplementedError("compute_reward method not found in environment")
+    def action(self, action):
+        action_idx = int(action)
+        if action_idx < 0 or action_idx >= len(self.ACTIONS):
+            raise ValueError(f"PointMaze discrete action must be in [0, {len(self.ACTIONS) - 1}]")
+        return self.ACTIONS[action_idx].copy()
 
     def __getattr__(self, name):
         return getattr(self.env, name)
+
+
+class FixedPointMazeResetWrapper(gym.Wrapper):
+    def __init__(self, env, goal_position, start_position):
+        super().__init__(env)
+        self.fixed_goal = np.asarray(goal_position, dtype=np.float32)
+        if self.fixed_goal.shape != (2,):
+            raise ValueError(f"PointMaze goal_position must have shape (2,), got {self.fixed_goal.shape}")
+
+        self.fixed_start = np.asarray(start_position, dtype=np.float32)
+        if self.fixed_start.shape != (2,):
+            raise ValueError(f"PointMaze start_position must have shape (2,), got {self.fixed_start.shape}")
+
+        self.goal_position = self.fixed_goal.copy()
+        self.start_position = self.fixed_start.copy()
+
+    def _base_env(self):
+        return self.env.unwrapped
+
+    def _refresh_obs(self):
+        base_env = self._base_env()
+        point_obs, _ = base_env.point_env._get_obs()
+        return base_env._get_obs(point_obs)
+
+    def _apply_fixed_task(self):
+        base_env = self._base_env()
+        base_env.goal = self.fixed_goal.copy()
+        base_env.reset_pos = self.fixed_start.copy()
+        base_env.point_env.init_qpos[:2] = self.fixed_start
+        base_env.point_env.init_qvel[:] = 0.0
+
+        qpos = base_env.point_env.data.qpos.copy()
+        qvel = np.zeros_like(base_env.point_env.data.qvel)
+        qpos[:2] = self.fixed_start
+        base_env.point_env.set_state(qpos, qvel)
+        base_env.update_target_site_pos()
+
+    def reset(self, **kwargs):
+        _, info = self.env.reset(**kwargs)
+        self._apply_fixed_task()
+        obs = self._refresh_obs()
+
+        info = dict(info) if info is not None else {}
+        info["fixed_goal_position"] = self.fixed_goal.copy()
+        info["fixed_start_position"] = self.fixed_start.copy()
+        return obs, info
+
+    def get_debug_coordinates(self):
+        obs = self._refresh_obs()
+        return {
+            "xy": np.asarray(obs["observation"], dtype=np.float32)[:2].copy(),
+            "fixed_start": self.fixed_start.copy(),
+            "fixed_goal": self.fixed_goal.copy(),
+        }
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
+class PointMazeGoalMaskWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self._cached_hidden_render = None
+
+    def _render_without_goal(self):
+        base_env = self.env.unwrapped
+        original_rgba = base_env.model.site_rgba[base_env.target_site_id].copy()
+        try:
+            base_env.model.site_rgba[base_env.target_site_id, 3] = 0.0
+            return self.env.render()
+        finally:
+            base_env.model.site_rgba[base_env.target_site_id] = original_rgba
+
+    def render_observation(self):
+        frame = self._render_without_goal()
+        self._cached_hidden_render = frame
+        return frame
+
+    def render_image_observation(self):
+        if self._cached_hidden_render is None:
+            self._cached_hidden_render = self._render_without_goal()
+
+        # Uncomment the next line and comment the return below to render the goal
+        # in image_observation while keeping observation goal-hidden.
+        # return self.env.render()
+        return self._cached_hidden_render.copy()
+
+    def reset(self, **kwargs):
+        self._cached_hidden_render = None
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        self._cached_hidden_render = None
+        return self.env.step(action)
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
+def wrap_point_maze_env(env, pointmaze_kwargs):
+    pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
+    goal_position = pointmaze_kwargs.pop("goal_position", None)
+    start_position = pointmaze_kwargs.pop("start_position", None)
+
+    if goal_position is None:
+        raise ValueError("PointMaze environments require pointmaze.goal_position to keep the goal fixed")
+    if start_position is None:
+        raise ValueError("PointMaze environments require pointmaze.start_position to keep the initial position fixed")
+    if pointmaze_kwargs:
+        unknown_keys = ", ".join(sorted(pointmaze_kwargs))
+        raise TypeError(f"Unknown PointMaze kwargs: {unknown_keys}")
+
+    env = FixedPointMazeResetWrapper(env, goal_position=goal_position, start_position=start_position)
+    env = PointMazeGoalMaskWrapper(env)
+    env = PointMazeDiscreteActions(env)
+
+    warning = (
+        "Warning: PointMaze environment uses fixed goal and initial position, "
+        "4 discrete actions, dense reward, and goal-hidden pixel observations."
+    )
+    if getattr(env.unwrapped, "continuing_task", False):
+        warning += " continuing_task=True keeps the episode from terminating at success."
+    utils.ColorPrint.yellow(warning)
+    return env

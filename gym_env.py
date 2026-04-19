@@ -555,9 +555,10 @@ def _prepare_env_kwargs(name, obs_type, kwargs):
     return env_kwargs
 
 
-def _prepare_family_make_kwargs(name, env_kwargs):
+def _prepare_family_make_kwargs(name, env_kwargs, url):
     atari_kwargs = {}
     fetch_kwargs = {}
+    pointmaze_kwargs = {}
 
     has_atari_config = "atari" in env_kwargs or any(
         key in env_kwargs for key in ("score_mask", "score_mask_band", "score_mask_color")
@@ -570,12 +571,22 @@ def _prepare_family_make_kwargs(name, env_kwargs):
     if is_fetch_env(name):
         env_kwargs, fetch_kwargs = prepare_fetch_make_kwargs(env_kwargs)
     elif is_point_maze_env(name):
-        env_kwargs = prepare_point_maze_make_kwargs(name, env_kwargs)
+        env_kwargs, pointmaze_kwargs = prepare_point_maze_make_kwargs(name, env_kwargs, url=url)
 
-    return env_kwargs, atari_kwargs, fetch_kwargs
+    return env_kwargs, atari_kwargs, fetch_kwargs, pointmaze_kwargs
 
 
-def _apply_family_wrappers(env, name, obs_type, action_repeat, resolution, grayscale, atari_kwargs, fetch_kwargs):
+def _apply_family_wrappers(
+    env,
+    name,
+    obs_type,
+    action_repeat,
+    resolution,
+    grayscale,
+    atari_kwargs,
+    fetch_kwargs,
+    pointmaze_kwargs,
+):
     is_atari = is_atari_env(env) or is_atari_env(name)
     is_classic_minigrid = is_classic_minigrid_env(env) or is_classic_minigrid_env(name)
     is_fetch = is_fetch_env(env) or is_fetch_env(name)
@@ -584,13 +595,7 @@ def _apply_family_wrappers(env, name, obs_type, action_repeat, resolution, grays
     if is_fetch:
         env = wrap_fetch_env(env, fetch_kwargs)
     elif is_point_maze:
-        env, action_repeat = wrap_point_maze_env(
-            env,
-            obs_type,
-            action_repeat,
-            resolution,
-            grayscale,
-        )
+        env = wrap_point_maze_env(env, pointmaze_kwargs)
     elif is_atari and obs_type == 'pixels':
         env, action_repeat = wrap_atari_pixels(
             env,
@@ -658,7 +663,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     """
     obs_type = _normalize_obs_type(obs_type)
     env_kwargs = _prepare_env_kwargs(name, obs_type, kwargs)
-    env_kwargs, atari_kwargs, fetch_kwargs = _prepare_family_make_kwargs(name, env_kwargs)
+    env_kwargs, atari_kwargs, fetch_kwargs, pointmaze_kwargs = _prepare_family_make_kwargs(name, env_kwargs, url)
 
     env = gym.make(name, **env_kwargs)
     env, action_repeat, is_atari, is_classic_minigrid = _apply_family_wrappers(
@@ -670,6 +675,7 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
         grayscale,
         atari_kwargs,
         fetch_kwargs,
+        pointmaze_kwargs,
     )
 
     # Assert that render_mode is 'rgb_array' if pixels observation is requested
