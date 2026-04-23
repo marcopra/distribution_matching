@@ -1582,6 +1582,8 @@ class EmbeddingDistributionVisualizerV2:
             print(f"Gridworld visualization saved to: {save_path}")
             if self.is_minigrid_style:
                 self._save_minigrid_policy_debug_plot(step, policy_per_state, save_path)
+            if self.agent.subsamples is not None:
+                self._save_nystrom_subsample_plot(step, save_path)
         
         plt.close(fig)
 
@@ -1786,14 +1788,8 @@ class EmbeddingDistributionVisualizerV2:
         plt.close(fig)
         print(f"MiniGrid policy debug visualization saved to: {panel_save_path}")
 
-    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
-        """Plot state occupancy from the current batch.
-        
-        Args:
-            ax: matplotlib axis
-            title: plot title
-            normalize: if True, normalize counts to probabilities; if False, show raw counts
-        """
+    def _compute_batch_and_subsample_state_counts(self):
+        """Infer state counts for the latest actor batch and Nyström subsample."""
         def _accumulate_state_counts(batch_embeddings, all_state_embeddings):
             counts = np.zeros(self.n_states, dtype=np.float32)
             for batch_emb in batch_embeddings:
@@ -1808,10 +1804,7 @@ class EmbeddingDistributionVisualizerV2:
 
         # Use the cached features from the last actor update
         if not hasattr(self.agent, '_phi_all_next') or self.agent._phi_all_next is None:
-            ax.text(0.5, 0.5, 'No batch data available yet',
-                ha='center', va='center', transform=ax.transAxes, fontsize=12)
-            ax.set_title(title, fontsize=12, fontweight='bold')
-            return
+            return None, None
         
         # We need to infer which states are in the batch
         # Since we have embeddings, we can compare them to known state embeddings
@@ -1832,6 +1825,22 @@ class EmbeddingDistributionVisualizerV2:
             if self.agent.subsamples is not None and hasattr(self.agent, '_phi_sub_next'):
                 subsample_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
                 subsample_counts = _accumulate_state_counts(subsample_embeddings, enc_all_states)
+        return state_counts, subsample_counts
+
+    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
+        """Plot state occupancy from the current batch.
+        
+        Args:
+            ax: matplotlib axis
+            title: plot title
+            normalize: if True, normalize counts to probabilities; if False, show raw counts
+        """
+        state_counts, _ = self._compute_batch_and_subsample_state_counts()
+        if state_counts is None:
+            ax.text(0.5, 0.5, 'No batch data available yet',
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            return
         
         # Normalize or keep raw counts
         if normalize and state_counts.sum() > 0:
@@ -1851,38 +1860,63 @@ class EmbeddingDistributionVisualizerV2:
         ax.set_xticks(np.arange(self.grid_width))
         ax.set_yticks(np.arange(self.grid_height))
         ax.grid(True, which='both', color='white', linewidth=0.5, alpha=0.35)
-
-        if subsample_counts is not None and subsample_counts.sum() > 0:
-            subsample_grid = self._state_dist_to_grid(subsample_counts)
-            subsample_patch = Patch(
-                facecolor='none',
-                edgecolor='black',
-                linewidth=2,
-                label='Nyström subsamples'
-            )
-            for y, x in np.argwhere(subsample_grid > 0):
-                rect = Rectangle(
-                    (x - 0.5, y - 0.5),
-                    1,
-                    1,
-                    linewidth=2,
-                    edgecolor='black',
-                    facecolor='none'
-                )
-                ax.add_patch(rect)
-                ax.text(
-                    x,
-                    y,
-                    f'{int(subsample_grid[y, x])}',
-                    ha='center',
-                    va='center',
-                    fontsize=9,
-                    fontweight='bold',
-                    color='black'
-                )
-            ax.legend(handles=[subsample_patch], loc='upper left', fontsize=9, frameon=True)
         
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
+
+    def _plot_nystrom_subsamples(self, ax, title='Nyström Subsample Occupancy'):
+        """Plot the Nyström subsample counts on their own grid."""
+        _, subsample_counts = self._compute_batch_and_subsample_state_counts()
+        if subsample_counts is None or subsample_counts.sum() <= 0:
+            ax.text(
+                0.5,
+                0.5,
+                'No Nyström subsample data available yet',
+                ha='center',
+                va='center',
+                transform=ax.transAxes,
+                fontsize=12
+            )
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            return False
+
+        subsample_grid = self._state_dist_to_grid(subsample_counts)
+        im = ax.imshow(subsample_grid, cmap='Oranges', interpolation='nearest')
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_xticks(np.arange(self.grid_width))
+        ax.set_yticks(np.arange(self.grid_height))
+        ax.grid(True, which='both', color='white', linewidth=0.5, alpha=0.35)
+
+        for y, x in np.argwhere(subsample_grid > 0):
+            ax.text(
+                x,
+                y,
+                f'{int(subsample_grid[y, x])}',
+                ha='center',
+                va='center',
+                fontsize=9,
+                fontweight='bold',
+                color='black'
+            )
+
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Count')
+        return True
+
+    def _save_nystrom_subsample_plot(self, step: int, save_path: str):
+        """Save a dedicated Nyström subsample occupancy figure next to the main plot."""
+        fig, ax = plt.subplots(figsize=(8, 7))
+        plotted = self._plot_nystrom_subsamples(ax, title=f'Nyström Subsample Occupancy (Step {step})')
+        if not plotted:
+            plt.close(fig)
+            return
+
+        plt.tight_layout()
+        root, ext = os.path.splitext(save_path)
+        subsample_save_path = f"{root}_nystrom_subsamples{ext}"
+        plt.savefig(subsample_save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Nyström subsample visualization saved to: {subsample_save_path}")
 
     def _plot_distribution(self, ax, nu, title):
         """Plot state distribution on grid WITHOUT text annotations."""
@@ -1994,7 +2028,6 @@ class RoverAgent:
                  hidden_dim,
                  feature_dim,
                  update_every_steps,
-                 encoder_updates_per_step,
                  update_actor_every_steps,
                  pmd_steps,
                  num_expl_steps,
@@ -2032,8 +2065,6 @@ class RoverAgent:
         self.batch_size_actor = batch_size_actor
         # assert batch_size_actor >= batch_size, "Actor update batch size must be greater than or equal to encoder update batch size"
         self.update_every_steps = update_every_steps
-        self.encoder_updates_per_step = int(encoder_updates_per_step)
-        assert self.encoder_updates_per_step >= 1, "encoder_updates_per_step must be >= 1"
         self.update_actor_every_steps = update_actor_every_steps
         self.use_tb = use_tb
         self.use_wandb = use_wandb
@@ -2552,7 +2583,7 @@ class RoverAgent:
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
 
-            if iteration % 1 == 0 or iteration == self.pmd_steps - 1:
+            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
 
         if self.pmd_best_iterate:
@@ -2856,7 +2887,7 @@ class RoverAgent:
                 (obs_actor_matrix, action_actor_matrix, next_obs_actor_matrix, reward_actor_matrix),
             )
         else:
-            actor_batch = replay_buffer.get_all_data(last_n=None)
+            actor_batch = replay_buffer.get_all_data(last_n=self.batch_size_actor, first=True)
             obs_actor_full, action_actor_full, reward_actor_full, _, next_obs_actor_full = utils.to_torch(
                 actor_batch[:5], self.device
             )

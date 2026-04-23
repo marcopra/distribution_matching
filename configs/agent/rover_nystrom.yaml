@@ -10,7 +10,7 @@ discount: ${discount} # gamma
 lambda_reg: 1e-15
 lr_T: 1e-3
 batch_size: 1024
-batch_size_actor: 500000
+batch_size_actor: 10000
 subsamples: 5000
 nstep: 1
 lr_encoder: 1e-3
