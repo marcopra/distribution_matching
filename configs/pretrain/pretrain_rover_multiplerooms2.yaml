@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover
+  - /agent: rover_nystrom
   - /env: gridworld/multiplerooms5_4x4_0
   # - override hydra/launcher: submitit_local
   
@@ -66,6 +66,7 @@ agent:
   T_init_steps: 300
   embedding_sum_loss: 0
   pmd_eta_mode: backtracking
+  mode: l2
 
 hydra:
   run:

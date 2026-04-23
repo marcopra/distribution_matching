@@ -224,33 +224,19 @@ class ReplayBuffer(IterableDataset):
         self._all_data_cache_key = cache_key
         return all_transitions
 
-    def _get_first_stored_transition(self):
-        for eps_fn in self._episode_fns:
-            transitions = self._episode_to_transitions(eps_fn)
-            if transitions is None:
-                continue
-            return tuple(field[:1] for field in transitions)
-        raise RuntimeError('Replay buffer is empty')
-
-    def get_all_data(self, last_n=None, first=False):
-        try:
-            self._try_fetch(force=True)
-        except:
-            traceback.print_exc()
-
+    def _get_transition_batches(self, last_n=None):
         if last_n is not None and last_n <= 0:
             raise ValueError('last_n must be positive when provided')
 
-        if last_n is None:
-            return self._get_all_transitions()
-
-        if first:
-            first_transition = self._get_first_stored_transition()
-            if last_n == 1:
-                return first_transition
-
         transition_batches = []
-        remaining = last_n - 1 if first else last_n
+        if last_n is None:
+            for eps_fn in self._episode_fns:
+                transitions = self._episode_to_transitions(eps_fn)
+                if transitions is not None:
+                    transition_batches.append(transitions)
+            return transition_batches
+
+        remaining = last_n
         for eps_fn in reversed(self._episode_fns):
             if remaining == 0:
                 break
@@ -267,16 +253,67 @@ class ReplayBuffer(IterableDataset):
             transition_batches.append(transitions)
             remaining -= batch_size
 
+        transition_batches.reverse()
+        return transition_batches
+
+    def _concatenate_transition_batches(self, transition_batches):
+        if not transition_batches:
+            raise RuntimeError('Replay buffer is empty')
+
+        return tuple(
+            np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
+            for field_idx in range(len(transition_batches[0]))
+        )
+
+    def _transition_batches_to_matrices(self, transition_batches):
+        if not transition_batches:
+            raise RuntimeError('Replay buffer is empty')
+
+        episode_length = transition_batches[0][0].shape[0]
+        if episode_length <= 0:
+            raise RuntimeError('Encountered an empty transition batch while building matrices')
+
+        if any(batch[0].shape[0] != episode_length for batch in transition_batches[1:]):
+            raise NotImplementedError(
+                'get_all_data_matrix currently requires equal-length episodes.'
+            )
+
+        return tuple(
+            np.stack([batch[field_idx] for batch in transition_batches], axis=0)
+            for field_idx in range(len(transition_batches[0]))
+        )
+
+    def _get_first_stored_transition(self):
+        for eps_fn in self._episode_fns:
+            transitions = self._episode_to_transitions(eps_fn)
+            if transitions is None:
+                continue
+            return tuple(field[:1] for field in transitions)
+        raise RuntimeError('Replay buffer is empty')
+
+    def get_all_data(self, last_n=None, first=False):
+        try:
+            self._try_fetch(force=True)
+        except:
+            traceback.print_exc()
+
+        if last_n is None:
+            return self._get_all_transitions()
+
+        if first:
+            first_transition = self._get_first_stored_transition()
+            if last_n == 1:
+                return first_transition
+
+        remaining = last_n - 1 if first else last_n
+        transition_batches = self._get_transition_batches(last_n=remaining)
+
         if not transition_batches:
             if first:
                 return first_transition
             raise RuntimeError('Replay buffer is empty')
 
-        transition_batches.reverse()
-        all_transitions = tuple(
-            np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
-            for field_idx in range(len(transition_batches[0]))
-        )
+        all_transitions = self._concatenate_transition_batches(transition_batches)
 
         if not first:
             return all_transitions
@@ -285,6 +322,23 @@ class ReplayBuffer(IterableDataset):
             np.concatenate([first_transition[field_idx], all_transitions[field_idx]], axis=0)
             for field_idx in range(len(first_transition))
         )
+
+    def get_all_data_matrix(self, last_n=None):
+        try:
+            self._try_fetch(force=True)
+        except:
+            traceback.print_exc()
+
+        transition_batches = self._get_transition_batches(last_n=None)
+        if not transition_batches:
+            raise RuntimeError('Replay buffer is empty')
+        if last_n is not None:
+            episode_length = transition_batches[0][0].shape[0]
+            if episode_length <= 0:
+                raise RuntimeError('Encountered an empty transition batch while building matrices')
+            num_episodes = max(1, int(np.ceil(last_n / episode_length)))
+            transition_batches = transition_batches[-num_episodes:]
+        return self._transition_batches_to_matrices(transition_batches)
 
     def __iter__(self):
         while True:

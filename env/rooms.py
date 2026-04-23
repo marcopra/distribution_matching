@@ -81,6 +81,16 @@ class BaseRoomEnv(gym.Env, ABC):
         }
         
         self._agent_location = None
+        self._render_background = None
+        self._render_agent_sprite = None
+        self._render_agent_mask = None
+        self._render_goal_sprite = None
+        self._render_goal_mask = None
+        self._render_cell_origins = {}
+        self._render_layout = None
+        self._coord_font = None
+        self._render_cache_ready = False
+        self._ensure_render_cache()
     
     @abstractmethod
     def _build_cells(self):
@@ -348,6 +358,207 @@ class BaseRoomEnv(gym.Env, ABC):
     def render_image_observation(self) -> np.ndarray:
         """Render an auxiliary image observation with the goal visible."""
         return self._render_rgb(show_goal=True)
+
+    def _get_render_layout(self) -> Dict[str, object]:
+        """Compute and cache static rendering geometry."""
+        if self._render_layout is not None:
+            return self._render_layout
+
+        cell_size = 64
+        cell_padding = 2
+
+        valid_cells = [cell for cell in self.cells if cell != self.DEAD_STATE]
+
+        max_x = max(cell[0] for cell in valid_cells)
+        max_y = max(cell[1] for cell in valid_cells)
+        min_x = min(cell[0] for cell in valid_cells)
+        min_y = min(cell[1] for cell in valid_cells)
+
+        grid_width = max_x - min_x + 1
+        grid_height = max_y - min_y + 1
+        coord_space = cell_size if self.show_coordinates else 0
+
+        img_width = (grid_width + 2) * cell_size + coord_space * 2
+        img_height = (grid_height + 2) * cell_size + coord_space * 2
+        bg_color = (207, 16, 32) if self.lava else (128, 128, 128)
+
+        cell_origins = {}
+        for cell in valid_cells:
+            px = (cell[0] - min_x + 1) * cell_size + coord_space
+            py = (cell[1] - min_y + 1) * cell_size + coord_space
+            cell_origins[cell] = (px, py)
+
+        self._render_layout = {
+            "cell_size": cell_size,
+            "cell_padding": cell_padding,
+            "valid_cells": valid_cells,
+            "min_x": min_x,
+            "max_x": max_x,
+            "min_y": min_y,
+            "max_y": max_y,
+            "grid_width": grid_width,
+            "grid_height": grid_height,
+            "coord_space": coord_space,
+            "img_width": img_width,
+            "img_height": img_height,
+            "bg_color": bg_color,
+            "cell_origins": cell_origins,
+        }
+        return self._render_layout
+
+    def _get_coord_font(self):
+        """Load the coordinate font once and reuse it across renders."""
+        if self._coord_font is not None:
+            return self._coord_font
+
+        try:
+            self._coord_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except Exception:
+            try:
+                self._coord_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 20)
+            except Exception:
+                self._coord_font = ImageFont.load_default()
+
+        return self._coord_font
+
+    def _build_background_image(self) -> np.ndarray:
+        """Pre-render the static maze canvas without goal or agent markers."""
+        layout = self._get_render_layout()
+        cell_size = layout["cell_size"]
+        cell_padding = layout["cell_padding"]
+        coord_space = layout["coord_space"]
+        img_width = layout["img_width"]
+        img_height = layout["img_height"]
+        bg_color = layout["bg_color"]
+        min_x = layout["min_x"]
+        max_x = layout["max_x"]
+        min_y = layout["min_y"]
+        max_y = layout["max_y"]
+        grid_width = layout["grid_width"]
+        grid_height = layout["grid_height"]
+
+        img = Image.new("RGB", (img_width, img_height), color=bg_color)
+        draw = ImageDraw.Draw(img)
+
+        if self.show_coordinates:
+            draw.rectangle([0, 0, img_width, coord_space], fill=(255, 255, 255))
+            draw.rectangle([0, 0, coord_space, img_height], fill=(255, 255, 255))
+            draw.rectangle([img_width - coord_space, 0, img_width, img_height], fill=(255, 255, 255))
+            draw.rectangle([0, img_height - coord_space, img_width, img_height], fill=(255, 255, 255))
+
+            coord_font = self._get_coord_font()
+            for x in range(min_x, max_x + 1):
+                px = (x - min_x + 1) * cell_size + cell_size // 2 + coord_space
+                text = str(x)
+                bbox = draw.textbbox((0, 0), text, font=coord_font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                py_top = coord_space // 2
+                py_bottom = img_height - coord_space // 2
+                draw.text((px - text_width // 2, py_top - text_height // 2), text, fill=(0, 0, 0), font=coord_font)
+                draw.text((px - text_width // 2, py_bottom - text_height // 2), text, fill=(0, 0, 0), font=coord_font)
+
+            for y in range(min_y, max_y + 1):
+                py = (y - min_y + 1) * cell_size + cell_size // 2 + coord_space
+                text = str(y)
+                bbox = draw.textbbox((0, 0), text, font=coord_font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                px_left = coord_space // 2
+                px_right = img_width - coord_space // 2
+                draw.text((px_left - text_width // 2, py - text_height // 2), text, fill=(0, 0, 0), font=coord_font)
+                draw.text((px_right - text_width // 2, py - text_height // 2), text, fill=(0, 0, 0), font=coord_font)
+
+        for x in range(-1, grid_width + 1):
+            for y in range(-1, grid_height + 1):
+                if x == -1 or x == grid_width or y == -1 or y == grid_height:
+                    px = (x + 1) * cell_size + coord_space
+                    py = (y + 1) * cell_size + coord_space
+                    draw.rectangle([px, py, px + cell_size, py + cell_size], fill=bg_color)
+
+        for (x, y), (px, py) in layout["cell_origins"].items():
+            if (x, y) in self.state_to_idx and (x, y) != self.DEAD_STATE:
+                draw.rectangle(
+                    [
+                        px + cell_padding,
+                        py + cell_padding,
+                        px + cell_size - cell_padding,
+                        py + cell_size - cell_padding,
+                    ],
+                    fill=(0, 0, 0),
+                )
+
+        return np.array(img, copy=True)
+
+    def _build_goal_sprite(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Pre-render the goal marker once as a transparent sprite."""
+        cell_size = self._get_render_layout()["cell_size"]
+        sprite = Image.new("RGBA", (cell_size, cell_size), color=(0, 0, 0, 0))
+        draw = ImageDraw.Draw(sprite)
+
+        center = cell_size // 2
+        star_outer_radius = cell_size // 3
+        star_inner_radius = cell_size // 6
+        star_points = []
+        for i in range(10):
+            angle = (i * 36 - 90) * np.pi / 180
+            radius = star_outer_radius if i % 2 == 0 else star_inner_radius
+            x_point = center + radius * np.cos(angle)
+            y_point = center + radius * np.sin(angle)
+            star_points.append((x_point, y_point))
+        draw.polygon(star_points, fill=(0, 255, 0, 255))
+
+        sprite_arr = np.array(sprite)
+        return sprite_arr[..., :3], sprite_arr[..., 3] > 0
+
+    def _build_agent_sprite(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Pre-render the agent marker once as a transparent sprite."""
+        cell_size = self._get_render_layout()["cell_size"]
+        sprite = Image.new("RGBA", (cell_size, cell_size), color=(0, 0, 0, 0))
+        draw = ImageDraw.Draw(sprite)
+
+        center = cell_size // 2
+        square_size = cell_size // 3
+        draw.rectangle(
+            [
+                center - square_size,
+                center - square_size,
+                center + square_size,
+                center + square_size,
+            ],
+            fill=(255, 0, 0, 255),
+        )
+
+        sprite_arr = np.array(sprite)
+        return sprite_arr[..., :3], sprite_arr[..., 3] > 0
+
+    def _ensure_render_cache(self):
+        """Build and retain the static render assets the first time they are needed."""
+        if self._render_cache_ready:
+            return
+
+        layout = self._get_render_layout()
+        self._render_background = self._build_background_image()
+        self._render_cell_origins = layout["cell_origins"]
+        self._render_goal_sprite, self._render_goal_mask = self._build_goal_sprite()
+        self._render_agent_sprite, self._render_agent_mask = self._build_agent_sprite()
+        self._render_cache_ready = True
+
+    def _apply_sprite(
+        self,
+        frame: np.ndarray,
+        position: Optional[Tuple[int, int]],
+        sprite_rgb: np.ndarray,
+        sprite_mask: np.ndarray,
+    ) -> None:
+        """Stamp a cached sprite into the pre-rendered maze image."""
+        if position not in self._render_cell_origins:
+            return
+
+        px, py = self._render_cell_origins[position]
+        cell_size = self._get_render_layout()["cell_size"]
+        region = frame[py:py + cell_size, px:px + cell_size]
+        region[sprite_mask] = sprite_rgb[sprite_mask]
     
     def _render_ansi(self, show_goal: bool = True) -> Optional[str]:
         """Render the environment as ASCII art."""
@@ -386,162 +597,15 @@ class BaseRoomEnv(gym.Env, ABC):
     
     def _render_rgb(self, show_goal: bool = True) -> np.ndarray:
         """Render the environment as RGB image."""
-        cell_size = 64
-        cell_padding = 2  # Padding to create gray lines between cells
-        
-        # Calculate grid dimensions (excluding dead state)
-        valid_cells = [cell for cell in self.cells if cell != self.DEAD_STATE]
-        
-        max_x = max(cell[0] for cell in valid_cells)
-        max_y = max(cell[1] for cell in valid_cells)
-        min_x = min(cell[0] for cell in valid_cells)
-        min_y = min(cell[1] for cell in valid_cells)
-        
-        grid_width = max_x - min_x + 1
-        grid_height = max_y - min_y + 1
-        
-        # Add coordinate axis space if needed (white background for coordinates)
-        coord_space = cell_size if self.show_coordinates else 0
-        
-        # Image dimensions with border cells around the environment
-        # Adding coord_space on all sides to make it symmetric
-        img_width = (grid_width + 2) * cell_size + coord_space * 2
-        img_height = (grid_height + 2) * cell_size + coord_space * 2
-        
-        # Create image with background (gray for walls, lava color for lava)
-        bg_color = (207, 16, 32) if self.lava else (128, 128, 128)  # #CF1020 for lava
-        img = Image.new('RGB', (img_width, img_height), color=bg_color)
-        draw = ImageDraw.Draw(img)
-        
-        # Draw white background for coordinate area
-        if self.show_coordinates:
-            # Top white bar
-            draw.rectangle(
-                [0, 0, img_width, coord_space],
-                fill=(255, 255, 255)
-            )
-            # Left white bar
-            draw.rectangle(
-                [0, 0, coord_space, img_height],
-                fill=(255, 255, 255)
-            )
-            # Right white bar
-            draw.rectangle(
-                [img_width - coord_space, 0, img_width, img_height],
-                fill=(255, 255, 255)
-            )
-            # Bottom white bar
-            draw.rectangle(
-                [0, img_height - coord_space, img_width, img_height],
-                fill=(255, 255, 255)
-            )
-        
-        # Try to load font for coordinates only
-        try:
-            coord_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-        except:
-            try:
-                coord_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 20)
-            except:
-                coord_font = ImageFont.load_default()
-        
-        # Draw coordinate labels if enabled
-        if self.show_coordinates:
-            # X-axis labels (top and bottom)
-            for x in range(min_x, max_x + 1):
-                px = (x - min_x + 1) * cell_size + cell_size // 2 + coord_space
-                # Top
-                py_top = coord_space // 2
-                text = str(x)
-                bbox = draw.textbbox((0, 0), text, font=coord_font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                draw.text((px - text_width // 2, py_top - text_height // 2), text, 
-                         fill=(0, 0, 0), font=coord_font)
-                # Bottom
-                py_bottom = img_height - coord_space // 2
-                draw.text((px - text_width // 2, py_bottom - text_height // 2), text, 
-                         fill=(0, 0, 0), font=coord_font)
-            
-            # Y-axis labels (left and right)
-            for y in range(min_y, max_y + 1):
-                py = (y - min_y + 1) * cell_size + cell_size // 2 + coord_space
-                text = str(y)
-                bbox = draw.textbbox((0, 0), text, font=coord_font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                # Left
-                px_left = coord_space // 2
-                draw.text((px_left - text_width // 2, py - text_height // 2), text, 
-                         fill=(0, 0, 0), font=coord_font)
-                # Right
-                px_right = img_width - coord_space // 2
-                draw.text((px_right - text_width // 2, py - text_height // 2), text, 
-                         fill=(0, 0, 0), font=coord_font)
-        
-        # Draw border cells (gray or lava, around the environment)
-        for x in range(-1, grid_width + 1):
-            for y in range(-1, grid_height + 1):
-                if x == -1 or x == grid_width or y == -1 or y == grid_height:
-                    px = (x + 1) * cell_size + coord_space
-                    py = (y + 1) * cell_size + coord_space
-                    # Border cells remain background color (gray or lava)
-                    draw.rectangle(
-                        [px, py, px + cell_size, py + cell_size],
-                        fill=bg_color
-                    )
-        
-        # Draw cells
-        for x in range(min_x, max_x + 1):
-            for y in range(min_y, max_y + 1):
-                # Position in image (offset by border and coordinates)
-                px = (x - min_x + 1) * cell_size + coord_space
-                py = (y - min_y + 1) * cell_size + coord_space
-                
-                if (x, y) in self.state_to_idx and (x, y) != self.DEAD_STATE:
-                    # Valid cell - black background with padding
-                    draw.rectangle(
-                        [px + cell_padding, py + cell_padding, 
-                         px + cell_size - cell_padding, py + cell_size - cell_padding],
-                        fill=(0, 0, 0)
-                    )
-                    
-                    # Check if this is the goal or agent position
-                    is_goal = show_goal and (x, y) == self.goal_position
-                    is_agent = (x, y) == self._agent_location and self._agent_location != self.DEAD_STATE
-                    
-                    center_x = px + cell_size // 2
-                    center_y = py + cell_size // 2
-                    
-                    if is_goal:
-                        # Green star for goal (using polygon to draw a star shape)
-                        star_outer_radius = cell_size // 3
-                        star_inner_radius = cell_size // 6
-                        star_points = []
-                        for i in range(10):
-                            angle = (i * 36 - 90) * np.pi / 180  # 36 degrees between points, start at top
-                            radius = star_outer_radius if i % 2 == 0 else star_inner_radius
-                            x_point = center_x + radius * np.cos(angle)
-                            y_point = center_y + radius * np.sin(angle)
-                            star_points.append((x_point, y_point))
-                        draw.polygon(star_points, fill=(0, 255, 0))
-                    
-                    if is_agent:
-                        # Red square for agent
-                        square_size = cell_size // 3
-                        draw.rectangle(
-                            [center_x - square_size, center_y - square_size,
-                             center_x + square_size, center_y + square_size],
-                            fill=(255, 0, 0)
-                        )
-                else:
-                    # Wall/Lava - background color (creates seamless walls/lava)
-                    draw.rectangle(
-                        [px, py, px + cell_size, py + cell_size],
-                        fill=bg_color
-                    )
-        
-        return np.array(img)
+        self._ensure_render_cache()
+
+        frame = self._render_background.copy()
+        if show_goal and self.goal_position != self.DEAD_STATE:
+            self._apply_sprite(frame, self.goal_position, self._render_goal_sprite, self._render_goal_mask)
+        if self._agent_location != self.DEAD_STATE:
+            self._apply_sprite(frame, self._agent_location, self._render_agent_sprite, self._render_agent_mask)
+
+        return frame
     
     def close(self):
         """Clean up resources."""

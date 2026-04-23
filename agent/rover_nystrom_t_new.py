@@ -48,12 +48,13 @@ logger.addHandler(handler)
 # Neural Network Components
 # ============================================================================
 class Encoder(nn.Module):
-    def __init__(self, obs_shape, hidden_dim, feature_dim):
+    def __init__(self, obs_shape, hidden_dim, feature_dim, mode='l2'):
         super(Encoder, self).__init__()
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
         self.temperature = 0.05
+        self.mode = mode    
 
 
         self.fc =  nn.Sequential(
@@ -69,7 +70,10 @@ class Encoder(nn.Module):
         obs = obs.view(obs.shape[0], -1)
         obs = obs.double()
         h = self.fc(obs)
-        h = F.normalize(h, p=1, dim=-1)
+        if self.mode == 'l2':
+            h = F.normalize(h, p=2, dim=-1)
+        elif self.mode == 'l1':
+            h = F.normalize(h, p=1, dim=-1)
         return h
     
     def encode_and_project(self, obs):
@@ -142,6 +146,27 @@ class ProjectSA(nn.Module):
     def forward(self, encoded_state_action: torch.Tensor) -> torch.Tensor:
         return self.project_sa(encoded_state_action)
 
+class NewProjectSA(nn.Module):
+    # def __init__(self, batch_size: int):
+    def __init__(self, subsamples: int, phi_dim: int, psi_dim: int):
+        super().__init__()
+        self.alpha = nn.Parameter(0.01 * torch.randn(subsamples))
+
+
+    def forward(self, phi_x, phi_sub_x, psi_sub_y):
+        T = torch.einsum('i,ix,iy->xy', self.alpha, phi_sub_x, psi_sub_y)
+        return phi_x @ T
+
+        # similarities: <phi(sub_x_i), phi(x_b)>
+        # K[i, b] = <phi_sub_x[i], phi_x[b]>
+        K = phi_sub_x @ phi_x.T      # [m, n]
+
+        # weight each support term by alpha_i
+        W = self.alpha[:, None] * K  # [m, n]
+
+        # output[b] = sum_i W[i,b] * psi_sub_y[i]
+        out = torch.einsum('mn,nk->nk', W.T, psi_sub_y)        # [n, d_psi]
+        return out
 
 # ============================================================================
 # Distribution Matching Mathematics
@@ -1190,7 +1215,19 @@ class EmbeddingDistributionVisualizerV2:
                     print(f"  Rendering state {s_idx}/{self.n_states}...")
                 
                 image = self.env.render_from_position(self.env.idx_to_state[s_idx], show_goal=False)
-                image = self._prepare_rendered_state_image(image, render_resolution)
+                if self.agent.grayscale:
+                    image = np.asarray(
+                        Image.fromarray(image.astype(np.uint8)).convert('L')
+                    )[..., None]
+                
+                # Resize if needed
+                if image.shape[:2] != (render_resolution, render_resolution):
+                    pil_img = Image.fromarray(image.astype(np.uint8))
+                    pil_img_resized = pil_img.resize(
+                        (render_resolution, render_resolution), 
+                        Image.LANCZOS
+                    )
+                    image = np.array(pil_img_resized)
                 
                 # Convert HWC to CHW and stack frames
                 image_chw = image.transpose(2, 0, 1).copy()
@@ -1205,41 +1242,7 @@ class EmbeddingDistributionVisualizerV2:
             
             print(f"✓ Pre-rendered {self.n_states} states with shape {self._prerendered_states.shape}")
         else:
-            self._prerendered_states = None
-
-    def _prepare_rendered_state_image(self, image: np.ndarray, render_resolution: int) -> np.ndarray:
-        image = np.asarray(image, dtype=np.uint8)
-
-        if self.agent.grayscale:
-            if image.ndim == 3 and image.shape[2] == 1:
-                image = image[..., 0]
-            elif image.ndim == 3:
-                image = np.asarray(Image.fromarray(image).convert('L'))
-            elif image.ndim != 2:
-                raise ValueError(f"Expected grayscale image to be 2D or HWC, got shape {image.shape}")
-        elif image.ndim == 2:
-            image = np.repeat(image[..., None], 3, axis=2)
-
-        if image.shape[:2] != (render_resolution, render_resolution):
-            image = np.asarray(
-                Image.fromarray(image).resize(
-                    (render_resolution, render_resolution),
-                    Image.LANCZOS,
-                )
-            )
-
-        if self.agent.grayscale:
-            if image.ndim == 2:
-                image = image[..., None]
-        elif image.ndim == 2:
-            image = np.repeat(image[..., None], 3, axis=2)
-
-        if image.ndim != 3 or image.shape[2] != self.agent.image_channels:
-            raise ValueError(
-                f"Expected image shape [H, W, {self.agent.image_channels}], got {image.shape}"
-            )
-
-        return image
+            self._prerendered_states = None                
 
     def _orientation_label(self, orientation: int) -> str:
         mapping = {
@@ -1396,7 +1399,26 @@ class EmbeddingDistributionVisualizerV2:
             
             # Get position from state index
             image = self.env.render_from_position(self.env.idx_to_state[state_idx], show_goal=False)
-            image = self._prepare_rendered_state_image(image, render_resolution)
+            if self.agent.grayscale:
+                image = np.asarray(
+                    Image.fromarray(image.astype(np.uint8)).convert('L')
+                )[..., None]
+            
+            # Auto-resize if needed
+            if image.shape[:2] != (render_resolution, render_resolution):
+                # Convert to PIL Image, resize, convert back
+                pil_img = Image.fromarray(image.astype(np.uint8))
+                pil_img_resized = pil_img.resize(
+                    (render_resolution, render_resolution), 
+                    Image.LANCZOS
+                )
+                image = np.array(pil_img_resized)
+            
+            # Verify channels
+            if image.shape[2] != self.agent.image_channels:
+                raise ValueError(
+                    f"Expected {self.agent.image_channels} image channels, got {image.shape[2]}"
+                )
             
             # Convert HWC to CHW format [C, H, W]
             image_chw = image.transpose(2, 0, 1).copy()
@@ -1994,7 +2016,6 @@ class RoverAgent:
                  hidden_dim,
                  feature_dim,
                  update_every_steps,
-                 encoder_updates_per_step,
                  update_actor_every_steps,
                  pmd_steps,
                  num_expl_steps,
@@ -2032,8 +2053,6 @@ class RoverAgent:
         self.batch_size_actor = batch_size_actor
         # assert batch_size_actor >= batch_size, "Actor update batch size must be greater than or equal to encoder update batch size"
         self.update_every_steps = update_every_steps
-        self.encoder_updates_per_step = int(encoder_updates_per_step)
-        assert self.encoder_updates_per_step >= 1, "encoder_updates_per_step must be >= 1"
         self.update_actor_every_steps = update_actor_every_steps
         self.use_tb = use_tb
         self.use_wandb = use_wandb
@@ -2095,6 +2114,7 @@ class RoverAgent:
             
             self.obs_dim = self.feature_dim
         else:
+            # assert curl == False, "State observations do not use CURL augmentations, so curl must be False"
             # Components
             self.aug = nn.Identity()
             if embeddings == False:
@@ -2110,12 +2130,18 @@ class RoverAgent:
             self.obs_dim = self.feature_dim
        
 
-        self.project_sa = ProjectSA(
-            self.obs_dim * self.n_actions,
-            hidden_dim,
-            self.obs_dim
-        ).to(self.device)
+        # self.project_sa = ProjectSA(
+        #     self.obs_dim * self.n_actions,
+        #     hidden_dim,
+        #     self.obs_dim
+        # ).to(self.device)
 
+        self.project_sa = NewProjectSA(
+            self.subsamples,
+            self.obs_dim,
+            self.n_actions*self.obs_dim,
+            # self.batch_size,
+        ).to(self.device)
         
         self.policy_encoder = copy.deepcopy(self.encoder).to(self.device)
         self._freeze_module(self.policy_encoder)
@@ -2360,7 +2386,7 @@ class RoverAgent:
         encoded_state_action = self._encode_state_action(obs_en, action)
         
         # Predict next state
-        projected_sa = self.project_sa(encoded_state_action)  
+        projected_sa = self.project_sa(encoded_state_action, next_obs_en)  
         
         # Normalize embeddings L2
         if self.mode == 'l1':
@@ -2371,7 +2397,7 @@ class RoverAgent:
 
         # Compute loss
         # 1. Contrastive loss: 
-        # Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
+        Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
         logits = torch.matmul(norm_projected_sa, norm_next_obs_en.T)  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
@@ -2434,6 +2460,99 @@ class RoverAgent:
             metrics['curl_loss'] = curl_loss.item()
         return metrics
     
+    def update_encoders_nystrom(self, obs, action, next_obs, reward, sub_obs, sub_action, sub_next_obs):
+        metrics = dict()
+        
+        # Encode
+        obs_en = self.aug_and_encode(obs, project=True) # [n, feature_dim]
+        with torch.no_grad():
+            next_obs_en = self.aug_and_encode(next_obs, project=True) # [n, feature_dim]
+
+        encoded_state_action = self._encode_state_action(obs_en, action) # [n, feature_dim * n_actions]
+        
+        # # Predict next state
+        # projected_sa = self.project_sa(encoded_state_action, next_obs_en)  
+        
+        # Normalize embeddings L2
+        if self.mode == 'l1':
+            norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
+        elif self.mode == 'l2':
+            norm_next_obs_en = next_obs_en
+        # norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+
+        with torch.no_grad():
+            sub_obs_en = self.aug_and_encode(sub_obs, project=True) # [m, feature_dim]
+            sub_next_obs_en = self.aug_and_encode(sub_next_obs, project=True) # [m, feature_dim]
+            sub_encoded_state_action = self._encode_state_action(sub_obs_en, sub_action) # [m, feature_dim * n_actions]
+            if self.mode == 'l1':
+                sub_norm_next_obs_en = F.normalize(sub_next_obs_en, p=2, dim=1, eps=1e-10)
+            elif self.mode == 'l2':
+                sub_norm_next_obs_en = sub_next_obs_en
+        sub_encoded_state_action = self._encode_state_action(sub_obs_en, sub_action) # [m, feature_dim * n_actions]
+        projected_sa = self.project_sa(phi_x = encoded_state_action, phi_sub_x = sub_encoded_state_action, psi_sub_y = sub_norm_next_obs_en)  # [n, feature_dim]
+        norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10) # [n, feature_dim]
+        
+        # Compute loss
+        # 1. Contrastive loss: 
+        logits = torch.matmul(norm_projected_sa, norm_next_obs_en.T) # [B, B]
+        logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+        contrastive_loss = self.cross_entropy_loss(logits, labels)
+        
+        z_anchor = self.aug_and_encode(sub_obs, project=True)
+        with torch.no_grad():
+            z_pos = self.aug_and_encode(sub_obs, project=True)
+
+        ## Compute CURL loss
+        if self.curl:
+            # Normalize embeddings L2
+            if self.mode == 'l1':
+                z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
+                z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
+            # Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
+            logits = torch.matmul(z_anchor, z_pos.T)  # [B, B]
+            logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
+            labels = torch.arange(logits.shape[0]).long().to(self.device)
+            curl_loss = self.cross_entropy_loss(logits, labels)
+        else:
+            curl_loss = torch.tensor(0.0, device=self.device)
+
+        if self.reward:
+            reward_pred = self.reward(encoded_state_action)
+            reward_loss = F.mse_loss(reward_pred, reward.to(self.device))
+        else:
+            reward_loss = torch.tensor(0.0, device=self.device)
+        metrics['reward_loss'] = reward_loss.item()
+
+
+        if self.embedding_sum_loss>0:
+            # Sum of embeddings loss = 1
+            sum_next_obs_en = torch.sum(next_obs_en, dim=1)  # [B]
+            embedding_sum_loss = self.embedding_sum_loss * torch.mean((sum_next_obs_en - 1.0) ** 2)
+        else:
+            embedding_sum_loss = torch.tensor(0.0, device=self.device)
+
+        loss =  contrastive_loss + 1e-3*curl_loss + embedding_sum_loss+reward_loss
+        
+        # max_grad_norm = 1.0
+        # Optimize
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.zero_grad()      
+            # torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_grad_norm)
+        # torch.nn.utils.clip_grad_norm_(self.project_sa.parameters(), max_grad_norm)
+        self.transition_optimizer.zero_grad()
+        loss.backward()
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.step()
+            self._policy_is_synced = False
+        self.transition_optimizer.step()
+        self.encoder_scheduler.step()
+
+        # Print losses
+        logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
+        if self.use_tb or self.use_wandb:
+            metrics['transition_loss'] = loss.item()
+        return metrics
 
     def update_actor(self, obs, action, next_obs, step, rewards=None):
         """Update policy using Projected Mirror Descent."""
@@ -3325,10 +3444,6 @@ class RoverAgent:
         else:
             return self.encoder(obs)
 
-    def _sample_batch(self, replay_iter):
-        batch = next(replay_iter)
-        return utils.to_torch(batch, self.device)
-
     def update(self, replay_iter, step, replay_buffer=None):
         metrics = dict()
 
@@ -3342,7 +3457,32 @@ class RoverAgent:
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         if self.embeddings:
-            metrics.update(self.update_encoders(obs, action, next_obs, reward))
+
+            # metrics.update(self.update_encoders(obs, action, next_obs, reward))
+            if self.subsampled is None:
+                self.subsampled=True
+                use_smart_subsample = True
+                (
+                    self.all_obs_actor,
+                    self.all_action_actor,
+                    self.all_next_obs_actor,
+                    self.all_reward_actor,
+                    self.subsampled_obs_actor,
+                    self.subsampled_action_actor,
+                    self.subsampled_next_obs_actor,
+                    self.subsampled_reward_actor,
+                ) = self._get_actor_update_data(
+                    replay_iter,
+                    obs,
+                    action,
+                    next_obs,
+                    reward,
+                    replay_buffer=replay_buffer,
+                    smart_subsample=use_smart_subsample,
+                )
+               
+
+            metrics.update(self.update_encoders_nystrom(obs[:self.batch_size], action[:self.batch_size], next_obs[:self.batch_size], reward, self.subsampled_obs_actor, self.subsampled_action_actor, self.subsampled_next_obs_actor))
 
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
@@ -3350,13 +3490,17 @@ class RoverAgent:
             return metrics
         
         # In ideal mode, we can update actor immediately
-        if  step % self.update_actor_every_steps == 0: # or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
-            use_smart_subsample = False
+        if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
+            use_smart_subsample = True
             (
                 all_obs_actor,
                 all_action_actor,
                 all_next_obs_actor,
                 all_reward_actor,
+                # _,
+                # _,
+                # _,
+                # _,
                 subsampled_obs_actor,
                 subsampled_action_actor,
                 subsampled_next_obs_actor,
@@ -3371,7 +3515,7 @@ class RoverAgent:
                 smart_subsample=use_smart_subsample,
             )
 
-            utils.ColorPrint.red(f"samples for actor update: full {all_obs_actor.shape[0]}, subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}")
+            utils.ColorPrint.red(f"samples for actor update: full {self.all_obs_actor.shape[0]}, subsampled {self.subsampled_obs_actor.shape[0] if self.subsampled_obs_actor is not None else 'N/A'}")
             if self.subsamples is None:
                 metrics.update(
                     self.update_actor(
@@ -3382,7 +3526,7 @@ class RoverAgent:
                         rewards=all_reward_actor,
                     )
                 )
-                visualizer_obs = all_obs_actor
+                visualizer_obs = self.all_obs_actor
                 visualizer_z = self._phi_all_obs[:, :-1]
             else:
                 metrics.update(
@@ -3398,7 +3542,7 @@ class RoverAgent:
                         sub_rewards=subsampled_reward_actor,
                     )
                 )
-                visualizer_obs = all_obs_actor
+                visualizer_obs = self.all_obs_actor
                 visualizer_z = self._phi_all_obs[:, :-1]
 
 

@@ -258,7 +258,17 @@ class Workspace:
 
         episode_step, episode_reward = 0, 0
         time_step = self.train_env.reset()
-        print(f"Initial observation shape: {time_step.observation.shape}")
+        if self.cfg.obs_type == 'pixels' and hasattr(time_step.observation, 'shape'):
+            base_channels = 1 if self.cfg.grayscale else 3
+            stacked_channels = time_step.observation.shape[0]
+            effective_frame_stack = stacked_channels // base_channels if base_channels > 0 else 0
+            print(
+                "Initial observation shape: "
+                f"{time_step.observation.shape} "
+                f"(base_channels={base_channels}, frame_stack={effective_frame_stack})"
+            )
+        else:
+            print(f"Initial observation shape: {time_step.observation.shape}")
         meta = self.agent.init_meta()
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)

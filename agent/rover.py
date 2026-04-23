@@ -979,19 +979,7 @@ class EmbeddingDistributionVisualizerV2:
                     print(f"  Rendering state {s_idx}/{self.n_states}...")
                 
                 image = self.env.render_from_position(self.env.idx_to_state[s_idx], show_goal=False)
-                if self.agent.grayscale:
-                    image = np.asarray(
-                        Image.fromarray(image.astype(np.uint8)).convert('L')
-                    )[..., None]
-                
-                # Resize if needed
-                if image.shape[:2] != (render_resolution, render_resolution):
-                    pil_img = Image.fromarray(image.astype(np.uint8))
-                    pil_img_resized = pil_img.resize(
-                        (render_resolution, render_resolution), 
-                        Image.LANCZOS
-                    )
-                    image = np.array(pil_img_resized)
+                image = self._prepare_rendered_state_image(image, render_resolution)
                 
                 # Convert HWC to CHW and stack frames
                 image_chw = image.transpose(2, 0, 1).copy()
@@ -1006,7 +994,41 @@ class EmbeddingDistributionVisualizerV2:
             
             print(f"✓ Pre-rendered {self.n_states} states with shape {self._prerendered_states.shape}")
         else:
-            self._prerendered_states = None                
+            self._prerendered_states = None
+
+    def _prepare_rendered_state_image(self, image: np.ndarray, render_resolution: int) -> np.ndarray:
+        image = np.asarray(image, dtype=np.uint8)
+
+        if self.agent.grayscale:
+            if image.ndim == 3 and image.shape[2] == 1:
+                image = image[..., 0]
+            elif image.ndim == 3:
+                image = np.asarray(Image.fromarray(image).convert('L'))
+            elif image.ndim != 2:
+                raise ValueError(f"Expected grayscale image to be 2D or HWC, got shape {image.shape}")
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.shape[:2] != (render_resolution, render_resolution):
+            image = np.asarray(
+                Image.fromarray(image).resize(
+                    (render_resolution, render_resolution),
+                    Image.LANCZOS,
+                )
+            )
+
+        if self.agent.grayscale:
+            if image.ndim == 2:
+                image = image[..., None]
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.ndim != 3 or image.shape[2] != self.agent.image_channels:
+            raise ValueError(
+                f"Expected image shape [H, W, {self.agent.image_channels}], got {image.shape}"
+            )
+
+        return image
 
     def _orientation_label(self, orientation: int) -> str:
         mapping = {
@@ -1141,26 +1163,7 @@ class EmbeddingDistributionVisualizerV2:
             
             # Get position from state index
             image = self.env.render_from_position(self.env.idx_to_state[state_idx], show_goal=False)
-            if self.agent.grayscale:
-                image = np.asarray(
-                    Image.fromarray(image.astype(np.uint8)).convert('L')
-                )[..., None]
-            
-            # Auto-resize if needed
-            if image.shape[:2] != (render_resolution, render_resolution):
-                # Convert to PIL Image, resize, convert back
-                pil_img = Image.fromarray(image.astype(np.uint8))
-                pil_img_resized = pil_img.resize(
-                    (render_resolution, render_resolution), 
-                    Image.LANCZOS
-                )
-                image = np.array(pil_img_resized)
-            
-            # Verify channels
-            if image.shape[2] != self.agent.image_channels:
-                raise ValueError(
-                    f"Expected {self.agent.image_channels} image channels, got {image.shape[2]}"
-                )
+            image = self._prepare_rendered_state_image(image, render_resolution)
             
             # Convert HWC to CHW format [C, H, W]
             image_chw = image.transpose(2, 0, 1).copy()

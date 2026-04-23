@@ -8,6 +8,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import patches
 import numpy as np
 
 
@@ -285,6 +286,65 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
     def _use_env_plot_bounds(self) -> bool:
         return False
 
+    def _get_maze_layout(self):
+        method = _get_env_method(self.env, "get_debug_maze_layout")
+        if not callable(method):
+            return None
+
+        layout = method()
+        if not isinstance(layout, dict):
+            return None
+
+        maze_lower = layout.get("maze_lower")
+        maze_upper = layout.get("maze_upper")
+        wall_rectangles = layout.get("wall_rectangles")
+        if maze_lower is None or maze_upper is None or wall_rectangles is None:
+            return None
+
+        maze_lower = np.asarray(maze_lower, dtype=np.float32).reshape(-1)
+        maze_upper = np.asarray(maze_upper, dtype=np.float32).reshape(-1)
+        wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+        if maze_lower.size != 2 or maze_upper.size != 2:
+            return None
+
+        return {
+            "maze_lower": maze_lower,
+            "maze_upper": maze_upper,
+            "wall_rectangles": wall_rectangles,
+        }
+
+    def _overlay_maze_walls(self, ax) -> None:
+        layout = self._get_maze_layout()
+        if layout is None:
+            return
+
+        maze_lower = layout["maze_lower"]
+        maze_upper = layout["maze_upper"]
+        for x0, y0, width, height in layout["wall_rectangles"]:
+            ax.add_patch(
+                patches.Rectangle(
+                    (x0, y0),
+                    width,
+                    height,
+                    facecolor="black",
+                    edgecolor="black",
+                    linewidth=0.5,
+                    zorder=3,
+                )
+            )
+
+        ax.add_patch(
+            patches.Rectangle(
+                (maze_lower[0], maze_lower[1]),
+                maze_upper[0] - maze_lower[0],
+                maze_upper[1] - maze_lower[1],
+                fill=False,
+                edgecolor="black",
+                linewidth=1.5,
+                zorder=4,
+            )
+        )
+
     def save(self, step: int) -> None:
         coords = self._sample_policy_rollout(step)
         if coords.size == 0:
@@ -315,6 +375,7 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         ax.set_title(f"PointMaze XY coverage at step {step}")
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
+        self._overlay_maze_walls(ax)
 
         save_path = self.save_dir / f"step_{step}.png"
         fig.savefig(save_path, dpi=150, bbox_inches="tight")

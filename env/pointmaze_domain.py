@@ -105,6 +105,40 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
             "fixed_goal": self.fixed_goal.copy(),
         }
 
+    def get_debug_maze_layout(self):
+        base_env = self._base_env()
+        maze = getattr(base_env, "maze", None)
+        if maze is None or not hasattr(maze, "maze_map") or not hasattr(maze, "cell_rowcol_to_xy"):
+            return None
+
+        half_cell = 0.5 * float(getattr(maze, "maze_size_scaling", 1.0))
+        wall_rectangles = []
+        all_rectangles = []
+
+        for row_idx, row in enumerate(maze.maze_map):
+            for col_idx, cell in enumerate(row):
+                cell_center = maze.cell_rowcol_to_xy(np.array([row_idx, col_idx], dtype=np.int32))
+                x0 = float(cell_center[0] - half_cell)
+                y0 = float(cell_center[1] - half_cell)
+                rect = np.array([x0, y0, 2.0 * half_cell, 2.0 * half_cell], dtype=np.float32)
+                all_rectangles.append(rect)
+                if cell == 1:
+                    wall_rectangles.append(rect)
+
+        if not all_rectangles:
+            return None
+
+        all_rectangles = np.asarray(all_rectangles, dtype=np.float32)
+        maze_lower = all_rectangles[:, :2].min(axis=0)
+        maze_upper = (all_rectangles[:, :2] + all_rectangles[:, 2:4]).max(axis=0)
+        wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+
+        return {
+            "maze_lower": maze_lower,
+            "maze_upper": maze_upper,
+            "wall_rectangles": wall_rectangles,
+        }
+
     def __getattr__(self, name):
         return getattr(self.env, name)
 
