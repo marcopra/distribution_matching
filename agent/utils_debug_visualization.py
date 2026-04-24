@@ -408,9 +408,9 @@ class RoverDebugVisualizerSuite:
             self.domain_visualizer = None
         return self.domain_visualizer
 
-    def save(self, step: int, obs_batch, z_batch, param_text: str = "") -> dict:
+    def save(self, step: int, obs_batch=None, z_batch=None, param_text: str = "") -> dict:
         metrics = {}
-        if self.exploration_visualizer is not None:
+        if self.exploration_visualizer is not None and obs_batch is not None and z_batch is not None:
             vis_metrics = self.exploration_visualizer.update(
                 obs_batch=obs_batch,
                 z_batch=z_batch,

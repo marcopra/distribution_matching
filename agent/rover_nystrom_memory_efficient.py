@@ -48,13 +48,12 @@ logger.addHandler(handler)
 # Neural Network Components
 # ============================================================================
 class Encoder(nn.Module):
-    def __init__(self, obs_shape, hidden_dim, feature_dim, mode='l2'):
+    def __init__(self, obs_shape, hidden_dim, feature_dim):
         super(Encoder, self).__init__()
         self.obs_shape = obs_shape
         self.feature_dim = feature_dim
         self.repr_dim = feature_dim
         self.temperature = 0.05
-        self.mode = mode    
 
 
         self.fc =  nn.Sequential(
@@ -70,10 +69,7 @@ class Encoder(nn.Module):
         obs = obs.view(obs.shape[0], -1)
         obs = obs.double()
         h = self.fc(obs)
-        if self.mode == 'l2':
-            h = F.normalize(h, p=2, dim=-1)
-        elif self.mode == 'l1':
-            h = F.normalize(h, p=1, dim=-1)
+        h = F.normalize(h, p=1, dim=-1)
         return h
     
     def encode_and_project(self, obs):
@@ -146,27 +142,6 @@ class ProjectSA(nn.Module):
     def forward(self, encoded_state_action: torch.Tensor) -> torch.Tensor:
         return self.project_sa(encoded_state_action)
 
-class NewProjectSA(nn.Module):
-    # def __init__(self, batch_size: int):
-    def __init__(self, subsamples: int, phi_dim: int, psi_dim: int):
-        super().__init__()
-        self.alpha = nn.Parameter(0.01 * torch.randn(subsamples))
-
-
-    def forward(self, phi_x, phi_sub_x, psi_sub_y):
-        T = torch.einsum('i,ix,iy->xy', self.alpha, phi_sub_x, psi_sub_y)
-        return phi_x @ T
-
-        # similarities: <phi(sub_x_i), phi(x_b)>
-        # K[i, b] = <phi_sub_x[i], phi_x[b]>
-        K = phi_sub_x @ phi_x.T      # [m, n]
-
-        # weight each support term by alpha_i
-        W = self.alpha[:, None] * K  # [m, n]
-
-        # output[b] = sum_i W[i,b] * psi_sub_y[i]
-        out = torch.einsum('mn,nk->nk', W.T, psi_sub_y)        # [n, d_psi]
-        return out
 
 # ============================================================================
 # Distribution Matching Mathematics
@@ -1215,19 +1190,7 @@ class EmbeddingDistributionVisualizerV2:
                     print(f"  Rendering state {s_idx}/{self.n_states}...")
                 
                 image = self.env.render_from_position(self.env.idx_to_state[s_idx], show_goal=False)
-                if self.agent.grayscale:
-                    image = np.asarray(
-                        Image.fromarray(image.astype(np.uint8)).convert('L')
-                    )[..., None]
-                
-                # Resize if needed
-                if image.shape[:2] != (render_resolution, render_resolution):
-                    pil_img = Image.fromarray(image.astype(np.uint8))
-                    pil_img_resized = pil_img.resize(
-                        (render_resolution, render_resolution), 
-                        Image.LANCZOS
-                    )
-                    image = np.array(pil_img_resized)
+                image = self._prepare_rendered_state_image(image, render_resolution)
                 
                 # Convert HWC to CHW and stack frames
                 image_chw = image.transpose(2, 0, 1).copy()
@@ -1242,7 +1205,41 @@ class EmbeddingDistributionVisualizerV2:
             
             print(f"✓ Pre-rendered {self.n_states} states with shape {self._prerendered_states.shape}")
         else:
-            self._prerendered_states = None                
+            self._prerendered_states = None
+
+    def _prepare_rendered_state_image(self, image: np.ndarray, render_resolution: int) -> np.ndarray:
+        image = np.asarray(image, dtype=np.uint8)
+
+        if self.agent.grayscale:
+            if image.ndim == 3 and image.shape[2] == 1:
+                image = image[..., 0]
+            elif image.ndim == 3:
+                image = np.asarray(Image.fromarray(image).convert('L'))
+            elif image.ndim != 2:
+                raise ValueError(f"Expected grayscale image to be 2D or HWC, got shape {image.shape}")
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.shape[:2] != (render_resolution, render_resolution):
+            image = np.asarray(
+                Image.fromarray(image).resize(
+                    (render_resolution, render_resolution),
+                    Image.LANCZOS,
+                )
+            )
+
+        if self.agent.grayscale:
+            if image.ndim == 2:
+                image = image[..., None]
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.ndim != 3 or image.shape[2] != self.agent.image_channels:
+            raise ValueError(
+                f"Expected image shape [H, W, {self.agent.image_channels}], got {image.shape}"
+            )
+
+        return image
 
     def _orientation_label(self, orientation: int) -> str:
         mapping = {
@@ -1399,26 +1396,7 @@ class EmbeddingDistributionVisualizerV2:
             
             # Get position from state index
             image = self.env.render_from_position(self.env.idx_to_state[state_idx], show_goal=False)
-            if self.agent.grayscale:
-                image = np.asarray(
-                    Image.fromarray(image.astype(np.uint8)).convert('L')
-                )[..., None]
-            
-            # Auto-resize if needed
-            if image.shape[:2] != (render_resolution, render_resolution):
-                # Convert to PIL Image, resize, convert back
-                pil_img = Image.fromarray(image.astype(np.uint8))
-                pil_img_resized = pil_img.resize(
-                    (render_resolution, render_resolution), 
-                    Image.LANCZOS
-                )
-                image = np.array(pil_img_resized)
-            
-            # Verify channels
-            if image.shape[2] != self.agent.image_channels:
-                raise ValueError(
-                    f"Expected {self.agent.image_channels} image channels, got {image.shape[2]}"
-                )
+            image = self._prepare_rendered_state_image(image, render_resolution)
             
             # Convert HWC to CHW format [C, H, W]
             image_chw = image.transpose(2, 0, 1).copy()
@@ -1604,6 +1582,8 @@ class EmbeddingDistributionVisualizerV2:
             print(f"Gridworld visualization saved to: {save_path}")
             if self.is_minigrid_style:
                 self._save_minigrid_policy_debug_plot(step, policy_per_state, save_path)
+            if self.agent.subsamples is not None:
+                self._save_nystrom_subsample_plot(step, save_path)
         
         plt.close(fig)
 
@@ -1808,14 +1788,8 @@ class EmbeddingDistributionVisualizerV2:
         plt.close(fig)
         print(f"MiniGrid policy debug visualization saved to: {panel_save_path}")
 
-    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
-        """Plot state occupancy from the current batch.
-        
-        Args:
-            ax: matplotlib axis
-            title: plot title
-            normalize: if True, normalize counts to probabilities; if False, show raw counts
-        """
+    def _compute_batch_and_subsample_state_counts(self):
+        """Infer state counts for the latest actor batch and Nyström subsample."""
         def _accumulate_state_counts(batch_embeddings, all_state_embeddings):
             counts = np.zeros(self.n_states, dtype=np.float32)
             for batch_emb in batch_embeddings:
@@ -1830,10 +1804,7 @@ class EmbeddingDistributionVisualizerV2:
 
         # Use the cached features from the last actor update
         if not hasattr(self.agent, '_phi_all_next') or self.agent._phi_all_next is None:
-            ax.text(0.5, 0.5, 'No batch data available yet',
-                ha='center', va='center', transform=ax.transAxes, fontsize=12)
-            ax.set_title(title, fontsize=12, fontweight='bold')
-            return
+            return None, None
         
         # We need to infer which states are in the batch
         # Since we have embeddings, we can compare them to known state embeddings
@@ -1854,6 +1825,22 @@ class EmbeddingDistributionVisualizerV2:
             if self.agent.subsamples is not None and hasattr(self.agent, '_phi_sub_next'):
                 subsample_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
                 subsample_counts = _accumulate_state_counts(subsample_embeddings, enc_all_states)
+        return state_counts, subsample_counts
+
+    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
+        """Plot state occupancy from the current batch.
+        
+        Args:
+            ax: matplotlib axis
+            title: plot title
+            normalize: if True, normalize counts to probabilities; if False, show raw counts
+        """
+        state_counts, _ = self._compute_batch_and_subsample_state_counts()
+        if state_counts is None:
+            ax.text(0.5, 0.5, 'No batch data available yet',
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            return
         
         # Normalize or keep raw counts
         if normalize and state_counts.sum() > 0:
@@ -1873,38 +1860,63 @@ class EmbeddingDistributionVisualizerV2:
         ax.set_xticks(np.arange(self.grid_width))
         ax.set_yticks(np.arange(self.grid_height))
         ax.grid(True, which='both', color='white', linewidth=0.5, alpha=0.35)
-
-        if subsample_counts is not None and subsample_counts.sum() > 0:
-            subsample_grid = self._state_dist_to_grid(subsample_counts)
-            subsample_patch = Patch(
-                facecolor='none',
-                edgecolor='black',
-                linewidth=2,
-                label='Nyström subsamples'
-            )
-            for y, x in np.argwhere(subsample_grid > 0):
-                rect = Rectangle(
-                    (x - 0.5, y - 0.5),
-                    1,
-                    1,
-                    linewidth=2,
-                    edgecolor='black',
-                    facecolor='none'
-                )
-                ax.add_patch(rect)
-                ax.text(
-                    x,
-                    y,
-                    f'{int(subsample_grid[y, x])}',
-                    ha='center',
-                    va='center',
-                    fontsize=9,
-                    fontweight='bold',
-                    color='black'
-                )
-            ax.legend(handles=[subsample_patch], loc='upper left', fontsize=9, frameon=True)
         
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
+
+    def _plot_nystrom_subsamples(self, ax, title='Nyström Subsample Occupancy'):
+        """Plot the Nyström subsample counts on their own grid."""
+        _, subsample_counts = self._compute_batch_and_subsample_state_counts()
+        if subsample_counts is None or subsample_counts.sum() <= 0:
+            ax.text(
+                0.5,
+                0.5,
+                'No Nyström subsample data available yet',
+                ha='center',
+                va='center',
+                transform=ax.transAxes,
+                fontsize=12
+            )
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            return False
+
+        subsample_grid = self._state_dist_to_grid(subsample_counts)
+        im = ax.imshow(subsample_grid, cmap='Oranges', interpolation='nearest')
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_xticks(np.arange(self.grid_width))
+        ax.set_yticks(np.arange(self.grid_height))
+        ax.grid(True, which='both', color='white', linewidth=0.5, alpha=0.35)
+
+        for y, x in np.argwhere(subsample_grid > 0):
+            ax.text(
+                x,
+                y,
+                f'{int(subsample_grid[y, x])}',
+                ha='center',
+                va='center',
+                fontsize=9,
+                fontweight='bold',
+                color='black'
+            )
+
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Count')
+        return True
+
+    def _save_nystrom_subsample_plot(self, step: int, save_path: str):
+        """Save a dedicated Nyström subsample occupancy figure next to the main plot."""
+        fig, ax = plt.subplots(figsize=(8, 7))
+        plotted = self._plot_nystrom_subsamples(ax, title=f'Nyström Subsample Occupancy (Step {step})')
+        if not plotted:
+            plt.close(fig)
+            return
+
+        plt.tight_layout()
+        root, ext = os.path.splitext(save_path)
+        subsample_save_path = f"{root}_nystrom_subsamples{ext}"
+        plt.savefig(subsample_save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Nyström subsample visualization saved to: {subsample_save_path}")
 
     def _plot_distribution(self, ax, nu, title):
         """Plot state distribution on grid WITHOUT text annotations."""
@@ -2034,6 +2046,9 @@ class RoverAgent:
                  pmd_eta_max: float = 1e3,
                  pmd_backtrack_factor: float = 0.5,
                  pmd_backtrack_max_trials: int = 8,
+                 actor_fifo_size: Optional[int] = None,
+                 actor_fifo_batches_per_update: Optional[int] = None,
+                 nystrom_subsample_source: str = "fifo",
                  device: str = "cpu",
                  ):
 
@@ -2054,6 +2069,21 @@ class RoverAgent:
         # assert batch_size_actor >= batch_size, "Actor update batch size must be greater than or equal to encoder update batch size"
         self.update_every_steps = update_every_steps
         self.update_actor_every_steps = update_actor_every_steps
+        self.actor_fifo_size = int(actor_fifo_size) if actor_fifo_size is not None else max(1, int(batch_size_actor) - 1)
+        if self.actor_fifo_size <= 0:
+            raise ValueError("actor_fifo_size must be positive")
+        if actor_fifo_batches_per_update is None:
+            self.actor_fifo_batches_per_update = max(1, int(self.update_actor_every_steps / self.batch_size))
+        else:
+            self.actor_fifo_batches_per_update = int(actor_fifo_batches_per_update)
+        if self.actor_fifo_batches_per_update <= 0:
+            raise ValueError("actor_fifo_batches_per_update must be positive")
+        self.nystrom_subsample_source = nystrom_subsample_source.lower()
+        if self.nystrom_subsample_source not in ("fifo", "replay_buffer"):
+            raise ValueError("nystrom_subsample_source must be 'fifo' or 'replay_buffer'")
+        self._encoded_actor_fifo = deque()
+        self._encoded_actor_fifo_size = 0
+        self._first_encoded_actor_transition = None
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.device = device
@@ -2114,7 +2144,6 @@ class RoverAgent:
             
             self.obs_dim = self.feature_dim
         else:
-            # assert curl == False, "State observations do not use CURL augmentations, so curl must be False"
             # Components
             self.aug = nn.Identity()
             if embeddings == False:
@@ -2130,18 +2159,12 @@ class RoverAgent:
             self.obs_dim = self.feature_dim
        
 
-        # self.project_sa = ProjectSA(
-        #     self.obs_dim * self.n_actions,
-        #     hidden_dim,
-        #     self.obs_dim
-        # ).to(self.device)
-
-        self.project_sa = NewProjectSA(
-            self.subsamples,
-            self.obs_dim,
-            self.n_actions*self.obs_dim,
-            # self.batch_size,
+        self.project_sa = ProjectSA(
+            self.obs_dim * self.n_actions,
+            hidden_dim,
+            self.obs_dim
         ).to(self.device)
+
         
         self.policy_encoder = copy.deepcopy(self.encoder).to(self.device)
         self._freeze_module(self.policy_encoder)
@@ -2386,7 +2409,7 @@ class RoverAgent:
         encoded_state_action = self._encode_state_action(obs_en, action)
         
         # Predict next state
-        projected_sa = self.project_sa(encoded_state_action, next_obs_en)  
+        projected_sa = self.project_sa(encoded_state_action)  
         
         # Normalize embeddings L2
         if self.mode == 'l1':
@@ -2397,7 +2420,7 @@ class RoverAgent:
 
         # Compute loss
         # 1. Contrastive loss: 
-        Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
+        # Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
         logits = torch.matmul(norm_projected_sa, norm_next_obs_en.T)  # [B, B]
         logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
         labels = torch.arange(logits.shape[0]).long().to(self.device)
@@ -2460,107 +2483,16 @@ class RoverAgent:
             metrics['curl_loss'] = curl_loss.item()
         return metrics
     
-    def update_encoders_nystrom(self, obs, action, next_obs, reward, sub_obs, sub_action, sub_next_obs):
-        metrics = dict()
-        
-        # Encode
-        obs_en = self.aug_and_encode(obs, project=True) # [n, feature_dim]
-        with torch.no_grad():
-            next_obs_en = self.aug_and_encode(next_obs, project=True) # [n, feature_dim]
 
-        encoded_state_action = self._encode_state_action(obs_en, action) # [n, feature_dim * n_actions]
-        
-        # # Predict next state
-        # projected_sa = self.project_sa(encoded_state_action, next_obs_en)  
-        
-        # Normalize embeddings L2
-        if self.mode == 'l1':
-            norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-        elif self.mode == 'l2':
-            norm_next_obs_en = next_obs_en
-        # norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
-
-        with torch.no_grad():
-            sub_obs_en = self.aug_and_encode(sub_obs, project=True) # [m, feature_dim]
-            sub_next_obs_en = self.aug_and_encode(sub_next_obs, project=True) # [m, feature_dim]
-            sub_encoded_state_action = self._encode_state_action(sub_obs_en, sub_action) # [m, feature_dim * n_actions]
-            if self.mode == 'l1':
-                sub_norm_next_obs_en = F.normalize(sub_next_obs_en, p=2, dim=1, eps=1e-10)
-            elif self.mode == 'l2':
-                sub_norm_next_obs_en = sub_next_obs_en
-        sub_encoded_state_action = self._encode_state_action(sub_obs_en, sub_action) # [m, feature_dim * n_actions]
-        projected_sa = self.project_sa(phi_x = encoded_state_action, phi_sub_x = sub_encoded_state_action, psi_sub_y = sub_norm_next_obs_en)  # [n, feature_dim]
-        norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10) # [n, feature_dim]
-        
-        # Compute loss
-        # 1. Contrastive loss: 
-        logits = torch.matmul(norm_projected_sa, norm_next_obs_en.T) # [B, B]
-        logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        contrastive_loss = self.cross_entropy_loss(logits, labels)
-        
-        z_anchor = self.aug_and_encode(sub_obs, project=True)
-        with torch.no_grad():
-            z_pos = self.aug_and_encode(sub_obs, project=True)
-
-        ## Compute CURL loss
-        if self.curl:
-            # Normalize embeddings L2
-            if self.mode == 'l1':
-                z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
-                z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
-            # Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
-            logits = torch.matmul(z_anchor, z_pos.T)  # [B, B]
-            logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
-            labels = torch.arange(logits.shape[0]).long().to(self.device)
-            curl_loss = self.cross_entropy_loss(logits, labels)
-        else:
-            curl_loss = torch.tensor(0.0, device=self.device)
-
-        if self.reward:
-            reward_pred = self.reward(encoded_state_action)
-            reward_loss = F.mse_loss(reward_pred, reward.to(self.device))
-        else:
-            reward_loss = torch.tensor(0.0, device=self.device)
-        metrics['reward_loss'] = reward_loss.item()
-
-
-        if self.embedding_sum_loss>0:
-            # Sum of embeddings loss = 1
-            sum_next_obs_en = torch.sum(next_obs_en, dim=1)  # [B]
-            embedding_sum_loss = self.embedding_sum_loss * torch.mean((sum_next_obs_en - 1.0) ** 2)
-        else:
-            embedding_sum_loss = torch.tensor(0.0, device=self.device)
-
-        loss =  contrastive_loss + 1e-3*curl_loss + embedding_sum_loss+reward_loss
-        
-        # max_grad_norm = 1.0
-        # Optimize
-        if self.encoder_optimizer is not None:
-            self.encoder_optimizer.zero_grad()      
-            # torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_grad_norm)
-        # torch.nn.utils.clip_grad_norm_(self.project_sa.parameters(), max_grad_norm)
-        self.transition_optimizer.zero_grad()
-        loss.backward()
-        if self.encoder_optimizer is not None:
-            self.encoder_optimizer.step()
-            self._policy_is_synced = False
-        self.transition_optimizer.step()
-        self.encoder_scheduler.step()
-
-        # Print losses
-        logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
-        if self.use_tb or self.use_wandb:
-            metrics['transition_loss'] = loss.item()
-        return metrics
-
-    def update_actor(self, obs, action, next_obs, step, rewards=None):
+    def update_actor(self, obs=None, action=None, next_obs=None, step=None, rewards=None, encoded_full=None):
         """Update policy using Projected Mirror Descent."""
         metrics = dict()
 
-        # Compute features augmented
-        self._sync_policy_encoder()
-        self._cache_features(obs, action, next_obs, encoder=self.policy_encoder)
+        if encoded_full is None:
+            self._sync_policy_encoder()
+            self._cache_features(obs, action, next_obs, encoder=self.policy_encoder)
+        else:
+            self._cache_encoded_features(encoded_full)
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -2671,7 +2603,7 @@ class RoverAgent:
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
 
-            if iteration % 1 == 0 or iteration == self.pmd_steps - 1:
+            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
 
         if self.pmd_best_iterate:
@@ -2688,30 +2620,15 @@ class RoverAgent:
         return metrics
 
     def update_actor_nystrom(self,
-                             full_obs,
-                             full_action,
-                             full_next_obs,
+                             encoded_full,
                              step,
-                             rewards=None,
-                             sub_obs=None,
-                             sub_action=None,
-                             sub_next_obs=None,
-                             sub_rewards=None):
+                             encoded_sub=None):
         """Update policy using Projected Mirror Descent and Nystrom Approximation."""
         metrics = dict()
-        if sub_obs is None or sub_action is None or sub_next_obs is None:
-            raise ValueError("Nyström actor update requires subsampled observations, actions, and next observations.")
+        if encoded_sub is None:
+            raise ValueError("Nyström actor update requires an encoded subsample.")
 
-        # Compute features augmented
-        self._sync_policy_encoder()
-        self._cache_features(
-            full_obs, 
-            full_action, 
-            full_next_obs, 
-            encoder=self.policy_encoder, 
-            sub_obs=sub_obs, 
-            sub_action=sub_action,
-            sub_next_obs=sub_next_obs)
+        self._cache_encoded_features(encoded_full, encoded_sub=encoded_sub)
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -2943,274 +2860,199 @@ class RoverAgent:
 
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
-    def _load_actor_batch_from_replay_buffer(self, replay_buffer, smart_subsample=False):
+    def _encoded_actor_data_size(self, encoded_data):
+        return encoded_data["phi_obs"].shape[0]
 
-        if self.subsamples is None:
-            actor_batch = replay_buffer.get_all_data(last_n=self.batch_size_actor, first=True)
-            obs_actor_full, action_actor_full, reward_actor_full, _, next_obs_actor_full = utils.to_torch(
-                actor_batch[:5], self.device
-            )
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-            )
-        elif smart_subsample and hasattr(replay_buffer, 'get_all_data_matrix'):
-            actor_batch = replay_buffer.get_all_data_matrix(last_n=self.batch_size_actor)
-            obs_actor_matrix, action_actor_matrix, reward_actor_matrix, _, next_obs_actor_matrix = utils.to_torch(
-                actor_batch[:5], self.device
-            )
-            obs_actor_full = self._flatten_episode_matrix(obs_actor_matrix)
-            action_actor_full = self._flatten_episode_matrix(action_actor_matrix)
-            next_obs_actor_full = self._flatten_episode_matrix(next_obs_actor_matrix)
-            reward_actor_full = self._flatten_episode_matrix(reward_actor_matrix)
+    def _slice_encoded_actor_data(self, encoded_data, index):
+        return {
+            key: value[index].detach().clone()
+            for key, value in encoded_data.items()
+        }
 
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                (obs_actor_matrix, action_actor_matrix, next_obs_actor_matrix, reward_actor_matrix),
-            )
-        else:
-            actor_batch = replay_buffer.get_all_data(last_n=None)
-            obs_actor_full, action_actor_full, reward_actor_full, _, next_obs_actor_full = utils.to_torch(
-                actor_batch[:5], self.device
-            )
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-            )
+    def _index_encoded_actor_data(self, encoded_data, indices):
+        return {
+            key: value[indices].detach().clone()
+            for key, value in encoded_data.items()
+        }
 
-    def _load_actor_batch_from_replay_iter(self, replay_iter, obs, action, next_obs, reward):
-        num_batches_needed = self.batch_size_actor // self.batch_size
-        obs_list = [obs]
-        action_list = [action]
-        next_obs_list = [next_obs]
-        reward_list = [reward.reshape(-1, 1)]
+    def _concat_encoded_actor_data(self, chunks):
+        if not chunks:
+            raise RuntimeError("Encoded actor FIFO is empty")
+        return {
+            key: torch.cat([chunk[key] for chunk in chunks], dim=0)
+            for key in chunks[0].keys()
+        }
 
-        for _ in range(num_batches_needed - 1):
+    def _append_zero_feature_column(self, tensor):
+        zeros_col = torch.zeros(*tensor.shape[:-1], 1, device=tensor.device, dtype=tensor.dtype)
+        return torch.cat([tensor, zeros_col], dim=-1)
+
+    def _encode_actor_batch_for_fifo(self, obs, action, next_obs, reward=None):
+        with torch.no_grad():
+            action = action.reshape(-1).long().to(self.device)
+            phi_obs = self._encode_with_module(self.policy_encoder, obs, project=True).detach()
+            phi_next = self._encode_with_module(self.policy_encoder, next_obs, project=True).detach()
+            psi = self._encode_state_action(phi_obs, action).detach()
+
+            if reward is None:
+                reward = torch.empty((phi_obs.shape[0], 0), device=self.device, dtype=phi_obs.dtype)
+            else:
+                reward = reward.reshape(phi_obs.shape[0], -1).to(self.device).detach()
+
+            return {
+                "phi_obs": phi_obs,
+                "phi_next": phi_next,
+                "psi": psi,
+                "action": action,
+                "reward": reward,
+            }
+
+    def _trim_encoded_actor_fifo(self):
+        while self._encoded_actor_fifo_size > self.actor_fifo_size and self._encoded_actor_fifo:
+            overflow = self._encoded_actor_fifo_size - self.actor_fifo_size
+            oldest = self._encoded_actor_fifo[0]
+            oldest_size = self._encoded_actor_data_size(oldest)
+
+            if oldest_size <= overflow:
+                self._encoded_actor_fifo.popleft()
+                self._encoded_actor_fifo_size -= oldest_size
+                continue
+
+            self._encoded_actor_fifo[0] = self._slice_encoded_actor_data(oldest, slice(overflow, None))
+            self._encoded_actor_fifo_size -= overflow
+
+    def _add_encoded_actor_batch_to_fifo(self, encoded_batch):
+        batch_size = self._encoded_actor_data_size(encoded_batch)
+        if batch_size == 0:
+            return
+
+        # Replay batches reserve position 0 for the first transition. Keep one
+        # copy for alpha, but never enqueue repeated copies into the FIFO.
+        self._first_encoded_actor_transition = self._slice_encoded_actor_data(encoded_batch, slice(0, 1))
+        if batch_size == 1:
+            return
+
+        non_first_batch = self._slice_encoded_actor_data(encoded_batch, slice(1, None))
+        self._encoded_actor_fifo.append(non_first_batch)
+        self._encoded_actor_fifo_size += self._encoded_actor_data_size(non_first_batch)
+        self._trim_encoded_actor_fifo()
+
+    def _refresh_encoded_actor_fifo(self, replay_iter, obs, action, next_obs, reward):
+        encoded_batch = self._encode_actor_batch_for_fifo(obs, action, next_obs, reward=reward)
+        self._add_encoded_actor_batch_to_fifo(encoded_batch)
+
+        for _ in range(self.actor_fifo_batches_per_update - 1):
             batch = next(replay_iter)
             obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
-            obs_list.append(obs_b)
-            action_list.append(action_b)
-            next_obs_list.append(next_obs_b)
-            reward_list.append(reward_b.reshape(-1, 1))
+            encoded_batch = self._encode_actor_batch_for_fifo(obs_b, action_b, next_obs_b, reward=reward_b)
+            self._add_encoded_actor_batch_to_fifo(encoded_batch)
 
-        obs_actor_full = torch.cat(obs_list, dim=0)
-        action_actor_full = torch.cat(action_list, dim=0)
-        next_obs_actor_full = torch.cat(next_obs_list, dim=0)
-        reward_actor_full = torch.cat(reward_list, dim=0)
-        return obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full
+    def _get_encoded_actor_fifo_data(self):
+        if self._first_encoded_actor_transition is None:
+            raise RuntimeError("Missing first transition for encoded actor FIFO")
+        if self._encoded_actor_fifo_size == 0:
+            return self._first_encoded_actor_transition
+        return self._concat_encoded_actor_data([
+            self._first_encoded_actor_transition,
+            *self._encoded_actor_fifo,
+        ])
 
-    def _flatten_episode_matrix(self, field_matrix):
-        if field_matrix.ndim < 2:
-            raise ValueError("Expected an episode matrix with shape [num_episodes, episode_length, ...].")
-        return field_matrix.reshape(-1, *field_matrix.shape[2:])
-
-    def _maybe_subsample_actor_batch(self, obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full):
-        obs_actor_subsampled = None
-        action_actor_subsampled = None
-        next_obs_actor_subsampled = None
-        reward_actor_subsampled = None
-
+    def _sample_encoded_subsample_from_fifo(self, encoded_full):
         if self.subsamples is None:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                obs_actor_subsampled,
-                action_actor_subsampled,
-                next_obs_actor_subsampled,
-                reward_actor_subsampled,
-            )
-
-        total_samples = obs_actor_full.shape[0]
-        if self.subsamples > total_samples:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-            )
-            
+            return None
         if self.subsamples <= 0:
             raise ValueError("subsamples must be positive when provided")
 
+        total_samples = self._encoded_actor_data_size(encoded_full)
+        if self.subsamples >= total_samples:
+            return encoded_full
         if self.subsamples == 1:
-            subsample_indices = torch.zeros(1, device=obs_actor_full.device, dtype=torch.long)
+            subsample_indices = torch.zeros(1, device=self.device, dtype=torch.long)
         else:
-            remaining_indices = torch.randperm(total_samples - 1, device=obs_actor_full.device)[:self.subsamples - 1] + 1
+            remaining_indices = torch.randperm(total_samples - 1, device=self.device)[:self.subsamples - 1] + 1
             subsample_indices = torch.cat([
-                torch.zeros(1, device=obs_actor_full.device, dtype=torch.long),
+                torch.zeros(1, device=self.device, dtype=torch.long),
                 remaining_indices,
             ])
+        return self._index_encoded_actor_data(encoded_full, subsample_indices)
 
-        obs_actor_subsampled = obs_actor_full[subsample_indices]
-        action_actor_subsampled = action_actor_full[subsample_indices]
-        next_obs_actor_subsampled = next_obs_actor_full[subsample_indices]
-        reward_actor_subsampled = reward_actor_full[subsample_indices]
-
-        return (
-            obs_actor_full,
-            action_actor_full,
-            next_obs_actor_full,
-            reward_actor_full,
-            obs_actor_subsampled,
-            action_actor_subsampled,
-            next_obs_actor_subsampled,
-            reward_actor_subsampled,
-        )
-    
-    def _maybe_smart_subsample_actor_batch(
-        self,
-        obs_actor_full,
-        action_actor_full,
-        next_obs_actor_full,
-        reward_actor_full,
-        actor_matrix_data=None,
-    ):
-        if actor_matrix_data is None:
-            return self._maybe_subsample_actor_batch(
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-            )
-
+    def _sample_encoded_subsample_from_replay_buffer(self, replay_iter):
         if self.subsamples is None:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-                None,
-                None,
-                None,
-            )
-
+            return None
         if self.subsamples <= 0:
             raise ValueError("subsamples must be positive when provided")
 
-        (
-            obs_actor_matrix,
-            action_actor_matrix,
-            next_obs_actor_matrix,
-            reward_actor_matrix,
-        ) = actor_matrix_data
+        chunks = []
+        remaining = self.subsamples
+        while remaining > 0:
+            batch = next(replay_iter)
+            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+            encoded_batch = self._encode_actor_batch_for_fifo(obs_b, action_b, next_obs_b, reward=reward_b)
+            batch_size = self._encoded_actor_data_size(encoded_batch)
+            if batch_size == 0:
+                continue
 
-        num_episodes, episode_length = obs_actor_matrix.shape[:2]
-        total_samples = num_episodes * episode_length
-        if self.subsamples > total_samples:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-            )
+            if not chunks:
+                chunks.append(self._slice_encoded_actor_data(encoded_batch, slice(0, 1)))
+                remaining -= 1
+                if remaining == 0:
+                    break
 
-        if self.subsamples == 1:
-            episode_indices = torch.randint(num_episodes, (1,), device=obs_actor_matrix.device)
-            step_indices = torch.zeros(1, device=obs_actor_matrix.device, dtype=torch.long)
+            non_first_size = batch_size - 1
+            if non_first_size <= 0:
+                continue
+
+            take = min(remaining, non_first_size)
+            if take == non_first_size:
+                chunks.append(self._slice_encoded_actor_data(encoded_batch, slice(1, None)))
+            else:
+                indices = torch.randperm(non_first_size, device=self.device)[:take] + 1
+                chunks.append(self._index_encoded_actor_data(encoded_batch, indices))
+            remaining -= take
+
+        return self._concat_encoded_actor_data(chunks)
+
+    def _cache_encoded_features(self, encoded_full, encoded_sub=None):
+        with torch.no_grad():
+            self._phi_all_obs = self._append_zero_feature_column(encoded_full["phi_obs"])
+            self._phi_all_next = self._append_zero_feature_column(encoded_full["phi_next"])
+            self._psi_all = self._append_zero_feature_column(encoded_full["psi"])
+
+            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self._phi_all_next.dtype)
+            self._alpha[0] = 1.0
+
+            self.E = F.one_hot(
+                encoded_full["action"],
+                self.n_actions,
+            ).reshape(-1, self.n_actions).to(torch.float32).to(self.device)
+
+            if encoded_sub is not None:
+                self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"])
+                self._phi_sub_next = self._append_zero_feature_column(encoded_sub["phi_next"])
+                self._psi_sub = self._append_zero_feature_column(encoded_sub["psi"])
+
+                self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
+                self._sub_alpha[0] = 1.0
+
+            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
+
+    def _prepare_encoded_actor_update_data(self, replay_iter, obs, action, next_obs, reward):
+        self._sync_policy_encoder()
+        self._refresh_encoded_actor_fifo(replay_iter, obs, action, next_obs, reward)
+        encoded_full = self._get_encoded_actor_fifo_data()
+
+        if self.nystrom_subsample_source == "fifo":
+            encoded_sub = self._sample_encoded_subsample_from_fifo(encoded_full)
         else:
-            t_max = episode_length - 1
-            max_value = (1-self.discount**t_max)/(1-self.discount)
+            encoded_sub = self._sample_encoded_subsample_from_replay_buffer(replay_iter)
 
-            episode_indices = torch.zeros(self.subsamples, dtype=torch.long, device=obs_actor_matrix.device)  
-            episode_indices[1:] = torch.randint(num_episodes, (self.subsamples - 1,), device=obs_actor_matrix.device)
+        return encoded_full, encoded_sub
 
-            step_indices = torch.zeros(self.subsamples, dtype=torch.long, device=obs_actor_matrix.device)  
-            # log_\gamma (x/(1-x))) gives a distribution that favors later timesteps, with the degree of bias controlled by the discount factor gamma.
-            m = torch.rand(size=(self.subsamples - 1,), device=obs_actor_matrix.device) * max_value
-            ind = torch.log(1-m*(1-self.discount))/torch.log(torch.tensor(self.discount, device=obs_actor_matrix.device)) - 1
-            step_indices[1:] = torch.ceil(ind)
-
-            # Assert that step indices are within bounds
-            if torch.any(step_indices[1:] < 0) or torch.any(step_indices[1:] >= episode_length):
-                utils.ColorPrint.red(f"Warning: Some step indices are out of bounds. Clamping to valid range. Values < 0 are: {step_indices[1:][step_indices[1:] < 0]}" )
-            step_indices[1:] = torch.clamp(step_indices[1:], 0, episode_length - 1)
-
-            # plot the heatmap of the step indices distribution
-            # import matplotlib.pyplot as plt
-            # step_indices_cpu = step_indices[1:].cpu().numpy()
-            # plt.figure(figsize=(10, 6))
-            # sns.histplot(step_indices_cpu, bins=50, kde=True)
-            # plt.title('Distribution of Subsampled Step Indices')
-            # plt.xlabel('Step Index')
-            # plt.ylabel('Frequency')
-            # plt.savefig('step_indices_distribution.png')
-
-
-        obs_actor_subsampled = obs_actor_matrix[episode_indices, step_indices]
-        action_actor_subsampled = action_actor_matrix[episode_indices, step_indices]
-        next_obs_actor_subsampled = next_obs_actor_matrix[episode_indices, step_indices]
-        reward_actor_subsampled = reward_actor_matrix[episode_indices, step_indices]
-
-        return (
-            obs_actor_full,
-            action_actor_full,
-            next_obs_actor_full,
-            reward_actor_full,
-            obs_actor_subsampled,
-            action_actor_subsampled,
-            next_obs_actor_subsampled,
-            reward_actor_subsampled,
-        )
-
-    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None, smart_subsample=False):
-        if (replay_buffer is not None and hasattr(replay_buffer, 'get_all_data')) or (replay_buffer is not None and hasattr(replay_buffer, 'get_all_data_matrix') and smart_subsample):
-            actor_data = self._load_actor_batch_from_replay_buffer(
-                replay_buffer,
-                smart_subsample=smart_subsample,
-            )
-        else:
-            obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full = self._load_actor_batch_from_replay_iter(
-                replay_iter,
-                obs,
-                action,
-                next_obs,
-                reward,
-            )
-            actor_data = (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-            )
-
-        obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full, actor_matrix_data = actor_data
-
-        if smart_subsample:
-            return self._maybe_smart_subsample_actor_batch(
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                actor_matrix_data=actor_matrix_data,
-            )
-
-        return self._maybe_subsample_actor_batch(
-            obs_actor_full,
-            action_actor_full,
-            next_obs_actor_full,
-            reward_actor_full,
-        )
+    def _encoded_rewards(self, encoded_data):
+        reward = encoded_data.get("reward")
+        if reward is None or reward.numel() == 0:
+            return None
+        return reward
 
     def _compute_mean_action_probs_deviation(self, action_probs: np.ndarray) -> float:
         """
@@ -3444,6 +3286,10 @@ class RoverAgent:
         else:
             return self.encoder(obs)
 
+    def _sample_batch(self, replay_iter):
+        batch = next(replay_iter)
+        return utils.to_torch(batch, self.device)
+
     def update(self, replay_iter, step, replay_buffer=None):
         metrics = dict()
 
@@ -3457,32 +3303,7 @@ class RoverAgent:
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         if self.embeddings:
-
-            # metrics.update(self.update_encoders(obs, action, next_obs, reward))
-            if self.subsampled is None:
-                self.subsampled=True
-                use_smart_subsample = True
-                (
-                    self.all_obs_actor,
-                    self.all_action_actor,
-                    self.all_next_obs_actor,
-                    self.all_reward_actor,
-                    self.subsampled_obs_actor,
-                    self.subsampled_action_actor,
-                    self.subsampled_next_obs_actor,
-                    self.subsampled_reward_actor,
-                ) = self._get_actor_update_data(
-                    replay_iter,
-                    obs,
-                    action,
-                    next_obs,
-                    reward,
-                    replay_buffer=replay_buffer,
-                    smart_subsample=use_smart_subsample,
-                )
-               
-
-            metrics.update(self.update_encoders_nystrom(obs[:self.batch_size], action[:self.batch_size], next_obs[:self.batch_size], reward, self.subsampled_obs_actor, self.subsampled_action_actor, self.subsampled_next_obs_actor))
+            metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
         # If T is not sufficiently initialized, skip actor update
         if self._is_T_sufficiently_initialized(step) is False:   
@@ -3490,60 +3311,44 @@ class RoverAgent:
             return metrics
         
         # In ideal mode, we can update actor immediately
-        if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
-            use_smart_subsample = True
-            (
-                all_obs_actor,
-                all_action_actor,
-                all_next_obs_actor,
-                all_reward_actor,
-                # _,
-                # _,
-                # _,
-                # _,
-                subsampled_obs_actor,
-                subsampled_action_actor,
-                subsampled_next_obs_actor,
-                subsampled_reward_actor,
-            ) = self._get_actor_update_data(
+        if  step % self.update_actor_every_steps == 0: # or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
+            encoded_full_actor, encoded_subsampled_actor = self._prepare_encoded_actor_update_data(
                 replay_iter,
                 obs,
                 action,
                 next_obs,
                 reward,
-                replay_buffer=replay_buffer,
-                smart_subsample=use_smart_subsample,
             )
 
-            utils.ColorPrint.red(f"samples for actor update: full {self.all_obs_actor.shape[0]}, subsampled {self.subsampled_obs_actor.shape[0] if self.subsampled_obs_actor is not None else 'N/A'}")
+            full_actor_size = self._encoded_actor_data_size(encoded_full_actor)
+            subsampled_actor_size = (
+                self._encoded_actor_data_size(encoded_subsampled_actor)
+                if encoded_subsampled_actor is not None
+                else "N/A"
+            )
+            utils.ColorPrint.red(
+                f"samples for actor update: full {full_actor_size}, subsampled {subsampled_actor_size}, "
+                f"fifo filled: {self._encoded_actor_fifo_size}/{self.actor_fifo_size}, "
+                f"subsample_source {self.nystrom_subsample_source}"
+            )
             if self.subsamples is None:
                 metrics.update(
                     self.update_actor(
-                        all_obs_actor,
-                        all_action_actor,
-                        all_next_obs_actor,
-                        step,
-                        rewards=all_reward_actor,
+                        step=step,
+                        rewards=self._encoded_rewards(encoded_full_actor),
+                        encoded_full=encoded_full_actor,
                     )
                 )
-                visualizer_obs = self.all_obs_actor
-                visualizer_z = self._phi_all_obs[:, :-1]
+                
             else:
                 metrics.update(
                     self.update_actor_nystrom(
-                        all_obs_actor,
-                        all_action_actor,
-                        all_next_obs_actor,
+                        encoded_full_actor,
                         step=step,
-                        rewards=all_reward_actor, # at the moment keeping fixed the nystrom subsampling
-                        sub_obs=subsampled_obs_actor,
-                        sub_action=subsampled_action_actor,
-                        sub_next_obs=subsampled_next_obs_actor,
-                        sub_rewards=subsampled_reward_actor,
+                        encoded_sub=encoded_subsampled_actor,
                     )
                 )
-                visualizer_obs = self.all_obs_actor
-                visualizer_z = self._phi_all_obs[:, :-1]
+
 
 
             if self.debug_visualizer is not None:
@@ -3556,11 +3361,10 @@ class RoverAgent:
                     f"PMD steps = {self.pmd_steps}\n"
                     f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
                 )
+
                 metrics.update(
                     self.debug_visualizer.save(
                         step=step,
-                        obs_batch=visualizer_obs,
-                        z_batch=visualizer_z,
                         param_text=param_text,
                     )
                 )

@@ -3413,8 +3413,7 @@ class RoverAgent:
                         rewards=all_reward_actor,
                     )
                 )
-                visualizer_obs = all_obs_actor
-                visualizer_z = self._phi_all_obs[:, :-1]
+                
             else:
                 metrics.update(
                     self.update_actor_nystrom(
@@ -3429,8 +3428,7 @@ class RoverAgent:
                         sub_rewards=subsampled_reward_actor,
                     )
                 )
-                visualizer_obs = all_obs_actor
-                visualizer_z = self._phi_all_obs[:, :-1]
+
 
 
             if self.debug_visualizer is not None:
@@ -3443,6 +3441,14 @@ class RoverAgent:
                     f"PMD steps = {self.pmd_steps}\n"
                     f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
                 )
+
+                # For visualization, we can only use a subset of the full batch if it's too large
+                max_observations_to_visualize = min(2000, all_obs_actor.shape[0])
+                
+
+                visualizer_obs = all_obs_actor[:max_observations_to_visualize]
+                visualizer_z = self._phi_all_obs[:max_observations_to_visualize, :-1]
+                
                 metrics.update(
                     self.debug_visualizer.save(
                         step=step,
