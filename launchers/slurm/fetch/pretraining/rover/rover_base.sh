@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpuv
 
 cd $SLURM_SUBMIT_DIR
 
@@ -33,7 +33,7 @@ python pretrain.py \
     agent=rover \
     use_wandb=true \
     agent.lr_actor=${LR_ACTOR} \
-    agent.subsamples="${SUBSAMPLES}" \
+    agent.feature_dim=${FEATURE_DIM}\
     device=cuda \
     seed=${SEED} \
     save_video=false \
