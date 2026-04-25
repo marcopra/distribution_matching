@@ -258,7 +258,7 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
             ax.set_xlim(lower[i], upper[i])
             ax.set_ylim(lower[j], upper[j])
 
-        fig.suptitle(f"Fetch coverage rollout at step {step}", fontsize=14)
+        fig.suptitle(f"Fetch coverage rollout at step {step}, n samples: {coords.shape[0]}", fontsize=14)
         save_path = self.save_dir / f"step_{step}.png"
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -266,7 +266,7 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
-    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 2000, bins: int = 36):
+    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 10000, bins: int = 36):
         super().__init__(agent, env, save_dir=save_dir, rollout_steps=rollout_steps, bins=bins)
 
     def _extract_coordinates(self, time_step) -> Optional[np.ndarray]:
@@ -396,7 +396,7 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title(f"PointMaze XY coverage at step {step}")
+        ax.set_title(f"PointMaze XY coverage at step {step} (n samples: {coords.shape[0]})")
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
@@ -440,7 +440,7 @@ class RoverDebugVisualizerSuite:
         elif _is_fetch_env(env):
             self.domain_visualizer = FetchCoverageVisualizer(self.agent, env, rollout_steps=500, bins=10)
         elif _is_point_maze_env(env):
-            self.domain_visualizer = PointMazeCoverageVisualizer(self.agent, env, rollout_steps=1200, bins=20)
+            self.domain_visualizer = PointMazeCoverageVisualizer(self.agent, env, rollout_steps=10000, bins=20)
         else:
             self.domain_visualizer = None
         return self.domain_visualizer
@@ -456,15 +456,15 @@ class RoverDebugVisualizerSuite:
             metrics.update(vis_metrics)
             self.exploration_visualizer.plot_all(step, param_text=param_text)
 
-            if step % (self.agent.update_actor_every_steps * 3) == 0:
-                try:
-                    self.exploration_visualizer.plot_tsne(
-                        z_batch,
-                        step,
-                        method="tsne",
-                    )
-                except Exception as exc:
-                    print(f"⚠ Could not generate t-SNE plot at step {step}: {exc}")
+            
+            try:
+                self.exploration_visualizer.plot_tsne(
+                    z_batch,
+                    step,
+                    method="tsne",
+                )
+            except Exception as exc:
+                print(f"⚠ Could not generate t-SNE plot at step {step}: {exc}")
 
         if self.domain_visualizer is not None:
             try:
