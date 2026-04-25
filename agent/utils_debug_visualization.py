@@ -266,7 +266,7 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
-    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 256, bins: int = 36):
+    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 2000, bins: int = 36):
         super().__init__(agent, env, save_dir=save_dir, rollout_steps=rollout_steps, bins=bins)
 
     def _extract_coordinates(self, time_step) -> Optional[np.ndarray]:
