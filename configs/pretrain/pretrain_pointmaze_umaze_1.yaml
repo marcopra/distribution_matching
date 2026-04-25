@@ -14,15 +14,15 @@ obs_type: pixels
 frame_stack: 1
 action_repeat: 1
 discount: 0.99
-resolution: 96
+resolution: 84
 grayscale: true
 random_init: true
 random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
-num_train_frames: 500_000
-num_seed_frames: 2000
+num_train_frames: 2_000_000
+num_seed_frames: 4000
 
 # eval
 eval_every_frames: 10000
@@ -38,10 +38,8 @@ replay_buffer_num_workers: 1
 batch_size: ${agent.batch_size}
 nstep: ${agent.nstep}
 update_encoder: true
+  
 
-agent:
-  lr_actor: 100
-  sink_schedule: "linear(0.0, 0.05, 100_000)"
 # misc
 seed: 1
 device: cuda
