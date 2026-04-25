@@ -45,7 +45,7 @@ seed: 1
 device: cuda
 save_video: false
 save_train_video: false
-save_buffer: true
+save_buffer: false
 use_tb: true
 use_wandb: false
 wandb_project: "pretrain_pointmaze"

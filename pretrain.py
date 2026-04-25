@@ -347,6 +347,7 @@ class Workspace:
             self._global_step += 1
 
     def save_snapshot(self):
+        return
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)
         snapshot_dir.mkdir(exist_ok=True, parents=True)
         if self.global_frame >= self.snapshot_steps[0]:
