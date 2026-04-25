@@ -862,7 +862,7 @@ class ExplorationVisualizer:
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         plt.tight_layout()
-        save_path = self.save_dir / f'exploration_metrics_{step}.png'
+        save_path = self.save_dir / f'exploration_metrics.png'
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         
