@@ -43,7 +43,6 @@ python pretrain.py \
     agent.lr_actor=${LR_ACTOR} \
     agent.feature_dim=${FEATURE_DIM}\
     seed=${SEED} \
-    agent.batch_size_actor=${BATCH_SIZE_ACTOR} \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
     env=${ENV} \
     agent.update_every_steps=100 \

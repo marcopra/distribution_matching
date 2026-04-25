@@ -283,6 +283,30 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
             return proprio[:2]
         return None
 
+    def _get_initial_position(self) -> Optional[np.ndarray]:
+        method = _get_env_method(self.env, "get_debug_coordinates")
+        if callable(method):
+            debug_info = method()
+            if isinstance(debug_info, dict) and "fixed_start" in debug_info:
+                fixed_start = np.asarray(debug_info["fixed_start"], dtype=np.float32).reshape(-1)
+                if fixed_start.size >= 2:
+                    return fixed_start[:2]
+
+        current = self.env
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            for attr_name in ("start_position", "fixed_start"):
+                start_position = getattr(current, attr_name, None)
+                if start_position is None:
+                    continue
+                start_position = np.asarray(start_position, dtype=np.float32).reshape(-1)
+                if start_position.size >= 2:
+                    return start_position[:2]
+            current = getattr(current, "env", None)
+
+        return None
+
     def _use_env_plot_bounds(self) -> bool:
         return False
 
@@ -376,6 +400,19 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
+        initial_position = self._get_initial_position()
+        if initial_position is not None:
+            ax.scatter(
+                initial_position[0],
+                initial_position[1],
+                marker="*",
+                s=180,
+                c="white",
+                edgecolors="black",
+                linewidths=0.9,
+                zorder=5,
+                label="initial position",
+            )
 
         save_path = self.save_dir / f"step_{step}.png"
         fig.savefig(save_path, dpi=150, bbox_inches="tight")

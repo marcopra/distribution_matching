@@ -3071,6 +3071,20 @@ class RoverAgent:
             return None
         return reward
 
+    def _build_debug_visualizer_batch(self, obs, max_observations=2000):
+        if obs is None:
+            return None, None
+
+        max_observations = min(max_observations, obs.shape[0])
+        visualizer_obs = obs[:max_observations]
+        with torch.no_grad():
+            visualizer_z = self._encode_with_module(
+                self.policy_encoder,
+                visualizer_obs,
+                project=True,
+            )
+        return visualizer_obs, visualizer_z
+
     def _compute_mean_action_probs_deviation(self, action_probs: np.ndarray) -> float:
         """
         Compute mean deviation of action probabilities from uniform distribution.
@@ -3379,9 +3393,12 @@ class RoverAgent:
                     f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
                 )
 
+                visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
                 metrics.update(
                     self.debug_visualizer.save(
                         step=step,
+                        obs_batch=visualizer_obs,
+                        z_batch=visualizer_z,
                         param_text=param_text,
                     )
                 )

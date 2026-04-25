@@ -22,7 +22,7 @@ update_actor_after_critic_steps: 0
 
 # train settings
 num_train_frames: 50_000
-num_seed_frames: 4000
+num_seed_frames: 2000
 
 # eval
 eval_every_frames: 10000
