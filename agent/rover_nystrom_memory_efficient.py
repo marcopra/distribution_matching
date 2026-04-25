@@ -22,7 +22,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
 import utils
 from distribution_matching import DistributionVisualizer
-torch.set_default_dtype(torch.float64)
 from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
@@ -31,6 +30,27 @@ import logging
 from agent.utils_debug_visualization import build_debug_visualizer_suite
 # set logging level to info
 import logging
+
+
+def _resolve_torch_dtype(dtype):
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    dtype = str(dtype).lower()
+    dtype_map = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "32": torch.float32,
+        "float64": torch.float64,
+        "fp64": torch.float64,
+        "double": torch.float64,
+        "64": torch.float64,
+    }
+    if dtype not in dtype_map:
+        raise ValueError("compute_dtype must be one of: float32, fp32, float64, fp64, double")
+    return dtype_map[dtype]
+
+
+torch.set_default_dtype(_resolve_torch_dtype(os.environ.get("ROVER_COMPUTE_DTYPE", "float32")))
 
 logger = logging.getLogger("myapp")
 logger.setLevel(logging.INFO)
@@ -67,7 +87,7 @@ class Encoder(nn.Module):
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
-        obs = obs.double()
+        obs = obs.to(dtype=torch.get_default_dtype())
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
         return h
@@ -110,7 +130,7 @@ class CNNEncoder(nn.Module):
 
     def forward(self, obs):
         obs = obs / 255.
-        obs = obs.double()
+        obs = obs.to(dtype=torch.get_default_dtype())
         h = self.conv(obs)
         h = self.adaptive_pool(h)
         h = h.view(h.shape[0], -1)
@@ -263,14 +283,13 @@ class DistributionMatcher:
             phi_sub_next_obs: torch.Tensor, 
             psi_sub_obs_action: torch.Tensor,
             psi_all_obs_action: torch.Tensor,
-            K: torch.Tensor,
             M: torch.Tensor,
             alpha: torch.Tensor,
             sink_norm: float
         ) -> torch.Tensor:
         """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
        
-        N = K.shape[0]
+        N = psi_all_obs_action.shape[0]
         subsamples = psi_sub_obs_action.shape[0]
        
         # α̃ augmented to be [α; 1]
@@ -579,13 +598,13 @@ class FixedRandomEncoder(nn.Module):
         """
         with torch.no_grad():
             if self.obs_type == 'pixels':
-                obs = obs.double() / 255.0
+                obs = obs.to(dtype=torch.get_default_dtype()) / 255.0
                 h = self.conv(obs)
                 h = self.adaptive_pool(h)
                 h = h.reshape(h.size(0), -1)
             else:
                 # Flatten state to [B, state_dim]
-                obs = obs.double()
+                obs = obs.to(dtype=torch.get_default_dtype())
                 h = obs.reshape(obs.size(0), -1)
                 h = self.mlp(h)
             return h
@@ -1333,7 +1352,6 @@ class EmbeddingDistributionVisualizerV2:
                     phi_sub_next_obs=self.agent._phi_sub_next,
                     psi_sub_obs_action=self.agent._psi_sub,
                     psi_all_obs_action=self.agent._psi_all,
-                    K=self.agent.K_sub,
                     M=self.agent.sub_H * (self.agent.E @ self.agent.pi.T),
                     alpha=self.agent._sub_alpha,
                     sink_norm=utils.schedule(self.agent.sink_schedule, 0)
@@ -2049,8 +2067,12 @@ class RoverAgent:
                  actor_fifo_size: Optional[int] = None,
                  actor_fifo_batches_per_update: Optional[int] = None,
                  nystrom_subsample_source: str = "fifo",
+                 compute_dtype: str = "float32",
                  device: str = "cpu",
                  ):
+
+        self.compute_dtype = _resolve_torch_dtype(compute_dtype)
+        torch.set_default_dtype(self.compute_dtype)
 
         self.n_states = obs_shape[0]
         self.n_actions = action_shape[0]
@@ -2344,7 +2366,7 @@ class RoverAgent:
     def _policy_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Closed-form PMD policy from logits."""
         logits = self._policy_logits_from_H(H, coeff=coeff)
-        return torch.softmax(-logits, dim=1, dtype=torch.float32)
+        return torch.softmax(-logits, dim=1, dtype=logits.dtype)
     
     
     def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
@@ -2632,9 +2654,7 @@ class RoverAgent:
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
         self.sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
-        self.K = self._psi_all @ self._psi_all.T  # [n, n]
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -2649,7 +2669,6 @@ class RoverAgent:
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
-                    K= self.K,
                     M = sub_M,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
@@ -2705,7 +2724,6 @@ class RoverAgent:
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
-                    K= self.K,
                     M =candidate_M,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
@@ -2725,7 +2743,6 @@ class RoverAgent:
                         phi_sub_next_obs = self._phi_sub_next,
                         psi_sub_obs_action = self._psi_sub,
                         psi_all_obs_action = self._psi_all,
-                        K= self.K,
                         M = candidate_M,
                         alpha=self._sub_alpha,
                         sink_norm=sink_norm 
@@ -2827,7 +2844,7 @@ class RoverAgent:
             self.E = F.one_hot(
                 action, 
                 self.n_actions,
-            ).reshape(-1, self.n_actions).to(torch.float32).to(self.device)
+            ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
 
             # ** AUGMENTATION STEP **
             # ψ and Φ are augmented with an additional zero dimension
@@ -3024,7 +3041,7 @@ class RoverAgent:
             self.E = F.one_hot(
                 encoded_full["action"],
                 self.n_actions,
-            ).reshape(-1, self.n_actions).to(torch.float32).to(self.device)
+            ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
 
             if encoded_sub is not None:
                 self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"])
