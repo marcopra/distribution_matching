@@ -257,7 +257,7 @@ def parse_args():
         help="Path to a PointMaze env yaml, e.g. configs/env/pointmaze/pointmaze_umaze_goal_1.yaml.",
     )
     parser.add_argument("--output", type=Path, default=Path("pointmaze_random_policy_heatmap.png"))
-    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--bins", type=int, default=36)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--action-repeat", type=int, default=1)
