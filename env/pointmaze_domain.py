@@ -143,6 +143,71 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         return getattr(self.env, name)
 
 
+class PointMazeTopDownCameraWrapper(gym.Wrapper):
+    def __init__(self, env, distance=None, elevation=-90.0, azimuth=90.0):
+        super().__init__(env)
+        self.camera_distance = distance
+        self.camera_elevation = float(elevation)
+        self.camera_azimuth = float(azimuth)
+        self._apply_top_down_camera()
+
+    def _base_env(self):
+        return self.env.unwrapped
+
+    def _maze_center(self):
+        base_env = self._base_env()
+        maze = getattr(base_env, "maze", None)
+        if maze is None or not hasattr(maze, "maze_map") or not hasattr(maze, "cell_rowcol_to_xy"):
+            return np.zeros(3, dtype=np.float64)
+
+        xy_positions = []
+        for row_idx, row in enumerate(maze.maze_map):
+            for col_idx, _ in enumerate(row):
+                xy_positions.append(maze.cell_rowcol_to_xy(np.array([row_idx, col_idx], dtype=np.int32)))
+
+        if not xy_positions:
+            return np.zeros(3, dtype=np.float64)
+
+        xy_positions = np.asarray(xy_positions, dtype=np.float64)
+        center_xy = 0.5 * (xy_positions.min(axis=0) + xy_positions.max(axis=0))
+        return np.array([center_xy[0], center_xy[1], 0.0], dtype=np.float64)
+
+    def _apply_top_down_camera(self):
+        point_env = getattr(self._base_env(), "point_env", None)
+        renderer = getattr(point_env, "mujoco_renderer", None)
+        if renderer is None:
+            return
+
+        camera_config = dict(renderer.default_cam_config or {})
+        if self.camera_distance is not None:
+            camera_config["distance"] = float(self.camera_distance)
+        camera_config["elevation"] = self.camera_elevation
+        camera_config["azimuth"] = self.camera_azimuth
+        camera_config["lookat"] = self._maze_center()
+        renderer.default_cam_config = camera_config
+
+        viewer = getattr(renderer, "viewer", None)
+        if viewer is not None:
+            renderer._set_cam_config()
+
+    def render(self):
+        self._apply_top_down_camera()
+        return self.env.render()
+
+    def render_observation(self):
+        self._apply_top_down_camera()
+        render_fn = getattr(self.env, "render_observation", None)
+        return render_fn() if callable(render_fn) else self.env.render()
+
+    def render_image_observation(self):
+        self._apply_top_down_camera()
+        render_fn = getattr(self.env, "render_image_observation", None)
+        return render_fn() if callable(render_fn) else self.env.render()
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
 class PointMazeGoalMaskWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -187,6 +252,10 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
     goal_position = pointmaze_kwargs.pop("goal_position", None)
     start_position = pointmaze_kwargs.pop("start_position", None)
+    top_down_camera = bool(pointmaze_kwargs.pop("top_down_camera", True))
+    camera_distance = pointmaze_kwargs.pop("camera_distance", None)
+    camera_elevation = pointmaze_kwargs.pop("camera_elevation", -90.0)
+    camera_azimuth = pointmaze_kwargs.pop("camera_azimuth", 90.0)
 
     if goal_position is None:
         raise ValueError("PointMaze environments require pointmaze.goal_position to keep the goal fixed")
@@ -197,6 +266,13 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
         raise TypeError(f"Unknown PointMaze kwargs: {unknown_keys}")
 
     env = FixedPointMazeResetWrapper(env, goal_position=goal_position, start_position=start_position)
+    if top_down_camera:
+        env = PointMazeTopDownCameraWrapper(
+            env,
+            distance=camera_distance,
+            elevation=camera_elevation,
+            azimuth=camera_azimuth,
+        )
     env = PointMazeGoalMaskWrapper(env)
     env = PointMazeDiscreteActions(env)
 

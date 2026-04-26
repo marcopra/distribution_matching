@@ -4,5 +4,6 @@ env:
   name: "PointMaze_UMaze-v3"
   render_mode: rgb_array
   pointmaze:
+    top_down_camera: true
     start_position: [-1.0, 1.0]
     goal_position: [1.0, 0.0]
