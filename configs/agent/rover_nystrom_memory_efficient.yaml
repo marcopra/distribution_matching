@@ -32,7 +32,7 @@ pmd_grad_clip_norm: 0.0
 pmd_adagrad_eps: 1e-8
 pmd_eta_min: 1e-8
 pmd_eta_max: 1e8
-pmd_backtrack_factor: 0.5
+pmd_backtrack_factor: 0.25
 pmd_backtrack_max_trials: 12
 sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15

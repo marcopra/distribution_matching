@@ -13,7 +13,7 @@ envs=(
 # "bowling_score_masked"
 # "tennis"
 # "bowling_score_masked_visible_strike"
-"montezoumarevenge_score_masked"
+# "montezoumarevenge_score_masked"
 )
 obs_types=(
 "pixels"
