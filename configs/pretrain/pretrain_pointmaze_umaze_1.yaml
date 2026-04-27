@@ -29,7 +29,7 @@ eval_every_frames: 10000
 num_eval_episodes: 1
 
 # snapshot
-snapshots: [500000000000]
+snapshots: [3000, 50000, 100000, 200000, 500000, 1000000, 2000000]
 snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
 
 # replay buffer
@@ -46,6 +46,7 @@ device: cuda
 save_video: false
 save_train_video: false
 save_buffer: false
+save_snapshot: false
 use_tb: true
 use_wandb: false
 wandb_project: "pretrain_pointmaze"

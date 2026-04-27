@@ -1,6 +1,8 @@
 """
 Script per valutazioni aggiuntive dell'encoder.
 Include: alignment, uniformity, linear probing, nearest neighbors.
+
+E' lo script in cui prendo dei momenti salienti di encoding e vedo se sono  encodati bene nello spazio. Es: in pong prendo palla in cui batte su barretta, etc.
 """
 
 import warnings

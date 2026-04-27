@@ -169,6 +169,7 @@ class Workspace:
             is_training_sample=False)
         
         self.snapshot_steps = cfg.snapshots
+        self.save_snapshot_flag =  cfg.save_snapshot if hasattr(cfg, 'save_snapshot') else True
 
         self.timer = utils.Timer()
         self._global_step = 0
@@ -347,7 +348,8 @@ class Workspace:
             self._global_step += 1
 
     def save_snapshot(self):
-        return
+        if self.save_snapshot_flag == False:
+            return
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)
         snapshot_dir.mkdir(exist_ok=True, parents=True)
         if self.global_frame >= self.snapshot_steps[0]:

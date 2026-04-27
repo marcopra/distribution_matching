@@ -36,7 +36,7 @@ from sklearn.decomposition import PCA
 from tqdm.rich import tqdm
 
 import utils
-from encoder_testing.test_rover_nystrom_encoder import (
+from encoder_testing.test_rover_nystrom_encoder_on_gridworld import (
     DYN_LOSS_CHOICES,
     build_agent,
     compose_cfg,

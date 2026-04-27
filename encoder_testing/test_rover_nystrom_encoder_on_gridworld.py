@@ -8,11 +8,11 @@ python pretrain.py --config-name=pretrain/pretrain_rover_multiplerooms agent.emb
 
 
 
-python encoder_testing/test_rover_nystrom_encoder.py --dataset encoder_testing/outputs/multiplerooms_pixels --output-dir encoder_testing/outputs/pixels_s100 --dyn-loss classic_contrastive --feature-dims 2 10 20 32 64 109 --curl-weights 0.0 0.001 0.01 1.0 --encoder-update-mode nystrom --subsamples 100 --epochs 150 --batch-size 1024 --device cuda --config-name pretrain/pretrain_rover_multiplerooms2
-python encoder_testing/test_rover_nystrom_encoder.py --dataset encoder_testing/outputs/multiplerooms_pixels --output-dir encoder_testing/outputs/pixels_s100 --dyn-loss distance_ratio --feature-dims 2 10 20 32 64 109 --curl-weights 0.0 0.001 0.01 1.0 --encoder-update-mode nystrom --subsamples 100 --epochs 150 --batch-size 1024 --device cuda --config-name pretrain/pretrain_rover_multiplerooms2
-python encoder_testing/test_rover_nystrom_encoder.py --dataset encoder_testing/outputs/multiplerooms_pixels --output-dir encoder_testing/outputs/pixels_s100 --dyn-loss distance_positive_only --feature-dims 2 10 20 32 64 109 --curl-weights 0.0 0.001 0.01 1.0 --encoder-update-mode nystrom --subsamples 100 --epochs 150 --batch-size 1024 --device cuda --config-name pretrain/pretrain_rover_multiplerooms2
+python encoder_testing/test_rover_nystrom_encoder_on_gridworld.py --dataset encoder_testing/outputs/multiplerooms_pixels --output-dir encoder_testing/outputs/pixels_s100 --dyn-loss classic_contrastive --feature-dims 2 10 20 32 64 109 --curl-weights 0.0 0.001 0.01 1.0 --encoder-update-mode nystrom --subsamples 100 --epochs 150 --batch-size 1024 --device cuda --config-name pretrain/pretrain_rover_multiplerooms2
+python encoder_testing/test_rover_nystrom_encoder_on_gridworld.py --dataset encoder_testing/outputs/multiplerooms_pixels --output-dir encoder_testing/outputs/pixels_s100 --dyn-loss distance_ratio --feature-dims 2 10 20 32 64 109 --curl-weights 0.0 0.001 0.01 1.0 --encoder-update-mode nystrom --subsamples 100 --epochs 150 --batch-size 1024 --device cuda --config-name pretrain/pretrain_rover_multiplerooms2
+python encoder_testing/test_rover_nystrom_encoder_on_gridworld.py --dataset encoder_testing/outputs/multiplerooms_pixels --output-dir encoder_testing/outputs/pixels_s100 --dyn-loss distance_positive_only --feature-dims 2 10 20 32 64 109 --curl-weights 0.0 0.001 0.01 1.0 --encoder-update-mode nystrom --subsamples 100 --epochs 150 --batch-size 1024 --device cuda --config-name pretrain/pretrain_rover_multiplerooms2
 
-python encoder_testing/test_rover_nystrom_encoder.py \
+python encoder_testing/test_rover_nystrom_encoder_on_gridworld.py \
     --dataset encoder_testing/outputs/multiplerooms_states \
     --output-dir encoder_testing/outputs/nystrom_debug_states_s100_l2_prova \
     --feature-dims 32 64 109 200\
@@ -25,7 +25,7 @@ python encoder_testing/test_rover_nystrom_encoder.py \
     --device cuda \
     --config-name pretrain/pretrain_rover_multiplerooms2
 
-python encoder_testing/test_rover_nystrom_encoder.py \
+python encoder_testing/test_rover_nystrom_encoder_on_gridworld.py \
     --dataset encoder_testing/outputs/multiplerooms_states \
     --output-dir encoder_testing/outputs/rank_test \
     --feature-dims 109\
@@ -38,7 +38,7 @@ python encoder_testing/test_rover_nystrom_encoder.py \
     --device cuda \
     --config-name pretrain/pretrain_rover_multiplerooms2
 
-python encoder_testing/test_rover_nystrom_encoder.py \
+python encoder_testing/test_rover_nystrom_encoder_on_gridworld.py \
     --dataset encoder_testing/outputs/multiplerooms_states \
     --output-dir encoder_testing/outputs/full_debug_states \
     --feature-dims 32 64 109 \
@@ -72,7 +72,7 @@ from tqdm.rich import tqdm
 
 import gym_env
 import utils
-from agent.rover_nystrom_t_new import (
+from agent.rover_nystrom_memory_efficient import (
     EmbeddingDistributionVisualizerV2,
     ProjectSA,
     RoverAgent,

@@ -1,6 +1,9 @@
 """
 Script di utilità per ispezionare episodi salienti salvati.
 Mostra statistiche e permette di verificare i dati.
+
+E' lo script in cui prendo dei momenti salienti di encoding e vedo se sono  encodati bene nello spazio. Es: in pong prendo palla in cui batte su barretta, etc.
+
 """
 
 import numpy as np

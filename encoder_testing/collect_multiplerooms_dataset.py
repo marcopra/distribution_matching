@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Collect a homogeneous MultipleRooms dataset for Nyström encoder debugging.
+FUNZIONA SOLO SU MINIGRID -> prendo una posizione random nello spazio e faccio azione random -> tendenzialmente dovrebbe essere uniforme.
 
 Examples
 --------
