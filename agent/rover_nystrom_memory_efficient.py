@@ -187,40 +187,13 @@ class DistributionMatcher:
             max_tries: int = 3,
         ) -> torch.Tensor:
         """Solve AX=B robustly when A is singular/ill-conditioned."""
-        # if A.shape[0] != A.shape[1]:
-        #     X = torch.linalg.lstsq(A, B).solution
-        #     return torch.nan_to_num(X)
-        #TODO  Capire meglio questa cosa del jitter, non-singular etc. per pseudo inversione 
         eye = torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
         
         A  = A + jitter_scale* eye
-        # a_norm = torch.linalg.matrix_norm(A, ord='fro')
-        # base_jitter = jitter_scale * (a_norm / max(A.shape[0], 1) + 1.0)
-        # c = torch.linalg.cholesky(A)
-        # s,v,d = torch.linalg.svd(A)
 
         X = torch.linalg.solve(A, B)
-        # U, S, Vh = torch.linalg.svd(A)
-
-        # # Inverti solo i valori singolari non nulli
-        # tol = 1e-6
-        # S_inv = torch.where(S > tol, 1.0 / S, torch.zeros_like(S))
-        # X = U @ (torch.diag(S_inv) @ (Vh @ B) )
-        # for trial in range(max_tries + 1):
-        #     jitter = base_jitter * (10.0 ** trial)
-        #     A_reg = A + jitter * eye
-        #     try:
-        #         X = torch.linalg.solve(A_reg, B)
-        #     except RuntimeError:
-        #         continue
-        #     if torch.isfinite(X).all():
-        #         if trial > 0:
-        #             logger.debug(f"Applied jitter={jitter:.2e} while solving {tag}")
-        #         return X
-
-        # logger.warning(f"Falling back to pinv for {tag}")
-        # X = torch.linalg.pinv(A + base_jitter * eye) @ B
-        return X # torch.nan_to_num(X)
+        
+        return X 
             
     def compute_nu_pi(
             self, 
@@ -307,14 +280,6 @@ class DistributionMatcher:
             ) # [m, n]
        
         # ** COMPUTATION STEP **
-        # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
-        # A = K + self.lambda_reg * torch.eye(N, device=self.device)
-        # L = torch.linalg.cholesky(A)
-        # BM = torch.cholesky_solve(M, L)
-
-
-        # BM = B @ M
-        
         # M̃ augmented to be [M 0; 0 1]
         tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
         tilde_BM[:-1, :-1] = BM
@@ -440,10 +405,6 @@ class DistributionMatcher:
         sink_state[-1] = sink_norm
 
         # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        # upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
-        # tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
-        # tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
-
         tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
         upper_left_sub = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
         tilde_phi_sub_next_obs_transposed[:upper_left_sub.shape[0], :upper_left_sub.shape[1]] = upper_left_sub
@@ -452,10 +413,6 @@ class DistributionMatcher:
 
         tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
         tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
-
-        # tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
-        # tilde_phi_all_next_obs = tilde_phi_all_next_obs_transposed.T
-        # assert torch.all(tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] == sink_state), "Last column of tilde_phi_all_next_obs should be sink_state"
 
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
@@ -481,13 +438,6 @@ class DistributionMatcher:
         tilde_alpha[:-1] = alpha
 
         # ** COMPUTATION STEP **
-        # Compute Cholesky decomposition and solve: BM = A⁻¹M
-        # L = torch.linalg.cholesky(A)
-        # BM = torch.cholesky_solve(M, L)
-        # tilde_B_tilde_M = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
-        # tilde_B_tilde_M[:-1, :-1] = BM
-        # tilde_B_tilde_M[-1, -1] = 1.0
-
         # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
         # Using the precomputed terms and solves:
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
@@ -500,9 +450,6 @@ class DistributionMatcher:
         )
 
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
-        # Solve Ãᵀ x = left_term_without_b using Cholesky
-        # L_T = torch.linalg.cholesky(tilde_A.T)
-        # left_term = torch.cholesky_solve(symmetric_term, L_T)
         left_term = tilde_B.T @ symmetric_term
 
         
