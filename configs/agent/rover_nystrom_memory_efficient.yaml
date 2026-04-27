@@ -11,7 +11,7 @@ lambda_reg: 1e-15
 lr_T: 1e-3
 batch_size: 1024
 batch_size_actor: 10000
-actor_fifo_size: 100000 # defaults to batch_size_actor - 1; first transition is kept separately
+actor_fifo_size: 40000 # defaults to batch_size_actor - 1; first transition is kept separately
 actor_fifo_batches_per_update: null # defaults to int(update_actor_every_steps / batch_size), minimum 1
 subsamples: 4000
 nystrom_subsample_source: fifo # [fifo, replay_buffer]
@@ -23,7 +23,7 @@ hidden_dim: 1024
 feature_dim: null
 T_init_steps: 1000
 total_train_steps: ${num_train_frames}
-update_every_steps: 10
+update_every_steps: 100
 update_actor_every_steps: 1500
 pmd_steps: 100
 pmd_eta_mode: backtracking # [none, adagrad, backtracking]
