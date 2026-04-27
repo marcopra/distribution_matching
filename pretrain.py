@@ -348,8 +348,6 @@ class Workspace:
             self._global_step += 1
 
     def save_snapshot(self):
-        if self.save_snapshot_flag == False:
-            return
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)
         snapshot_dir.mkdir(exist_ok=True, parents=True)
         if self.global_frame >= self.snapshot_steps[0]:
@@ -357,41 +355,43 @@ class Workspace:
             self.snapshot_steps.pop(0)
             print(f'saving snapshot to {snapshot} at frame {self.global_frame}')
         else:
+            if self.save_snapshot_flag == False:
+                return
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode']
         payload = {k: self.__dict__[k] for k in keys_to_save}
-        
-        # Temporarily remove all environment references before saving
-        env_ref = None
-        wrapped_env_ref = None
-        discrete_env_ref = None
-        visualizer_ref = None
-        
-        if hasattr(payload['agent'], 'env'):
-            env_ref = payload['agent'].env
-            payload['agent'].env = None
-        if hasattr(payload['agent'], 'wrapped_env'):
-            wrapped_env_ref = payload['agent'].wrapped_env
-            payload['agent'].wrapped_env = None
-        if hasattr(payload['agent'], '_discrete_env'):
-            discrete_env_ref = payload['agent']._discrete_env
-            payload['agent']._discrete_env = None
-        if hasattr(payload['agent'], 'visualizer'):
-            visualizer_ref = payload['agent'].visualizer
-            payload['agent'].visualizer = None
-            
-        with snapshot.open('wb') as f:
-            torch.save(payload, f)
-        
-        # Restore all references after saving
-        if env_ref is not None:
-            payload['agent'].env = env_ref
-        if wrapped_env_ref is not None:
-            payload['agent'].wrapped_env = wrapped_env_ref
-        if discrete_env_ref is not None:
-            payload['agent']._discrete_env = discrete_env_ref
-        if visualizer_ref is not None:
-            payload['agent'].visualizer = visualizer_ref
+
+        agent = payload['agent']
+        restored_refs = []
+
+        def stash_attr(obj, attr, replacement=None):
+            # Use __dict__ directly to avoid wrapper __getattr__ recursion while saving.
+            obj_dict = getattr(obj, '__dict__', None)
+            if obj_dict is None or attr not in obj_dict:
+                return
+            restored_refs.append((obj, attr, obj_dict[attr]))
+            setattr(obj, attr, replacement)
+
+        # Temporarily remove all live environment/debug references before saving.
+        # PointMaze/Fetch domain visualizers keep env handles nested under
+        # agent.debug_visualizer.domain_visualizer; those env wrappers are not
+        # safely pickleable and can recurse during torch.load.
+        stash_attr(agent, 'env')
+        stash_attr(agent, 'wrapped_env')
+        stash_attr(agent, '_discrete_env')
+        stash_attr(agent, 'visualizer')
+        stash_attr(agent, 'gridworld_visualizer')
+        stash_attr(agent, 'domain_visualizer')
+
+        debug_visualizer = getattr(agent, '__dict__', {}).get('debug_visualizer', None)
+        stash_attr(debug_visualizer, 'domain_visualizer')
+
+        try:
+            with snapshot.open('wb') as f:
+                torch.save(payload, f)
+        finally:
+            for obj, attr, value in reversed(restored_refs):
+                setattr(obj, attr, value)
 
 
 @hydra.main(config_path='configs', config_name='pretrain/pretrain_atari', version_base='1.1')
