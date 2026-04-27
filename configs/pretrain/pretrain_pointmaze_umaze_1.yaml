@@ -11,11 +11,11 @@ reward_free: true
 domain: gym
 task_name: ${env.name}
 obs_type: pixels
-frame_stack: 1
+frame_stack: 3
 action_repeat: 1
 discount: 0.99
 resolution: 84
-grayscale: true
+grayscale: false
 random_init: true
 random_goal: true
 update_actor_after_critic_steps: 0
