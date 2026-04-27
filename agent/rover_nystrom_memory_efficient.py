@@ -469,6 +469,7 @@ class DistributionMatcher:
         ) # [m, n]
         tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
         tilde_B[:-1, :-1] = B
+        tilde_B[-1, -1] = 1.0
 
         # M̃ augmented to be [M 0; 0 1]
         tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
@@ -2655,16 +2656,16 @@ class RoverAgent:
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        self.sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
+        sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
 
         sink_norm = utils.schedule(self.sink_schedule, step)
-        self.pi = self._policy_from_H(self.sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
+        self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
         # M = self.H*(self.E@self.pi.T) # [n, ]
-        sub_M = self.sub_H*(self.E@self.pi.T) # [n, m]
+        sub_M = sub_H*(self.E@self.pi.T) # [n, m]
 
         nu_pi = self.distribution_matcher.compute_nu_pi_nystrom(
                     phi_sub_next_obs = self._phi_sub_next,
@@ -2719,8 +2720,8 @@ class RoverAgent:
                 eta_t = base_eta
 
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
-            candidate_pi = self._policy_from_H(self.sub_H.T, coeff=candidate_coeff)
-            candidate_M = self.sub_H * (self.E @ candidate_pi.T)
+            candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
+            candidate_M = sub_H * (self.E @ candidate_pi.T)
             candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
@@ -2738,8 +2739,8 @@ class RoverAgent:
                     trial_eta *= self.pmd_backtrack_factor
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
-                    candidate_pi = self._policy_from_H(self.sub_H.T, coeff=candidate_coeff)
-                    candidate_M = self.sub_H * (self.E @ candidate_pi.T)
+                    candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
+                    candidate_M = sub_H * (self.E @ candidate_pi.T)
                     candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
                         phi_sub_next_obs = self._phi_sub_next,
                         psi_sub_obs_action = self._psi_sub,
