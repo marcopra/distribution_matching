@@ -3405,26 +3405,26 @@ class RoverAgent:
                     )
                 )
             
-            with torch.no_grad():
-            
-                if len(self.current_action_probs) == 0:
-                    return metrics
-                current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
-                # Compute mean deviation from uniform
-                mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                with torch.no_grad():
                 
-                # Store in history
-                self.policy_deviation_history.append((step, mean_deviation))
-                
-                # Also store the mean action probabilities
-                mean_probs = np.mean(current_action_probs, axis=0)
-                self.action_probs_history.append((step, mean_probs))
-                
-                # Log to metrics
-                metrics['policy_deviation_from_uniform'] = mean_deviation
-                print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
-                self.current_action_probs = []  # Clear after processing
-            self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
-            self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
+                    if len(self.current_action_probs) == 0:
+                        return metrics
+                    current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
+                    # Compute mean deviation from uniform
+                    mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                    
+                    # Store in history
+                    self.policy_deviation_history.append((step, mean_deviation))
+                    
+                    # Also store the mean action probabilities
+                    mean_probs = np.mean(current_action_probs, axis=0)
+                    self.action_probs_history.append((step, mean_probs))
+                    
+                    # Log to metrics
+                    metrics['policy_deviation_from_uniform'] = mean_deviation
+                    print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
+                    self.current_action_probs = []  # Clear after processing
+                self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+                self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
 
         return metrics
