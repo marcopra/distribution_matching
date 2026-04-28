@@ -1767,6 +1767,9 @@ class RoverAgent:
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
         self.curl = curl
+        if curl:
+            utils.ColorPrint.red("CURL is enabled, but stromgly suggested to not use it.\nAll the paper results are without CURL, and it may cause poor performance. Use with caution.")
+
         self.embedding_sum_loss = embedding_sum_loss
         self.reward = reward
         self.pmd_eta_mode = pmd_eta_mode.lower()

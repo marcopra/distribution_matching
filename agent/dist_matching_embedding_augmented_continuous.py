@@ -836,6 +836,9 @@ class DistMatchingEmbeddingAgent:
         self.unique_window = unique_window
         self.embedding_type = embedding_type
         self.curl = curl
+        if curl:
+            utils.ColorPrint.red("CURL is enabled, but stromgly suggested to not use it.\nAll the paper results are without CURL, and it may cause poor performance. Use with caution.")
+
 
 
         self.sink_schedule = sink_schedule
