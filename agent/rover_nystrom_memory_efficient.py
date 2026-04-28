@@ -534,7 +534,7 @@ class DistributionMatcher:
             tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
         )
 
-        del S, rhs, BM
+        del S, alpha_tilde, BM
 
         # Build Φ̃ᵀ directly
         tilde_phi_T = torch.zeros(
