@@ -17,7 +17,7 @@ subsamples: 4000
 nystrom_subsample_source: fifo # [fifo, replay_buffer]
 nstep: 1
 lr_encoder: 1e-4
-curl: true
+curl: false
 embedding_sum_loss: 0.0
 hidden_dim: 1024
 feature_dim: null

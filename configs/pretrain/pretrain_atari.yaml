@@ -57,7 +57,7 @@ wandb_id: none
 experiment: exp
 
 agent:
-  curl: true
+  curl: false
   T_init_steps: 6000
 
 hydra:

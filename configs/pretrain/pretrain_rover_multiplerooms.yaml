@@ -68,7 +68,7 @@ agent:
   pmd_eta_mode: backtracking
   lr_T: 1e-3
   lr_encoder: 1e-3
-  curl: true
+  curl: false
 
 hydra:
   run:
