@@ -2965,6 +2965,7 @@ class RoverAgent:
             metrics['actor_loss'] = actor_loss
             metrics['actor_eta'] = float(self.current_eta)
             metrics['actor_best_loss'] = float(best_loss)
+            metrics['sink_norm'] = float(sink_norm)
    
         return metrics
 
