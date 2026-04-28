@@ -21,7 +21,7 @@ random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
-num_train_frames: 50_000
+num_train_frames: 1_000_000
 num_seed_frames: 2000
 
 # eval

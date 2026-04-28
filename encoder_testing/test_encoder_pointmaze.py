@@ -30,11 +30,12 @@ python encoder_testing/test_encoder_pointmaze.py \
     --device cuda
 
 python encoder_testing/test_encoder_pointmaze.py \
-    --snapshot /home/mprattico-iit.local/distribution_matching/exp_local/2026.04.27/155642_655032_PointMaze_UMaze-v3/models/pixels/gym/dist_matching/1/snapshot.pt \
-    --episode-path exp_local/2026.04.27/155642_655032_PointMaze_UMaze-v3/buffer \
+    --snapshot exp_local/2026.04.28/142316_454029_PointMaze_UMaze-v3/models/pixels/gym/dist_matching/1/snapshot_50100.pt \
+    --episode-path exp_local/2026.04.28/151400_534759_PointMaze_UMaze-v3/buffer \
     --output-dir encoder_testing/outputs/pointmaze_encoder_eval \
     --config-name pretrain/pretrain_pointmaze_umaze_1 \
     --device cuda
+
 """
 
 from __future__ import annotations

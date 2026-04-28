@@ -194,6 +194,24 @@ class DistributionMatcher:
         X = torch.linalg.solve(A, B)
         
         return X 
+    
+    def _regularized_solve_memory_efficient(
+            self,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            tag: str,
+            jitter_scale: float = 1e-10,
+            max_tries: int = 3,
+        ) -> torch.Tensor:
+        """Solve AX=B robustly when A is singular/ill-conditioned."""
+        
+
+        idx = torch.arange(A.shape[0], device=A.device)
+        A[idx, idx] += jitter_scale
+
+        X = torch.linalg.solve(A, B)
+        
+        return X 
             
     def compute_nu_pi(
             self, 
@@ -305,21 +323,6 @@ class DistributionMatcher:
         # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
         return occupancy
     
-    def compute_BM(
-            self,
-            M: torch.Tensor,  # [N, N] forward operator
-            psi: torch.Tensor  # [N, d*|A|] state-action features
-        ) -> torch.Tensor:
-        """Compute BM = (ψψᵀ + λI)⁻¹M."""
-        N = psi.shape[0]
-        identity = torch.eye(N, device=self.device)
-        gram_matrix = psi @ psi.T + self.lambda_reg * identity
-
-        
-        L = torch.linalg.cholesky(gram_matrix)
-        BM = torch.cholesky_solve(M, L)
-        return BM
-    
     def compute_gradient_coefficient(
             self, 
             M: torch.Tensor, 
@@ -413,6 +416,287 @@ class DistributionMatcher:
 
         tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
         tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
+
+        # Ã augmented to be [A 0; 0 1]
+        # Symmetric positive definite matrix A = ψψᵀ + λI
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
+        B = self._regularized_solve(
+            A_nystrom,
+            K_nm.T,
+            tag="A_nystrom (compute_gradient_coefficient_nystrom)",
+        ) # [m, n]
+        tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
+        tilde_B[:-1, :-1] = B
+        tilde_B[-1, -1] = 1.0
+
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
+        tilde_M[:-1, :-1] = M
+        tilde_M[-1, -1] = 1.0
+
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        # ** COMPUTATION STEP **
+        # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
+        # Using the precomputed terms and solves:
+        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
+        tilde_B_tilde_M = tilde_B @ tilde_M
+        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
+        symmetric_term = self._regularized_solve(
+            (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
+            tilde_phi_sub_next_obs,
+            tag="(I - gamma*tilde_B_tilde_M)^T",
+        )
+
+        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
+        left_term = tilde_B.T @ symmetric_term
+
+        
+        # Right term: Φ̃ᵀ(I - γB̃M̃)⁻¹ α̃
+        right_term = symmetric_term.T @ tilde_alpha
+        gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
+      
+        return gradient
+
+    def compute_nu_pi_nystrom_memory_efficient(
+            self, 
+            phi_all_obs: torch.Tensor,
+            phi_sub_next_obs: torch.Tensor, 
+            psi_sub_obs_action: torch.Tensor,
+            psi_all_obs_action: torch.Tensor,
+            H: torch.Tensor,
+            pi: torch.Tensor,
+            E: torch.Tensor,
+            alpha: torch.Tensor,
+            sink_norm: float
+        ) -> torch.Tensor:
+        """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
+        N = psi_all_obs_action.shape[0]
+
+        m = psi_sub_obs_action.shape[0]
+
+        d = phi_sub_next_obs.shape[1]
+
+        # α̃ = [α; 1], but avoid torch.ones
+        alpha_tilde = torch.empty(
+            (alpha.shape[0] + 1, 1),
+            device=alpha.device,
+            dtype=alpha.dtype,
+        )
+        alpha_tilde[:-1] = alpha
+        alpha_tilde[-1] = 1.0
+
+        # Nyström matrices
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T
+        A_nystrom = K_nm.T @ K_nm
+        A_nystrom.add_(K_mm, alpha=self.lambda_reg * N)
+
+        # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
+        M = H*(E@pi.T) # [n, m]
+
+        BM = self._regularized_solve(
+            A_nystrom,
+            K_nm.T @ M,
+            tag="A_nystrom (compute_nu_pi_nystrom)",
+
+        )
+
+        # release big temporaries earlier
+        del K_nm, K_mm, A_nystrom
+
+        # Build S = I - gamma * tilde_BM directly
+        # tilde_BM = [BM 0]
+        #            [0  1]
+
+        S = torch.empty(
+            (BM.shape[0] + 1, BM.shape[1] + 1),
+            device=BM.device,
+            dtype=BM.dtype,
+
+        )
+
+        S[:-1, :-1] = BM
+        S[:-1, :-1].mul_(-self.gamma)
+        idx = torch.arange(BM.shape[0], device=BM.device)
+        S[idx, idx] += 1.0
+        S[:-1, -1] = 0.0
+        S[-1, :-1] = 0.0
+        S[-1, -1] = 1.0 - self.gamma
+
+        inv_term = self._regularized_solve_memory_efficient(
+            S,
+            alpha_tilde,
+            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
+        )
+
+        del S, rhs, BM
+
+        # Build Φ̃ᵀ directly
+        tilde_phi_T = torch.zeros(
+            (d + 1, m + 1),
+            device=phi_sub_next_obs.device,
+            dtype=phi_sub_next_obs.dtype,
+        )
+
+        tilde_phi_T[:d, :m] = phi_sub_next_obs.T
+        # sink_state is zero except at index d-1, so only this row changes
+        tilde_phi_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
+        tilde_phi_T[d - 1, m] = sink_norm
+        occupancy = tilde_phi_T @ inv_term
+        occupancy.mul_(1 - self.gamma)
+
+        return occupancy
+
+        N = psi_all_obs_action.shape[0]
+        subsamples = psi_sub_obs_action.shape[0]
+       
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N* K_mm # [m, m]
+
+        BM = self._regularized_solve(
+            A_nystrom,
+            K_nm.T@M,
+            tag="A_nystrom (compute_nu_pi_nystrom)"
+            ) # [m, n]
+       
+        # ** COMPUTATION STEP **
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_BM[:-1, :-1] = BM
+        tilde_BM[-1, -1] = 1.0
+
+        inv_term = self._regularized_solve(
+            torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
+            tilde_alpha,
+            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
+        )
+        
+        sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
+        sink_state[-1] = sink_norm
+
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        upper_left = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
+        tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
+        tilde_phi_sub_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
+        tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_sub_next_obs_transposed[-1, -1] = 1.0 # TODO patch 0.1
+
+        occupancy = (1 - self.gamma) *  tilde_phi_sub_next_obs_transposed @ inv_term
+        # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
+        return occupancy
+    
+    def compute_gradient_coefficient_nystrom_memory_efficient(
+            self, 
+            phi_all_obs: torch.Tensor,
+            phi_all_next_obs:torch.Tensor, 
+            phi_sub_next_obs:torch.Tensor,
+            psi_all_obs_action:torch.Tensor, 
+            psi_sub_obs_action:torch.Tensor,
+            H: torch.Tensor,
+            pi: torch.Tensor,
+            E: torch.Tensor,
+            alpha:torch.Tensor,
+            sink_norm: float
+        ) -> torch.Tensor:
+        """Compute gradient coefficient for policy update."""
+        # Identity matrix
+        # I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
+        N = psi_all_obs_action.shape[0]
+        m = phi_sub_next_obs.shape[0]
+        d = phi_sub_next_obs.shape[1]
+
+        # Build Phi-tilde directly, without upper_left_sub temporary
+        tilde_phi_sub_next_obs_T = torch.zeros(
+
+            (d + 1, m + 1),
+
+            device=phi_sub_next_obs.device,
+
+            dtype=phi_sub_next_obs.dtype,
+
+        )
+        tilde_phi_sub_next_obs_T[:d, :m] = phi_sub_next_obs.T
+        tilde_phi_sub_next_obs_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
+        tilde_phi_sub_next_obs_T[d - 1, m] = sink_norm
+        tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_T.T
+
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state[-1] = sink_norm
+
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
+        A_nystrom = K_nm.T @ K_nm
+        A_nystrom.add_(K_mm, alpha=self.lambda_reg * N)  # In-place addition for memory efficiency
+
+        B = self._regularized_solve_memory_efficient(
+            A_nystrom,
+            K_nm.T,
+            tag="A_nystrom (compute_gradient_coefficient_nystrom)"
+        ) # [m, n]
+        # H = self._phi_all_obs @ self._phi_sub_next.T
+        # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
+        M = H*(E@pi.T) # [n, m]
+        BM = B @ M
+
+        # Build S = I - gamma * tilde_B * tilde_M directly
+        S = torch.empty(
+
+            (BM.shape[0] + 1, BM.shape[1] + 1),
+
+            device=BM.device,
+
+            dtype=BM.dtype,
+
+        )
+
+        S[:-1, :-1] = BM
+        S[:-1, :-1].mul_(-self.gamma)
+        idx = torch.arange(BM.shape[0], device=BM.device)
+        S[idx, idx] += 1.0
+
+        symmetric_term = self._regularized_solve_memory_efficient(
+            S.T,
+            tilde_phi_sub_next_obs,
+            tag="(I - gamma*tilde_B_tilde_M)^T",
+
+        )   
+
+        # left_term = tilde_B.T @ symmetric_term, without tilde_B
+        left_term = torch.empty_like(symmetric_term)
+
+        left_term[:-1] = B.T @ symmetric_term[:-1]
+
+        left_term[-1:] = symmetric_term[-1:]
+
+        # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
+
+        right_term = symmetric_term[:-1].T @ alpha + symmetric_term[-1:].T
+
+        gradient = left_term @ right_term
+
+        gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
+
+        return gradient
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        # tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
+        # # upper_left_sub = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
+        # upper_left_sub = phi_sub_next_obs.T - sink_state @ psi_sub_obs_action.sum(dim=1).unsqueeze(0)  # [d, m]
+        # tilde_phi_sub_next_obs_transposed[:upper_left_sub.shape[0], :upper_left_sub.shape[1]] = upper_left_sub
+
+        # assert sink_state.shape[0] == upper_left_sub.shape[0], "Sink state and upper left matrix row size mismatch"
+
+        # tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
 
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
@@ -1281,66 +1565,6 @@ class EmbeddingDistributionVisualizerV2:
                 nu_init = torch.ones(self.n_states, 1) / self.n_states
         return nu_init.flatten().cpu().numpy()
     
-    def _compute_current_distribution(self) -> np.ndarray:
-        """Compute current occupancy distribution for all states."""
-        if self.agent.gradient_coeff is None:
-            return np.ones(self.n_states) / self.n_states
-        
-        if self.agent.obs_type == 'pixels':
-            # Use pre-rendered images
-            enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach()
-        else:
-            # Use one-hot encodings
-            enc_all_states = self.agent.encoder(self.all_state_ids_one_hot).detach()
-        enc_all_states_cpu = enc_all_states.detach().cpu()
-        
-        with torch.no_grad():
-            if self.agent.subsamples is not None and hasattr(self.agent, '_phi_sub_next'):
-                nu_current = self.agent.distribution_matcher.compute_nu_pi_nystrom(
-                    phi_sub_next_obs=self.agent._phi_sub_next,
-                    psi_sub_obs_action=self.agent._psi_sub,
-                    psi_all_obs_action=self.agent._psi_all,
-                    M=self.agent.sub_H * (self.agent.E @ self.agent.pi.T),
-                    alpha=self.agent._sub_alpha,
-                    sink_norm=utils.schedule(self.agent.sink_schedule, 0)
-                )
-                support_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
-            else:
-                # Add augmented dimension
-                zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
-                enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1)
-
-                H = enc_all_states_aug @ self.agent._phi_all_obs.T
-                pi_all = self.agent._policy_from_H(H)
-                M = H * (self.agent.E @ pi_all.T)
-
-                alpha_all = torch.zeros(self.n_states, 1, device=enc_all_states.device)
-                alpha_all[0] = 1.0
-
-                nu_current = self.agent.distribution_matcher.compute_nu_pi(
-                    phi_all_next_obs=self.agent._phi_all_next,
-                    psi_all_obs_action=self.agent._psi_all,
-                    K=self.agent.K,
-                    M=M,
-                    alpha=alpha_all,
-                    sink_norm=utils.schedule(self.agent.sink_schedule, 0)
-                )
-                support_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
-
-        support_weights = nu_current[:-1].flatten().detach().cpu().numpy()
-        state_dist = np.zeros(self.n_states, dtype=np.float32)
-
-        for support_embedding, weight in zip(support_embeddings, support_weights):
-            similarities = F.cosine_similarity(
-                support_embedding.unsqueeze(0),
-                enc_all_states_cpu,
-                dim=1
-            )
-            closest_state = torch.argmax(similarities).item()
-            state_dist[closest_state] += float(weight)
-
-        state_dist = state_dist / (state_dist.sum() + 1e-10)
-        return state_dist
     
     def render_observation_from_state(self, state_idx: int) -> np.ndarray:
         """
@@ -2612,13 +2836,15 @@ class RoverAgent:
         self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
         # M = self.H*(self.E@self.pi.T) # [n, ]
-        sub_M = sub_H*(self.E@self.pi.T) # [n, m]
 
-        nu_pi = self.distribution_matcher.compute_nu_pi_nystrom(
+        nu_pi = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                    phi_all_obs=self._phi_all_obs,
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
-                    M = sub_M,
+                    sub_H = sub_H,
+                    pi = self.pi,
+                    E = self.E,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
                 )
@@ -2631,12 +2857,15 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom(
-                M=sub_M, 
+            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient(
+                phi_all_obs=self._phi_all_obs,
                 phi_all_next_obs = self._phi_all_next,
                 phi_sub_next_obs = self._phi_sub_next,
                 psi_all_obs_action = self._psi_all,
                 psi_sub_obs_action = self._psi_sub,
+                sub_H = sub_H,
+                pi=self.pi,
+                E=self.E,
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm
             )           
@@ -2668,15 +2897,19 @@ class RoverAgent:
 
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
             candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
-            candidate_M = sub_H * (self.E @ candidate_pi.T)
-            candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
+            # candidate_M = sub_H * (self.E @ candidate_pi.T)
+            candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                    phi_all_obs=self._phi_all_obs,
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
-                    M =candidate_M,
+                    sub_H = sub_H,
+                    pi = candidate_pi,
+                    E = self.E,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
                 )
+            
             candidate_loss = torch.linalg.norm(candidate_nu) ** 2
 
             if self.pmd_eta_mode == "backtracking":
@@ -2687,15 +2920,18 @@ class RoverAgent:
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
                     candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
-                    candidate_M = sub_H * (self.E @ candidate_pi.T)
-                    candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
-                        phi_sub_next_obs = self._phi_sub_next,
-                        psi_sub_obs_action = self._psi_sub,
-                        psi_all_obs_action = self._psi_all,
-                        M = candidate_M,
-                        alpha=self._sub_alpha,
-                        sink_norm=sink_norm 
-                    )
+                    # candidate_M = sub_H * (self.E @ candidate_pi.T)
+                    candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                            phi_all_obs=self._phi_all_obs,
+                            phi_sub_next_obs = self._phi_sub_next,
+                            psi_sub_obs_action = self._psi_sub,
+                            psi_all_obs_action = self._psi_all,
+                            sub_H = sub_H,
+                            pi = candidate_pi,
+                            E = self.E,
+                            alpha=self._sub_alpha,
+                            sink_norm=sink_norm 
+                        )                    
                     candidate_loss = torch.linalg.norm(candidate_nu) ** 2
                     trial += 1
                 eta_t = trial_eta
@@ -2704,7 +2940,6 @@ class RoverAgent:
             self.gradient_coeff = candidate_coeff
             prev_gradient_coeff = grad_update.clone()
             self.pi = candidate_pi
-            sub_M = candidate_M
             actor_loss = candidate_loss
 
             if actor_loss < best_loss:
