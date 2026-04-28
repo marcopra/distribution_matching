@@ -8,7 +8,7 @@ action_shape: ??? # to be specified later
 lr_actor: 10 # eta
 discount: ${discount} # gamma
 lambda_reg: 1e-15
-lr_T: 1e-3
+lr_T: 1e-4
 batch_size: 1024
 batch_size_actor: 10000
 actor_fifo_size: 40000 # defaults to batch_size_actor - 1; first transition is kept separately
@@ -16,7 +16,7 @@ actor_fifo_batches_per_update: null # defaults to int(update_actor_every_steps /
 subsamples: 4000
 nystrom_subsample_source: fifo # [fifo, replay_buffer]
 nstep: 1
-lr_encoder: 1e-3
+lr_encoder: 1e-4
 curl: true
 embedding_sum_loss: 0.0
 hidden_dim: 1024

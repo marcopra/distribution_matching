@@ -18,7 +18,7 @@ batch_size_actors=(
 
 feature_dims=(
     # 64
-    128
+    # 128
     256
     # 512
 )
@@ -28,11 +28,11 @@ lr_actors=(
 )
 
 # Indices into the sink_schedules array defined in rover_hparam_base.sh:
-#   0 -> linear(0.0, 0.001, 200_000)
-#   1 -> linear(0.0, 0.01,  200_000)
-#   2 -> linear(0.0, 0.1,   200_000)
-#   3 -> linear(0.0, 0,     200_000)
-#   4 -> linear(0.0, 1.0,   200_000)
+#   0 -> linear(0.0, 0.5,    500_000)
+#   1 -> linear(0.0, 0.01,   500_000)
+#   2 -> linear(0.0, 1,      500_000)
+#   3 -> linear(0.0, 0.0001, 500_000)
+#   4 -> linear(1.0, 1.0,    100_000)
 
 sink_idxs=(0 1) 
 

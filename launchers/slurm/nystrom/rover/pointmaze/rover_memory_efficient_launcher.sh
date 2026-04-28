@@ -18,7 +18,7 @@ subsamples=(
 feature_dims=(
     # 64
     256
-    #512
+    # 512
 )
 
 lr_actors=( 

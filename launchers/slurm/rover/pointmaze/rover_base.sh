@@ -20,11 +20,11 @@ export HYDRA_FULL_ERROR=1
 
 # Decode sink_schedule from index to avoid quoting issues in sbatch --export
 sink_schedules=(
-    "linear(0.0, 0.001, 200_000)"
-    "linear(0.0, 0.01,  200_000)"
-    "linear(0.0, 0.1,   200_000)"
-    "linear(0.0, 0,     200_000)"
-    "linear(0.0, 1.0,   200_000)"
+    "linear(0.0, 0.5,    500_000)"
+    "linear(0.0, 0.01,   500_000)"
+    "linear(0.0, 1,      500_000)"
+    "linear(0.0, 0.0001, 500_000)"
+    "linear(1.0, 1.0,    100_000)"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
@@ -42,6 +42,6 @@ python pretrain.py \
     env=${ENV} \
     agent.update_every_steps=100 \
     agent.pmd_steps=100 \
-    num_train_frames=200_000 \
+    num_train_frames=1_000_000 \
 
 
