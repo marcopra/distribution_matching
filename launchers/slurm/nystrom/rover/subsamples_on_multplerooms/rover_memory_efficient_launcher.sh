@@ -3,7 +3,7 @@
 seeds="1"
 
 subsamples=(
-# "none"
+"none"
 "4000"
 # "1000"
 # "500"

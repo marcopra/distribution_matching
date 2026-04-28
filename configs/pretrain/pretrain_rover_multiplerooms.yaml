@@ -66,6 +66,9 @@ agent:
   T_init_steps: 300
   embedding_sum_loss: 0
   pmd_eta_mode: backtracking
+  lr_T: 1e-3
+  lr_encoder: 1e-3
+  curl: true
 
 hydra:
   run:

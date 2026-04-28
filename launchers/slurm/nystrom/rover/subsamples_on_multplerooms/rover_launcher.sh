@@ -16,7 +16,7 @@ feature_dims=(
 )
 
 lr_actors=( 
-    5
+    100
 )
 # Indices into the sink_schedules array defined in rover_hparam_base.sh:
 #   0 -> linear(0.0, 0.05, 50_000)
