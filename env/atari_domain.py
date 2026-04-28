@@ -6,6 +6,22 @@ from gymnasium.wrappers import AtariPreprocessing
 from env.domain_utils import coerce_dict, get_env_id
 
 
+LEGACY_ATARI_ID_MARKERS = (
+    "NoFrameskip",
+    "Deterministic",
+)
+
+
+def _has_atari_entry_point(env_id):
+    try:
+        spec = gym.spec(env_id)
+    except gym.error.Error:
+        return False
+
+    entry_point = str(getattr(spec, "entry_point", ""))
+    return getattr(spec, "namespace", None) == "ALE" or "ale_py.env" in entry_point
+
+
 class AtariScoreMaskWrapper(gym.ObservationWrapper):
     """
     Mask Atari score area by overwriting a top band.
@@ -58,7 +74,12 @@ def is_atari_env(reference):
         env = getattr(reference, "unwrapped", reference)
         if isinstance(env, ale_py.env.AtariEnv):
             return True
-    return get_env_id(reference).startswith("ALE/")
+
+    env_id = get_env_id(reference)
+    if env_id.startswith("ALE/") or _has_atari_entry_point(env_id):
+        return True
+
+    return any(marker in env_id for marker in LEGACY_ATARI_ID_MARKERS)
 
 
 def pop_atari_kwargs(env_kwargs):

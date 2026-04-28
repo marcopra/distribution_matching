@@ -663,6 +663,9 @@ class DistributionMatcher:
         S[:-1, :-1].mul_(-self.gamma)
         idx = torch.arange(BM.shape[0], device=BM.device)
         S[idx, idx] += 1.0
+        S[:-1, -1] = 0.0
+        S[-1, :-1] = 0.0
+        S[-1, -1] = 1.0 - self.gamma
 
         symmetric_term = self._regularized_solve_memory_efficient(
             S.T,
@@ -672,10 +675,12 @@ class DistributionMatcher:
         )   
 
         # left_term = tilde_B.T @ symmetric_term, without tilde_B
-        left_term = torch.empty_like(symmetric_term)
-
+        left_term = torch.empty(
+            (B.shape[1] + 1, symmetric_term.shape[1]),
+            device=symmetric_term.device,
+            dtype=symmetric_term.dtype,
+        )
         left_term[:-1] = B.T @ symmetric_term[:-1]
-
         left_term[-1:] = symmetric_term[-1:]
 
         # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha

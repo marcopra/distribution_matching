@@ -564,6 +564,7 @@ def _prepare_family_make_kwargs(name, env_kwargs, url):
         key in env_kwargs for key in ("score_mask", "score_mask_band", "score_mask_color")
     )
     if has_atari_config:
+        print(f"Name '{name}' has Atari config kwargs, preparing Atari-specific kwargs")
         if not is_atari_env(name):
             raise TypeError("'atari' kwargs are only supported for Atari environments")
         atari_kwargs = pop_atari_kwargs(env_kwargs)
