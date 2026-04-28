@@ -147,12 +147,15 @@ class Workspace:
 
         # create replay buffer
         first_transition = type(self.agent).__name__ == 'RoverAgent'
+        replay_save_snapshot = cfg.save_buffer or first_transition
+        delete_on_cursor_fetch = first_transition and not cfg.save_buffer
         self.replay_loader = make_replay_loader(self.replay_storage,
                                                 cfg.replay_buffer_size,
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
-                                                cfg.save_buffer, cfg.nstep, cfg.discount,
-                                                first_transition=first_transition)
+                                                replay_save_snapshot, cfg.nstep, cfg.discount,
+                                                first_transition=first_transition,
+                                                delete_on_cursor_fetch=delete_on_cursor_fetch)
         
         self._replay_iter = None
 

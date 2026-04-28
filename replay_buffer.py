@@ -82,7 +82,8 @@ class ReplayBufferStorage:
 
 class ReplayBuffer(IterableDataset):
     def __init__(self, storage, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot, first_transition=False, batch_size=None):
+                 fetch_every, save_snapshot, first_transition=False, batch_size=None,
+                 delete_on_cursor_fetch=False):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -94,6 +95,7 @@ class ReplayBuffer(IterableDataset):
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
         self._save_snapshot = save_snapshot
+        self._delete_on_cursor_fetch = delete_on_cursor_fetch
         self._first_transition = first_transition
         self._batch_size = batch_size
         self._transition_cache = dict()
@@ -256,6 +258,17 @@ class ReplayBuffer(IterableDataset):
         transition_batches.reverse()
         return transition_batches
 
+    def _slice_transition_batch(self, transitions, index):
+        return tuple(field[index] for field in transitions)
+
+    def _delete_episode_files_through_cursor(self, cursor):
+        if cursor is None:
+            return
+        cursor_name = str(cursor[0])
+        for eps_fn in self._episode_fns:
+            if eps_fn.name <= cursor_name:
+                eps_fn.unlink(missing_ok=True)
+
     def _concatenate_transition_batches(self, transition_batches):
         if not transition_batches:
             raise RuntimeError('Replay buffer is empty')
@@ -284,12 +297,27 @@ class ReplayBuffer(IterableDataset):
         )
 
     def _get_first_stored_transition(self):
+        first_transition, _ = self._get_first_stored_transition_with_cursor()
+        return first_transition
+
+    def _get_first_stored_transition_with_cursor(self):
         for eps_fn in self._episode_fns:
             transitions = self._episode_to_transitions(eps_fn)
             if transitions is None:
                 continue
-            return tuple(field[:1] for field in transitions)
+            return tuple(field[:1] for field in transitions), (eps_fn.name, 1)
         raise RuntimeError('Replay buffer is empty')
+
+    def get_first_transition(self, with_cursor=False):
+        try:
+            self._try_fetch(force=True)
+        except:
+            traceback.print_exc()
+
+        first_transition, cursor = self._get_first_stored_transition_with_cursor()
+        if with_cursor:
+            return first_transition, cursor
+        return first_transition
 
     def get_all_data(self, last_n=None, first=False):
         try:
@@ -322,6 +350,66 @@ class ReplayBuffer(IterableDataset):
             np.concatenate([first_transition[field_idx], all_transitions[field_idx]], axis=0)
             for field_idx in range(len(first_transition))
         )
+
+    def get_new_data_since(self, cursor=None, max_transitions=None):
+        try:
+            self._try_fetch(force=True)
+        except:
+            traceback.print_exc()
+
+        if max_transitions is not None and max_transitions <= 0:
+            raise ValueError('max_transitions must be positive when provided')
+
+        cursor_name = None
+        cursor_offset = 0
+        if cursor is not None:
+            cursor_name, cursor_offset = cursor
+            cursor_name = str(cursor_name)
+            cursor_offset = int(cursor_offset)
+
+        transition_batches = []
+        latest_cursor = cursor
+        for eps_fn in self._episode_fns:
+            transitions = self._episode_to_transitions(eps_fn)
+            if transitions is None:
+                continue
+
+            eps_name = eps_fn.name
+            transition_count = transitions[0].shape[0]
+            latest_cursor = (eps_name, transition_count)
+
+            if cursor_name is None:
+                start = 0
+            elif eps_name < cursor_name:
+                continue
+            elif eps_name == cursor_name:
+                start = min(cursor_offset, transition_count)
+            else:
+                start = 0
+
+            if start < transition_count:
+                transition_batches.append(self._slice_transition_batch(transitions, slice(start, None)))
+
+        if transition_batches and max_transitions is not None:
+            remaining = max_transitions
+            limited_batches = []
+            for transitions in reversed(transition_batches):
+                if remaining == 0:
+                    break
+                batch_size = transitions[0].shape[0]
+                if batch_size > remaining:
+                    transitions = self._slice_transition_batch(transitions, slice(-remaining, None))
+                    batch_size = remaining
+                limited_batches.append(transitions)
+                remaining -= batch_size
+            transition_batches = list(reversed(limited_batches))
+
+        if transition_batches:
+            new_transitions = self._concatenate_transition_batches(transition_batches)
+            if self._delete_on_cursor_fetch:
+                self._delete_episode_files_through_cursor(latest_cursor)
+            return new_transitions, latest_cursor
+        raise RuntimeError('No new replay data available')
 
     def get_all_data_matrix(self, last_n=None):
         try:
@@ -359,7 +447,8 @@ def _worker_init_fn(worker_id):
 
 
 def make_replay_loader(storage, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount, first_transition=False):
+                       save_snapshot, nstep, discount, first_transition=False,
+                       delete_on_cursor_fetch=False):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(storage,
@@ -370,7 +459,8 @@ def make_replay_loader(storage, max_size, batch_size, num_workers,
                             fetch_every=1000,
                             save_snapshot=save_snapshot,
                             first_transition=first_transition,
-                            batch_size=batch_size if first_transition else None)
+                            batch_size=batch_size if first_transition else None,
+                            delete_on_cursor_fetch=delete_on_cursor_fetch)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,
