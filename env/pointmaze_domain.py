@@ -38,15 +38,77 @@ class PointMazeDiscreteActions(gym.ActionWrapper):
         dtype=np.float32,
     )
 
-    def __init__(self, env):
+    def __init__(self, env, action_scale=1.0):
         super().__init__(env)
+        self.action_scale = float(action_scale)
         self.action_space = spaces.Discrete(len(self.ACTIONS))
 
     def action(self, action):
         action_idx = int(action)
         if action_idx < 0 or action_idx >= len(self.ACTIONS):
             raise ValueError(f"PointMaze discrete action must be in [0, {len(self.ACTIONS) - 1}]")
-        return self.ACTIONS[action_idx].copy()
+        return self.action_scale * self.ACTIONS[action_idx].copy()
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
+class PointMazeDirectVelocityActions(gym.Wrapper):
+    def __init__(self, env, max_velocity=1.0, preserve_target_velocity=True):
+        super().__init__(env)
+        self.max_velocity = float(max_velocity)
+        if self.max_velocity <= 0.0:
+            raise ValueError(f"pointmaze.max_velocity must be positive, got {self.max_velocity}")
+
+        self.preserve_target_velocity = bool(preserve_target_velocity)
+        self.action_space = spaces.Box(
+            low=-self.max_velocity,
+            high=self.max_velocity,
+            shape=(2,),
+            dtype=np.float32,
+        )
+
+    def _base_env(self):
+        return self.env.unwrapped
+
+    def _point_env(self):
+        point_env = getattr(self._base_env(), "point_env", None)
+        if point_env is None:
+            raise AttributeError("PointMazeDirectVelocityActions requires a PointMaze env with point_env")
+        return point_env
+
+    def _set_velocity(self, velocity):
+        point_env = self._point_env()
+        qpos = point_env.data.qpos.copy()
+        qvel = point_env.data.qvel.copy()
+        qvel[:2] = velocity
+        point_env.set_state(qpos, qvel)
+
+    def _refresh_obs(self):
+        base_env = self._base_env()
+        point_obs, _ = base_env.point_env._get_obs()
+        return base_env._get_obs(point_obs)
+
+    def step(self, action):
+        velocity = np.asarray(action, dtype=np.float32)
+        if velocity.shape != (2,):
+            raise ValueError(f"PointMaze direct velocity action must have shape (2,), got {velocity.shape}")
+
+        velocity = np.clip(velocity, self.action_space.low, self.action_space.high).astype(np.float32)
+        point_env = self._point_env()
+        self._set_velocity(velocity)
+
+        zero_force = np.zeros(point_env.action_space.shape, dtype=point_env.action_space.dtype)
+        obs, reward, terminated, truncated, info = self.env.step(zero_force)
+
+        if self.preserve_target_velocity:
+            self._set_velocity(velocity)
+            obs = self._refresh_obs()
+
+        info = dict(info) if info is not None else {}
+        info["direct_velocity_action"] = velocity.copy()
+        info["direct_velocity_preserved"] = self.preserve_target_velocity
+        return obs, reward, terminated, truncated, info
 
     def __getattr__(self, name):
         return getattr(self.env, name)
@@ -256,6 +318,10 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     camera_distance = pointmaze_kwargs.pop("camera_distance", None)
     camera_elevation = pointmaze_kwargs.pop("camera_elevation", -90.0)
     camera_azimuth = pointmaze_kwargs.pop("camera_azimuth", 90.0)
+    discrete_actions = bool(pointmaze_kwargs.pop("discrete_actions", True))
+    direct_velocity_actions = bool(pointmaze_kwargs.pop("direct_velocity_actions", False))
+    max_velocity = pointmaze_kwargs.pop("max_velocity", 1.0)
+    preserve_target_velocity = bool(pointmaze_kwargs.pop("preserve_target_velocity", True))
 
     if goal_position is None:
         raise ValueError("PointMaze environments require pointmaze.goal_position to keep the goal fixed")
@@ -274,11 +340,26 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
             azimuth=camera_azimuth,
         )
     env = PointMazeGoalMaskWrapper(env)
-    env = PointMazeDiscreteActions(env)
+    if direct_velocity_actions:
+        env = PointMazeDirectVelocityActions(
+            env,
+            max_velocity=max_velocity,
+            preserve_target_velocity=preserve_target_velocity,
+        )
+        if discrete_actions:
+            env = PointMazeDiscreteActions(env, action_scale=max_velocity)
+            action_description = f"4 discrete direct velocity actions scaled to max_velocity={max_velocity}"
+        else:
+            action_description = "direct velocity actions"
+    elif discrete_actions:
+        env = PointMazeDiscreteActions(env)
+        action_description = "4 discrete force actions"
+    else:
+        action_description = "continuous force actions"
 
     warning = (
         "Warning: PointMaze environment uses fixed goal and initial position, "
-        "4 discrete actions, dense reward, and goal-hidden pixel observations."
+        f"{action_description}, dense reward, and goal-hidden pixel observations."
     )
     if getattr(env.unwrapped, "continuing_task", False):
         warning += " continuing_task=True keeps the episode from terminating at success."

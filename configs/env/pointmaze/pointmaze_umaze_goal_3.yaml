@@ -5,5 +5,8 @@ env:
   render_mode: rgb_array
   pointmaze:
     top_down_camera: true
+    discrete_actions: true
+    direct_velocity_actions: true
+    max_velocity: 5.0
     start_position: [-1.0, 1.0]
     goal_position: [0.0, -1.0]
