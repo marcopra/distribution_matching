@@ -16,13 +16,13 @@ subsamples=(
 )
 
 feature_dims=(
-    # 64
-    256
+    64
+    # 256
     # 512
 )
 
 lr_actors=( 
-    10
+    1000
 )
 
 # Indices into the sink_schedules array defined in rover_hparam_base.sh:
@@ -32,7 +32,7 @@ lr_actors=(
 #   3 -> linear(0.0, 0.0001, 500_000)
 #   4 -> linear(1.0, 1.0,    100_000)
 
-sink_idxs=(0 1 2 4) 
+sink_idxs=(0 1) # 2 4) 
 
 
 for seed in $seeds; do   
