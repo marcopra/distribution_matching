@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpuv-longrun
 
 cd $SLURM_SUBMIT_DIR
 
@@ -37,4 +37,4 @@ sink_schedules=(
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
     
-python pretrain.py --config-name=pretrain/pretrain_rover_multiplerooms agent.embeddings=true discount=0.99 agent=rover_nystrom_memory_efficient agent.subsamples=${SUBSAMPLES} agent.lr_actor=${LR_ACTOR} agent.pmd_steps=100 agent.feature_dim=${FEATURE_DIM} num_seed_frames=2000 obs_type=pixels agent.update_every_steps=5 agent.update_every_steps=1500 device=cuda seed=${SEED} use_wandb=true wandb_project="rover_nystrom" agent.batch_size_actor=5000 "agent.sink_schedule='${SINK_SCHEDULE}'" ${EXTRA_ARGS} 
+python pretrain.py --config-name=pretrain/pretrain_rover_multiplerooms obs_type=discrete_states agent.embeddings=true discount=0.99 agent=rover_nystrom agent.subsamples=${SUBSAMPLES} agent.lr_actor=${LR_ACTOR} agent.pmd_steps=100 agent.feature_dim=${FEATURE_DIM} num_seed_frames=2000 agent.update_every_steps=1 agent.update_actor_every_steps=1500 device=cuda seed=${SEED} use_wandb=true wandb_project="rover_nystrom" agent.batch_size_actor=5000 "agent.sink_schedule='${SINK_SCHEDULE}'" ${EXTRA_ARGS} 
