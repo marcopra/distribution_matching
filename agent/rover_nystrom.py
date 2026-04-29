@@ -302,9 +302,7 @@ class DistributionMatcher:
             self,
             A: torch.Tensor,
             B: torch.Tensor,
-            tag: str,
             jitter_scale: float = 1e-10,
-            max_tries: int = 3,
         ) -> torch.Tensor:
         """Solve AX=B robustly when A is singular/ill-conditioned."""
         eye = torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
@@ -319,9 +317,7 @@ class DistributionMatcher:
             self,
             A: torch.Tensor,
             B: torch.Tensor,
-            tag: str,
             jitter_scale: float = 1e-10,
-            max_tries: int = 3,
         ) -> torch.Tensor:
         """Solve AX=B robustly when A is singular/ill-conditioned."""
         
@@ -411,11 +407,7 @@ class DistributionMatcher:
         K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
         A_nystrom = K_nm.T@K_nm + self.lambda_reg * N* K_mm # [m, m]
 
-        BM = self._regularized_solve(
-            A_nystrom,
-            K_nm.T@M,
-            tag="A_nystrom (compute_nu_pi_nystrom)"
-            ) # [m, n]
+        BM = self._regularized_solve(A_nystrom, K_nm.T@M ) # [m, n]
        
         # ** COMPUTATION STEP **
         # M̃ augmented to be [M 0; 0 1]
@@ -423,11 +415,7 @@ class DistributionMatcher:
         tilde_BM[:-1, :-1] = BM
         tilde_BM[-1, -1] = 1.0
 
-        inv_term = self._regularized_solve(
-            torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
-            tilde_alpha,
-            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
-        )
+        inv_term = torch.linalg.solve( torch.eye(subsamples+1, device=self.device) - self.gamma * tilde_BM, tilde_alpha)
         
         sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
         sink_state[-1] = sink_norm
@@ -542,11 +530,7 @@ class DistributionMatcher:
         K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
         K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
         A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
-        B = self._regularized_solve(
-            A_nystrom,
-            K_nm.T,
-            tag="A_nystrom (compute_gradient_coefficient_nystrom)",
-        ) # [m, n]
+        B = self._regularized_solve(A_nystrom,K_nm.T) # [m, n]
         tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
         tilde_B[:-1, :-1] = B
         tilde_B[-1, -1] = 1.0
@@ -566,11 +550,7 @@ class DistributionMatcher:
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
         tilde_B_tilde_M = tilde_B @ tilde_M
         I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
-        symmetric_term = self._regularized_solve(
-            (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
-            tilde_phi_sub_next_obs,
-            tag="(I - gamma*tilde_B_tilde_M)^T",
-        )
+        symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_sub_next_obs)
 
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
         left_term = tilde_B.T @ symmetric_term
@@ -619,12 +599,7 @@ class DistributionMatcher:
         # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
         M = H*(E@pi.T) # [n, m]
 
-        BM = self._regularized_solve(
-            A_nystrom,
-            K_nm.T @ M,
-            tag="A_nystrom (compute_nu_pi_nystrom)",
-
-        )
+        BM = self._regularized_solve_memory_efficient(A_nystrom,K_nm.T @ M)
 
         # release big temporaries earlier
         del K_nm, K_mm, A_nystrom
@@ -648,11 +623,7 @@ class DistributionMatcher:
         S[-1, :-1] = 0.0
         S[-1, -1] = 1.0 - self.gamma
 
-        inv_term = self._regularized_solve_memory_efficient(
-            S,
-            alpha_tilde,
-            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
-        )
+        inv_term = torch.linalg.solve(S,alpha_tilde)
 
         del S, alpha_tilde, BM
 
@@ -672,48 +643,7 @@ class DistributionMatcher:
 
         return occupancy
 
-        N = psi_all_obs_action.shape[0]
-        subsamples = psi_sub_obs_action.shape[0]
-       
-        # α̃ augmented to be [α; 1]
-        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
-        tilde_alpha[:-1] = alpha
 
-        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
-        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
-        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N* K_mm # [m, m]
-
-        BM = self._regularized_solve(
-            A_nystrom,
-            K_nm.T@M,
-            tag="A_nystrom (compute_nu_pi_nystrom)"
-            ) # [m, n]
-       
-        # ** COMPUTATION STEP **
-        # M̃ augmented to be [M 0; 0 1]
-        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
-        tilde_BM[:-1, :-1] = BM
-        tilde_BM[-1, -1] = 1.0
-
-        inv_term = self._regularized_solve(
-            torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
-            tilde_alpha,
-            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
-        )
-        
-        sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
-        sink_state[-1] = sink_norm
-
-        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        upper_left = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
-        tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
-        tilde_phi_sub_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
-        tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
-        # tilde_phi_sub_next_obs_transposed[-1, -1] = 1.0 # TODO patch 0.1
-
-        occupancy = (1 - self.gamma) *  tilde_phi_sub_next_obs_transposed @ inv_term
-        # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
-        return occupancy
     
     def compute_gradient_coefficient_nystrom_memory_efficient(
             self, 
@@ -761,7 +691,6 @@ class DistributionMatcher:
         B = self._regularized_solve_memory_efficient(
             A_nystrom,
             K_nm.T,
-            tag="A_nystrom (compute_gradient_coefficient_nystrom)"
         ) # [m, n]
         # H = self._phi_all_obs @ self._phi_sub_next.T
         # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
@@ -787,12 +716,7 @@ class DistributionMatcher:
         S[-1, :-1] = 0.0
         S[-1, -1] = 1.0 - self.gamma
 
-        symmetric_term = self._regularized_solve_memory_efficient(
-            S.T,
-            tilde_phi_sub_next_obs,
-            tag="(I - gamma*tilde_B_tilde_M)^T",
-
-        )   
+        symmetric_term = torch.linalg.solve(S.T,tilde_phi_sub_next_obs)   
 
         # left_term = tilde_B.T @ symmetric_term, without tilde_B
         left_term = torch.empty(
@@ -812,62 +736,7 @@ class DistributionMatcher:
         gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
 
         return gradient
-        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        # tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
-        # # upper_left_sub = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
-        # upper_left_sub = phi_sub_next_obs.T - sink_state @ psi_sub_obs_action.sum(dim=1).unsqueeze(0)  # [d, m]
-        # tilde_phi_sub_next_obs_transposed[:upper_left_sub.shape[0], :upper_left_sub.shape[1]] = upper_left_sub
-
-        # assert sink_state.shape[0] == upper_left_sub.shape[0], "Sink state and upper left matrix row size mismatch"
-
-        # tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
-        # tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
-
-        # Ã augmented to be [A 0; 0 1]
-        # Symmetric positive definite matrix A = ψψᵀ + λI
-        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
-        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
-        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
-        B = self._regularized_solve(
-            A_nystrom,
-            K_nm.T,
-            tag="A_nystrom (compute_gradient_coefficient_nystrom)",
-        ) # [m, n]
-        tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
-        tilde_B[:-1, :-1] = B
-        tilde_B[-1, -1] = 1.0
-
-        # M̃ augmented to be [M 0; 0 1]
-        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
-        tilde_M[:-1, :-1] = M
-        tilde_M[-1, -1] = 1.0
-
-        # α̃ augmented to be [α; 1]
-        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
-        tilde_alpha[:-1] = alpha
-
-        # ** COMPUTATION STEP **
-        # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
-        # Using the precomputed terms and solves:
-        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
-        tilde_B_tilde_M = tilde_B @ tilde_M
-        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
-        symmetric_term = self._regularized_solve(
-            (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
-            tilde_phi_sub_next_obs,
-            tag="(I - gamma*tilde_B_tilde_M)^T",
-        )
-
-        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
-        left_term = tilde_B.T @ symmetric_term
-
-        
-        # Right term: Φ̃ᵀ(I - γB̃M̃)⁻¹ α̃
-        right_term = symmetric_term.T @ tilde_alpha
-        gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
-      
-        return gradient
-    
+           
 # ============================================================================
 # Distribution Visualizer
 # ============================================================================
