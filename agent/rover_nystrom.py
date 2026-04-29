@@ -1645,9 +1645,32 @@ class EmbeddingDistributionVisualizerV2:
     def _state_dist_to_grid(self, nu: np.ndarray) -> np.ndarray:
         """Convert state distribution vector to 2D grid."""
         return self.state_adapter.values_to_grid(nu, reduce="sum")
+
+    def _actor_alpha_features_for_visualization(self):
+        """Return the alpha support that matches the active actor update mode."""
+        if (
+            getattr(self.agent, 'subsamples', None) is not None
+            and hasattr(self.agent, '_sub_alpha')
+            and self.agent._sub_alpha is not None
+            and hasattr(self.agent, '_phi_sub_next')
+            and self.agent._phi_sub_next is not None
+        ):
+            # Nyström updates optimize against the subsample support, so alpha
+            # must be interpreted on the same support for visual diagnostics.
+            return self.agent._phi_sub_next, self.agent._sub_alpha
+
+        if (
+            hasattr(self.agent, '_alpha')
+            and self.agent._alpha is not None
+            and hasattr(self.agent, '_phi_all_next')
+            and self.agent._phi_all_next is not None
+        ):
+            return self.agent._phi_all_next, self.agent._alpha
+
+        return None, None
     
     def _compute_initial_distribution(self) -> np.ndarray:
-        """Compute initial distribution using φ(unique_states) @ alpha."""
+        """Compute initial distribution on the active alpha support."""
         with torch.no_grad():
             if self.agent.obs_type == 'pixels':
                 # Use pre-rendered images
@@ -1656,16 +1679,14 @@ class EmbeddingDistributionVisualizerV2:
                 # Use one-hot encodings
                 enc_all_states = self.agent.encoder(self.all_state_ids_one_hot)
             
-            if hasattr(self.agent, '_alpha') and self.agent._alpha is not None:
-                alpha = self.agent._alpha
-                phi_all_next = self.agent._phi_all_next
+            phi_next, alpha = self._actor_alpha_features_for_visualization()
+            if alpha is not None:
                 
                 # Add augmented dimension to encoded states
                 zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
                 enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1) #.cpu()
                 
-                print(f"device of enc_all_states_aug: {enc_all_states_aug.device}, phi_all_next: {phi_all_next.device}, alpha: {alpha.device}")
-                kernel = enc_all_states_aug @ phi_all_next.T
+                kernel = enc_all_states_aug @ phi_next.T
                 nu_init = kernel @ alpha
             else:
                 nu_init = torch.ones(self.n_states, 1) / self.n_states
@@ -2199,15 +2220,135 @@ class EmbeddingDistributionVisualizerV2:
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Count')
         return True
 
+    def _compute_nystrom_subsample_state_counts_by_action(self):
+        """Infer Nyström subsample source-state counts, split by sampled action."""
+        if (
+            self.agent.subsamples is None
+            or not hasattr(self.agent, '_phi_sub_obs')
+            or self.agent._phi_sub_obs is None
+            or not hasattr(self.agent, '_sub_actions')
+            or self.agent._sub_actions is None
+        ):
+            return None
+
+        counts_by_action = np.zeros((self.n_actions, self.n_states), dtype=np.float32)
+
+        with torch.no_grad():
+            if self.agent.obs_type == 'pixels':
+                enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach().cpu()
+            else:
+                all_states = self.all_state_ids_one_hot.to(self.agent.device)
+                enc_all_states = self.agent.encoder(all_states).detach().cpu()
+
+            subsample_embeddings = self.agent._phi_sub_obs[:, :-1].detach().cpu()
+            sub_actions = self.agent._sub_actions.detach().cpu().long().reshape(-1)
+            usable_count = min(subsample_embeddings.shape[0], sub_actions.shape[0])
+
+            for batch_emb, action_idx in zip(subsample_embeddings[:usable_count], sub_actions[:usable_count]):
+                action_idx = int(action_idx.item())
+                if action_idx < 0 or action_idx >= self.n_actions:
+                    continue
+                similarities = F.cosine_similarity(
+                    batch_emb.unsqueeze(0),
+                    enc_all_states,
+                    dim=1
+                )
+                closest_state = torch.argmax(similarities).item()
+                counts_by_action[action_idx, closest_state] += 1
+
+        return counts_by_action
+
+    def _plot_nystrom_subsamples_by_action(self, fig, axes, step: int):
+        """Plot one Nyström subsample state heatmap per action."""
+        counts_by_action = self._compute_nystrom_subsample_state_counts_by_action()
+        flat_axes = np.asarray(axes).reshape(-1)
+
+        if counts_by_action is None or counts_by_action.sum() <= 0:
+            for ax in flat_axes:
+                ax.axis('off')
+            flat_axes[0].text(
+                0.5,
+                0.5,
+                'No Nyström subsample data available yet',
+                ha='center',
+                va='center',
+                transform=flat_axes[0].transAxes,
+                fontsize=12
+            )
+            flat_axes[0].set_title(f'Nyström Subsamples by Action (Step {step})', fontsize=12, fontweight='bold')
+            return False
+
+        grids_by_action = [
+            self._state_dist_to_grid(counts_by_action[action_idx])
+            for action_idx in range(self.n_actions)
+        ]
+        max_count = max(float(grid.max()) for grid in grids_by_action)
+        vmax = max(max_count, 1.0)
+        last_im = None
+
+        for action_idx, ax in enumerate(flat_axes):
+            if action_idx >= self.n_actions:
+                ax.axis('off')
+                continue
+
+            grid = grids_by_action[action_idx]
+            last_im = ax.imshow(
+                grid,
+                cmap='Oranges',
+                interpolation='nearest',
+                vmin=0,
+                vmax=vmax
+            )
+            ax.set_title(
+                f'{self.action_names[action_idx]} ({action_idx})',
+                fontsize=11,
+                fontweight='bold'
+            )
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_xticks(np.arange(self.grid_width))
+            ax.set_yticks(np.arange(self.grid_height))
+            ax.grid(True, which='both', color='white', linewidth=0.5, alpha=0.35)
+
+            for y, x in np.argwhere(grid > 0):
+                ax.text(
+                    x,
+                    y,
+                    f'{int(grid[y, x])}',
+                    ha='center',
+                    va='center',
+                    fontsize=8,
+                    fontweight='bold',
+                    color='black'
+                )
+
+        fig.colorbar(
+            last_im,
+            ax=flat_axes[:self.n_actions].tolist(),
+            location='right',
+            shrink=0.88,
+            pad=0.015,
+            label='Count'
+        )
+        fig.suptitle(f'Nyström Subsample State Occupancy by Action (Step {step})', fontsize=14, fontweight='bold')
+        return True
+
     def _save_nystrom_subsample_plot(self, step: int, save_path: str):
         """Save a dedicated Nyström subsample occupancy figure next to the main plot."""
-        fig, ax = plt.subplots(figsize=(8, 7))
-        plotted = self._plot_nystrom_subsamples(ax, title=f'Nyström Subsample Occupancy (Step {step})')
+        n_cols = min(self.n_actions, 4)
+        n_rows = int(np.ceil(self.n_actions / n_cols))
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(4.6 * n_cols + 0.6, 4.2 * n_rows),
+            squeeze=False,
+            constrained_layout=True
+        )
+        plotted = self._plot_nystrom_subsamples_by_action(fig, axes, step)
         if not plotted:
             plt.close(fig)
             return
 
-        plt.tight_layout()
         root, ext = os.path.splitext(save_path)
         subsample_save_path = f"{root}_nystrom_subsamples{ext}"
         plt.savefig(subsample_save_path, dpi=150, bbox_inches='tight')
@@ -3155,6 +3296,7 @@ class RoverAgent:
 
             action = action #.cpu()
             self._psi_all = self._encode_state_action(self._phi_all_obs, action) #.cpu()
+            self._all_actions = action.long().reshape(-1).detach().cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device)  # [n, 1]
     
@@ -3178,6 +3320,7 @@ class RoverAgent:
             if sub_obs is not None and sub_next_obs is not None and sub_action is not None:
                 self._phi_sub_obs = self._encode_with_module(encoder, sub_obs, project=True)
                 self._phi_sub_next = self._encode_with_module(encoder, sub_next_obs, project=True)
+                self._sub_actions = sub_action.long().reshape(-1).detach().cpu()
 
                 self._psi_sub = self._encode_state_action(self._phi_sub_obs, sub_action)
 
@@ -3209,11 +3352,13 @@ class RoverAgent:
             self._alpha[0] = 1.0
 
             self.E = encoded_full["E"].to(dtype=self.compute_dtype, device=self.device)
+            self._all_actions = torch.argmax(encoded_full["E"], dim=1).long().detach().cpu()
 
             if encoded_sub is not None:
                 self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"])
                 self._phi_sub_next = self._append_zero_feature_column(encoded_sub["phi_next"])
                 self._psi_sub = self._append_zero_feature_column(encoded_sub["psi"])
+                self._sub_actions = torch.argmax(encoded_sub["E"], dim=1).long().detach().cpu()
 
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
                 self._sub_alpha[0] = 1.0
