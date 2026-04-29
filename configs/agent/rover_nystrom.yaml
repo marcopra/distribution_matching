@@ -9,6 +9,7 @@ lr_actor: 10 # eta
 discount: ${discount} # gamma
 lambda_reg: 1e-15
 lr_T: 1e-4
+linear_projection: false
 batch_size: 1024
 batch_size_actor: 10000
 subsamples: 4000
