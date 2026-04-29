@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from dm_env import specs
 
-from agent.rover_nystrom import EncodedTransitionFIFO, RoverAgent
+from agent.rover_nystrom import EncodedTransitionFIFO, EmbeddingDistributionVisualizerV2, RoverAgent
 from replay_buffer import ReplayBuffer, ReplayBufferStorage
 
 
@@ -124,7 +124,7 @@ class EncodedActorFIFOTest(unittest.TestCase):
         self.assertEqual(float(rewards[0, 0]), 300.0)
         self.assertEqual((encoded_full["phi_obs"] == 0).sum().item(), 1)
 
-    def test_nystrom_actor_data_subsamples_first_at_index_zero(self):
+    def test_nystrom_actor_data_uses_all_fifo_and_subsamples_first_at_index_zero(self):
         agent = RoverAgent.__new__(RoverAgent)
         agent.subsamples = 4
         agent.batch_size_actor = 6
@@ -137,11 +137,39 @@ class EncodedActorFIFOTest(unittest.TestCase):
             None, None, None, None, None, replay_buffer=object()
         )
 
-        self.assertEqual(encoded_full["phi_obs"].shape[0], 6)
+        self.assertEqual(encoded_full["phi_obs"].shape[0], 10)
+        self.assertEqual(float(encoded_full["phi_obs"][0, 0]), 0.0)
+        self.assertEqual((encoded_full["phi_obs"] == 0).sum().item(), 1)
         self.assertEqual(encoded_sub["phi_obs"].shape[0], 4)
         self.assertEqual(float(encoded_sub["phi_obs"][0, 0]), 0.0)
         self.assertEqual(float(sub_rewards[0, 0]), 300.0)
         self.assertEqual((encoded_sub["phi_obs"] == 0).sum().item(), 1)
+
+    def test_visualizer_initial_distribution_uses_subsample_alpha(self):
+        agent = type("Agent", (), {})()
+        agent.obs_type = "states"
+        agent.encoder = torch.nn.Identity()
+        agent.subsamples = 2
+        agent._phi_all_next = torch.tensor(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=torch.float32,
+        )
+        agent._alpha = torch.tensor([[1.0], [0.0]], dtype=torch.float32)
+        agent._phi_sub_next = torch.tensor(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=torch.float32,
+        )
+        agent._sub_alpha = torch.tensor([[0.0], [1.0]], dtype=torch.float32)
+
+        visualizer = EmbeddingDistributionVisualizerV2.__new__(EmbeddingDistributionVisualizerV2)
+        visualizer.agent = agent
+        visualizer.n_states = 2
+        visualizer.all_state_ids_one_hot = torch.eye(2, dtype=torch.float32)
+
+        np.testing.assert_allclose(
+            visualizer._compute_initial_distribution(),
+            np.array([0.0, 1.0], dtype=np.float32),
+        )
 
 
 if __name__ == "__main__":

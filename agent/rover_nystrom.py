@@ -263,6 +263,25 @@ class EncodedTransitionFIFO:
             for key, value in sampled.items()
         }
 
+    def all(self, device, include_first=True):
+        if len(self) == 0:
+            raise RuntimeError("Encoded actor FIFO is empty")
+
+        batches = []
+        if include_first and self._first is not None:
+            batches.append(self._first)
+        if self._data is not None and self.data_count > 0:
+            batches.append(self._data)
+
+        if not batches:
+            raise RuntimeError("Encoded actor FIFO does not contain a first transition yet")
+
+        encoded = batches[0] if len(batches) == 1 else self._cat(batches)
+        return {
+            key: value.to(device)
+            for key, value in encoded.items()
+        }
+
 
 # ============================================================================
 # Distribution Matching Mathematics
@@ -2322,14 +2341,7 @@ class EmbeddingDistributionVisualizerV2:
                     color='black'
                 )
 
-        fig.colorbar(
-            last_im,
-            ax=flat_axes[:self.n_actions].tolist(),
-            location='right',
-            shrink=0.88,
-            pad=0.015,
-            label='Count'
-        )
+        fig.colorbar(last_im, ax=flat_axes[:self.n_actions].tolist(), fraction=0.025, pad=0.02, label='Count')
         fig.suptitle(f'Nyström Subsample State Occupancy by Action (Step {step})', fontsize=14, fontweight='bold')
         return True
 
@@ -2340,15 +2352,15 @@ class EmbeddingDistributionVisualizerV2:
         fig, axes = plt.subplots(
             n_rows,
             n_cols,
-            figsize=(4.6 * n_cols + 0.6, 4.2 * n_rows),
-            squeeze=False,
-            constrained_layout=True
+            figsize=(4.4 * n_cols, 4.1 * n_rows),
+            squeeze=False
         )
         plotted = self._plot_nystrom_subsamples_by_action(fig, axes, step)
         if not plotted:
             plt.close(fig)
             return
 
+        plt.tight_layout()
         root, ext = os.path.splitext(save_path)
         subsample_save_path = f"{root}_nystrom_subsamples{ext}"
         plt.savefig(subsample_save_path, dpi=150, bbox_inches='tight')
@@ -3099,6 +3111,7 @@ class RoverAgent:
                 sub_next_obs=sub_next_obs,
             )
 
+        utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
         sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
@@ -3510,6 +3523,13 @@ class RoverAgent:
         )
         return encoded, encoded.get("reward")
 
+    def _all_encoded_actor_data(self, include_first=True):
+        encoded = self._encoded_actor_fifo.all(
+            self.device,
+            include_first=include_first,
+        )
+        return encoded, encoded.get("reward")
+
     def _load_actor_batch_from_replay_iter(
             self,
             replay_iter,
@@ -3591,10 +3611,10 @@ class RoverAgent:
             if self.subsamples <= 0:
                 raise ValueError("subsamples must be positive when provided")
 
-            encoded_full, rewards = self._sample_encoded_actor_data(
-                self.batch_size_actor,
-                include_first=self._encoded_actor_fifo.data_count == 0,
-            )
+            # Nyström uses the FIFO as the full support and samples only the
+            # landmark/subsample set. The FIFO capacity controls the maximum
+            # retained support size; batch_size_actor is only for non-Nyström.
+            encoded_full, rewards = self._all_encoded_actor_data(include_first=True)
             encoded_sub, sub_rewards = self._sample_encoded_actor_data(
                 int(self.subsamples),
                 include_first=True,
