@@ -159,7 +159,7 @@ def stacked_static_observation(env, cfg) -> np.ndarray:
 def load_snapshot_agent(snapshot_path: Path, device: torch.device):
     # Import likely agent modules before unpickling snapshots saved by pretrain.py.
     import agent.rover  # noqa: F401
-    import agent.rover_nystrom_memory_efficient  # noqa: F401
+    import agent.rover_nystrom  # noqa: F401
 
     payload = torch.load(snapshot_path, map_location=device, weights_only=False)
     agent = payload["agent"] if isinstance(payload, dict) and "agent" in payload else payload

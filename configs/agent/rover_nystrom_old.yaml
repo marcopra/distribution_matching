@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.rover_nystrom_memory_efficient.RoverAgent
+_target_: agent.rover_nystrom_old.RoverAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -11,7 +11,6 @@ lambda_reg: 1e-15
 lr_T: 1e-4
 batch_size: 1024
 batch_size_actor: 10000
-actor_fifo_size: 40000 # defaults to batch_size_actor - 1; first transition is kept separately
 subsamples: 4000
 nstep: 1
 lr_encoder: 1e-4

@@ -22,7 +22,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
 import utils
 from distribution_matching import DistributionVisualizer
-from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
 import seaborn as sns
@@ -2241,7 +2240,6 @@ class RoverAgent:
                  pmd_eta_max: float = 1e3,
                  pmd_backtrack_factor: float = 0.5,
                  pmd_backtrack_max_trials: int = 8,
-                 actor_fifo_size: Optional[int] = None,
                  compute_dtype: str = "float32",
                  device: str = "cpu",
                  ):
@@ -2266,13 +2264,6 @@ class RoverAgent:
         # assert batch_size_actor >= batch_size, "Actor update batch size must be greater than or equal to encoder update batch size"
         self.update_every_steps = update_every_steps
         self.update_actor_every_steps = update_actor_every_steps
-        self.actor_fifo_size = int(actor_fifo_size) if actor_fifo_size is not None else max(1, int(batch_size_actor) - 1)
-        if self.actor_fifo_size <= 0:
-            raise ValueError("actor_fifo_size must be positive")
-        self._encoded_actor_fifo = deque()
-        self._encoded_actor_fifo_size = 0
-        self._first_encoded_actor_transition = None
-        self._encoded_actor_replay_cursor = None
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.device = device
@@ -2813,15 +2804,30 @@ class RoverAgent:
         return metrics
 
     def update_actor_nystrom(self,
-                             encoded_full,
+                             full_obs,
+                             full_action,
+                             full_next_obs,
                              step,
-                             encoded_sub=None):
+                             rewards=None,
+                             sub_obs=None,
+                             sub_action=None,
+                             sub_next_obs=None,
+                             sub_rewards=None):
         """Update policy using Projected Mirror Descent and Nystrom Approximation."""
         metrics = dict()
-        if encoded_sub is None:
-            raise ValueError("Nyström actor update requires an encoded subsample.")
+        if sub_obs is None or sub_action is None or sub_next_obs is None:
+            raise ValueError("Nyström actor update requires subsampled observations, actions, and next observations.")
 
-        self._cache_encoded_features(encoded_full, encoded_sub=encoded_sub)
+        self._sync_policy_encoder()
+        self._cache_features(
+            full_obs,
+            full_action,
+            full_next_obs,
+            encoder=self.policy_encoder,
+            sub_obs=sub_obs,
+            sub_action=sub_action,
+            sub_next_obs=sub_next_obs,
+        )
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -3060,148 +3066,9 @@ class RoverAgent:
 
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
-    def _encoded_actor_data_size(self, encoded_data):
-        return encoded_data["phi_obs"].shape[0]
-
-    def _slice_encoded_actor_data(self, encoded_data, index):
-        return {
-            key: value[index].detach().clone()
-            for key, value in encoded_data.items()
-        }
-
-    def _index_encoded_actor_data(self, encoded_data, indices):
-        return {
-            key: value[indices].detach().clone()
-            for key, value in encoded_data.items()
-        }
-
-    def _concat_encoded_actor_data(self, chunks):
-        if not chunks:
-            raise RuntimeError("Encoded actor FIFO is empty")
-        return {
-            key: torch.cat([chunk[key] for chunk in chunks], dim=0)
-            for key in chunks[0].keys()
-        }
-
     def _append_zero_feature_column(self, tensor):
         zeros_col = torch.zeros(*tensor.shape[:-1], 1, device=tensor.device, dtype=tensor.dtype)
         return torch.cat([tensor, zeros_col], dim=-1)
-
-    def _encode_actor_batch_for_fifo(self, obs, action, next_obs, reward=None):
-        with torch.no_grad():
-            action = action.reshape(-1).long().to(self.device)
-            phi_obs = self._encode_with_module(self.policy_encoder, obs, project=True).detach()
-            phi_next = self._encode_with_module(self.policy_encoder, next_obs, project=True).detach()
-            psi = self._encode_state_action(phi_obs, action).detach()
-
-            if reward is None:
-                reward = torch.empty((phi_obs.shape[0], 0), device=self.device, dtype=phi_obs.dtype)
-            else:
-                reward = reward.reshape(phi_obs.shape[0], -1).to(self.device).detach()
-
-            return {
-                "phi_obs": phi_obs,
-                "phi_next": phi_next,
-                "psi": psi,
-                "action": action,
-                "reward": reward,
-            }
-
-    def _trim_encoded_actor_fifo(self):
-        while self._encoded_actor_fifo_size > self.actor_fifo_size and self._encoded_actor_fifo:
-            overflow = self._encoded_actor_fifo_size - self.actor_fifo_size
-            oldest = self._encoded_actor_fifo[0]
-            oldest_size = self._encoded_actor_data_size(oldest)
-
-            if oldest_size <= overflow:
-                self._encoded_actor_fifo.popleft()
-                self._encoded_actor_fifo_size -= oldest_size
-                continue
-
-            self._encoded_actor_fifo[0] = self._slice_encoded_actor_data(oldest, slice(overflow, None))
-            self._encoded_actor_fifo_size -= overflow
-
-    def _set_first_encoded_actor_transition(self, encoded_batch):
-        self._first_encoded_actor_transition = self._slice_encoded_actor_data(encoded_batch, slice(0, 1))
-
-    def _add_encoded_actor_batch_to_fifo(self, encoded_batch, first_transition_included=True):
-        batch_size = self._encoded_actor_data_size(encoded_batch)
-        if batch_size == 0:
-            return
-
-        if first_transition_included:
-            # Replay batches reserve position 0 for the first transition. Keep one
-            # copy for alpha, but never enqueue repeated copies into the FIFO.
-            self._set_first_encoded_actor_transition(encoded_batch)
-            if batch_size == 1:
-                return
-            encoded_batch = self._slice_encoded_actor_data(encoded_batch, slice(1, None))
-
-        self._encoded_actor_fifo.append(encoded_batch)
-        self._encoded_actor_fifo_size += self._encoded_actor_data_size(encoded_batch)
-        self._trim_encoded_actor_fifo()
-
-    def _refresh_encoded_actor_fifo(self, obs, action, next_obs, reward, replay_buffer=None):
-        if replay_buffer is not None and hasattr(replay_buffer, "get_new_data_since"):
-            if self._first_encoded_actor_transition is None and hasattr(replay_buffer, "get_first_transition"):
-                first_batch, first_cursor = replay_buffer.get_first_transition(with_cursor=True)
-                first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(first_batch[:5], self.device)
-                first_encoded = self._encode_actor_batch_for_fifo(
-                    first_obs,
-                    first_action,
-                    first_next_obs,
-                    reward=first_reward,
-                )
-                self._set_first_encoded_actor_transition(first_encoded)
-                if self._encoded_actor_replay_cursor is None:
-                    self._encoded_actor_replay_cursor = first_cursor
-
-            try:
-                actor_batch, self._encoded_actor_replay_cursor = replay_buffer.get_new_data_since(
-                    cursor=self._encoded_actor_replay_cursor,
-                    max_transitions=self.actor_fifo_size,
-                )
-            except RuntimeError as exc:
-                if str(exc) == "No new replay data available":
-                    return
-                raise
-
-            obs, action, reward, _, next_obs = utils.to_torch(actor_batch[:5], self.device)
-            encoded_batch = self._encode_actor_batch_for_fifo(obs, action, next_obs, reward=reward)
-            self._add_encoded_actor_batch_to_fifo(encoded_batch, first_transition_included=False)
-            return
-
-        encoded_batch = self._encode_actor_batch_for_fifo(obs, action, next_obs, reward=reward)
-        self._add_encoded_actor_batch_to_fifo(encoded_batch, first_transition_included=True)
-
-    def _get_encoded_actor_fifo_data(self):
-        if self._first_encoded_actor_transition is None:
-            raise RuntimeError("Missing first transition for encoded actor FIFO")
-        if self._encoded_actor_fifo_size == 0:
-            return self._first_encoded_actor_transition
-        return self._concat_encoded_actor_data([
-            self._first_encoded_actor_transition,
-            *self._encoded_actor_fifo,
-        ])
-
-    def _sample_encoded_subsample_from_fifo(self, encoded_full):
-        if self.subsamples is None:
-            return None
-        if self.subsamples <= 0:
-            raise ValueError("subsamples must be positive when provided")
-
-        total_samples = self._encoded_actor_data_size(encoded_full)
-        if self.subsamples >= total_samples:
-            return encoded_full
-        if self.subsamples == 1:
-            subsample_indices = torch.zeros(1, device=self.device, dtype=torch.long)
-        else:
-            remaining_indices = torch.randperm(total_samples - 1, device=self.device)[:self.subsamples - 1] + 1
-            subsample_indices = torch.cat([
-                torch.zeros(1, device=self.device, dtype=torch.long),
-                remaining_indices,
-            ])
-        return self._index_encoded_actor_data(encoded_full, subsample_indices)
 
     def _cache_encoded_features(self, encoded_full, encoded_sub=None):
         with torch.no_grad():
@@ -3227,18 +3094,145 @@ class RoverAgent:
 
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
-    def _prepare_encoded_actor_update_data(self, obs, action, next_obs, reward, replay_buffer=None):
-        self._sync_policy_encoder()
-        self._refresh_encoded_actor_fifo(obs, action, next_obs, reward, replay_buffer=replay_buffer)
-        encoded_full = self._get_encoded_actor_fifo_data()
-        encoded_sub = self._sample_encoded_subsample_from_fifo(encoded_full)
-        return encoded_full, encoded_sub
+    def _make_actor_batch(self, obs, action, next_obs, reward):
+        return (
+            obs,
+            action,
+            next_obs,
+            reward.reshape(obs.shape[0], -1),
+        )
 
-    def _encoded_rewards(self, encoded_data):
-        reward = encoded_data.get("reward")
-        if reward is None or reward.numel() == 0:
+    def _slice_actor_batch(self, actor_batch, index):
+        return tuple(field[index] for field in actor_batch)
+
+    def _concat_actor_batches(self, actor_batches, max_samples):
+        if not actor_batches:
+            raise RuntimeError("No replay samples available for actor update")
+        actor_batch = tuple(
+            torch.cat([batch[field_idx] for batch in actor_batches], dim=0)
+            for field_idx in range(len(actor_batches[0]))
+        )
+        return self._slice_actor_batch(actor_batch, slice(0, max_samples))
+
+    def _load_first_actor_transition(self, replay_buffer=None, fallback_actor_batch=None):
+        if replay_buffer is not None and hasattr(replay_buffer, "get_first_transition"):
+            first_batch = replay_buffer.get_first_transition()
+            first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(
+                first_batch[:5],
+                self.device,
+            )
+            return self._make_actor_batch(first_obs, first_action, first_next_obs, first_reward)
+
+        if fallback_actor_batch is None:
             return None
-        return reward
+        return self._slice_actor_batch(fallback_actor_batch, slice(0, 1))
+
+    def _replace_first_actor_transition(self, actor_batch, first_actor_transition):
+        if first_actor_transition is None:
+            return actor_batch
+
+        actor_batch = tuple(field.clone() for field in actor_batch)
+        for field_idx, first_field in enumerate(first_actor_transition):
+            actor_batch[field_idx][:1] = first_field.to(actor_batch[field_idx].device)
+        return actor_batch
+
+    def _load_actor_batch_from_replay_iter(
+            self,
+            replay_iter,
+            obs,
+            action,
+            next_obs,
+            reward,
+            max_samples,
+            replay_buffer=None):
+        if max_samples <= 0:
+            raise ValueError("max_samples must be positive")
+
+        actor_batches = [self._make_actor_batch(obs, action, next_obs, reward)]
+        collected = obs.shape[0]
+
+        while collected < max_samples:
+            batch = next(replay_iter)
+            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+            actor_batch = self._make_actor_batch(obs_b, action_b, next_obs_b, reward_b)
+            actor_batches.append(actor_batch)
+            collected += obs_b.shape[0]
+
+        actor_batch = self._concat_actor_batches(actor_batches, max_samples)
+        first_actor_transition = self._load_first_actor_transition(
+            replay_buffer=replay_buffer,
+            fallback_actor_batch=actor_batch,
+        )
+        return self._replace_first_actor_transition(actor_batch, first_actor_transition)
+
+    def _load_actor_subsample_from_replay_iter(
+            self,
+            replay_iter,
+            max_samples,
+            replay_buffer=None,
+            fallback_actor_batch=None):
+        if max_samples <= 0:
+            raise ValueError("subsamples must be positive when provided")
+
+        first_actor_transition = self._load_first_actor_transition(
+            replay_buffer=replay_buffer,
+            fallback_actor_batch=fallback_actor_batch,
+        )
+        if first_actor_transition is None:
+            raise RuntimeError("Could not build a subsample with the first transition in position 0")
+        if max_samples == 1:
+            return first_actor_transition
+
+        actor_batches = []
+        collected = 0
+        remaining_samples = max_samples - 1
+
+        while collected < remaining_samples:
+            batch = next(replay_iter)
+            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+            actor_batch = self._make_actor_batch(obs_b, action_b, next_obs_b, reward_b)
+
+            if actor_batch[0].shape[0] > 1:
+                actor_batch = self._slice_actor_batch(actor_batch, slice(1, None))
+            if actor_batch[0].shape[0] == 0:
+                continue
+            actor_batches.append(actor_batch)
+            collected += actor_batch[0].shape[0]
+
+        sampled_actor_batch = self._concat_actor_batches(actor_batches, remaining_samples)
+        return self._concat_actor_batches(
+            [first_actor_transition, sampled_actor_batch],
+            max_samples,
+        )
+
+    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None):
+        full_actor_batch = self._load_actor_batch_from_replay_iter(
+            replay_iter,
+            obs,
+            action,
+            next_obs,
+            reward,
+            max_samples=self.batch_size_actor,
+            replay_buffer=replay_buffer,
+        )
+
+        if self.subsamples is None:
+            return (*full_actor_batch, None, None, None, None)
+
+        if self.subsamples <= 0:
+            raise ValueError("subsamples must be positive when provided")
+
+        if self.subsamples >= full_actor_batch[0].shape[0]:
+            subsampled_actor_batch = full_actor_batch
+        else:
+            subsampled_actor_batch = self._load_actor_subsample_from_replay_iter(
+                replay_iter,
+                max_samples=int(self.subsamples),
+                replay_buffer=replay_buffer,
+                fallback_actor_batch=full_actor_batch,
+            )
+
+        return (*full_actor_batch, *subsampled_actor_batch)
 
     def _build_debug_visualizer_batch(self, obs, max_observations=2000):
         if obs is None:
@@ -3512,7 +3506,17 @@ class RoverAgent:
         
         # In ideal mode, we can update actor immediately
         if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
-            encoded_full_actor, encoded_subsampled_actor = self._prepare_encoded_actor_update_data(
+            (
+                all_obs_actor,
+                all_action_actor,
+                all_next_obs_actor,
+                all_reward_actor,
+                subsampled_obs_actor,
+                subsampled_action_actor,
+                subsampled_next_obs_actor,
+                subsampled_reward_actor,
+            ) = self._get_actor_update_data(
+                replay_iter,
                 obs,
                 action,
                 next_obs,
@@ -3520,34 +3524,35 @@ class RoverAgent:
                 replay_buffer=replay_buffer,
             )
 
-            full_actor_size = self._encoded_actor_data_size(encoded_full_actor)
-            subsampled_actor_size = (
-                self._encoded_actor_data_size(encoded_subsampled_actor)
-                if encoded_subsampled_actor is not None
-                else "N/A"
-            )
             utils.ColorPrint.red(
-                f"samples for actor update: full {full_actor_size}, subsampled {subsampled_actor_size}, "
-                f"fifo filled: {self._encoded_actor_fifo_size}/{self.actor_fifo_size}"
+                f"samples for actor update: full {all_obs_actor.shape[0]}, "
+                f"subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}"
             )
             if self.subsamples is None:
                 metrics.update(
                     self.update_actor(
+                        all_obs_actor,
+                        all_action_actor,
+                        all_next_obs_actor,
                         step=step,
-                        rewards=self._encoded_rewards(encoded_full_actor),
-                        encoded_full=encoded_full_actor,
+                        rewards=all_reward_actor,
                     )
                 )
                 
             else:
                 metrics.update(
                     self.update_actor_nystrom(
-                        encoded_full_actor,
+                        all_obs_actor,
+                        all_action_actor,
+                        all_next_obs_actor,
                         step=step,
-                        encoded_sub=encoded_subsampled_actor,
+                        rewards=all_reward_actor,
+                        sub_obs=subsampled_obs_actor,
+                        sub_action=subsampled_action_actor,
+                        sub_next_obs=subsampled_next_obs_actor,
+                        sub_rewards=subsampled_reward_actor,
                     )
                 )
-
 
 
         if self.debug_visualizer is not None:
@@ -3561,7 +3566,7 @@ class RoverAgent:
                 f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
             )
 
-            if step % 10000 == 0:
+            if  step % self.update_actor_every_steps == 0: #step % 10000 == 0 
                 visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
                 metrics.update(
                     self.debug_visualizer.save(

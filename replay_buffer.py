@@ -2,7 +2,7 @@ import datetime
 import io
 import random
 import traceback
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 import torch
@@ -37,6 +37,7 @@ class ReplayBufferStorage:
         self._replay_dir = replay_dir
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
+        self._transition_views = {}
         self._preload()
 
     def __len__(self):
@@ -51,6 +52,7 @@ class ReplayBufferStorage:
                 value = np.full(spec.shape, value, spec.dtype)
             assert spec.shape == value.shape and spec.dtype == value.dtype
             self._current_episode[spec.name].append(value)
+        self._record_pending_transitions()
         if time_step.last():
             episode = dict()
             for spec in self._data_specs:
@@ -61,6 +63,103 @@ class ReplayBufferStorage:
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
             self._store_episode(episode)
+
+    def register_transition_view(self, nstep, discount):
+        """Register a lightweight stream of new transitions for actor-side encoders.
+
+        This does not change the replay-buffer sampling API. It only keeps raw
+        transitions that have not yet been acknowledged by the actor FIFO, so
+        actor updates can encode new data without depending on episode files.
+        """
+        key = (int(nstep), float(discount))
+        if key not in self._transition_views:
+            self._transition_views[key] = {
+                'pending': deque(),
+                'next_id': 0,
+                'first_transition': None,
+            }
+        return key
+
+    def _record_pending_transitions(self):
+        if not self._transition_views:
+            return
+        if 'observation' not in self._current_episode:
+            return
+
+        episode_length = len(self._current_episode['observation'])
+        for key, view in self._transition_views.items():
+            nstep, discount = key
+            if episode_length < nstep + 1:
+                continue
+
+            start_idx = episode_length - nstep - 1
+            transition = self._build_transition_from_episode(
+                self._current_episode,
+                start_idx,
+                nstep,
+                discount,
+            )
+            transition_id = view['next_id']
+            view['next_id'] += 1
+            view['pending'].append((transition_id, transition))
+            if view['first_transition'] is None:
+                view['first_transition'] = transition
+
+    def _build_transition_from_episode(self, episode, start_idx, nstep, discount):
+        obs = episode['observation'][start_idx]
+        action = episode['action'][start_idx + 1]
+        next_obs = episode['observation'][start_idx + nstep]
+
+        reward = np.zeros_like(episode['reward'][start_idx + 1])
+        discount_acc = np.ones_like(episode['discount'][start_idx + 1])
+        for i in range(nstep):
+            reward += discount_acc * episode['reward'][start_idx + 1 + i]
+            discount_acc *= episode['discount'][start_idx + 1 + i] * discount
+
+        meta = [
+            episode[spec.name][start_idx]
+            for spec in self._meta_specs
+        ]
+        return (obs, action, reward, discount_acc, next_obs, *meta)
+
+    def get_pending_transition_batch(self, view_key, after_id=None, limit=None):
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+
+        min_id = -1 if after_id is None else int(after_id)
+        pending = [
+            (transition_id, transition)
+            for transition_id, transition in view['pending']
+            if transition_id > min_id
+        ]
+        if limit is not None:
+            pending = pending[:int(limit)]
+        if not pending:
+            return None, None
+
+        transition_ids = np.array([transition_id for transition_id, _ in pending], dtype=np.int64)
+        transitions = tuple(
+            np.stack([transition[field_idx] for _, transition in pending], axis=0)
+            for field_idx in range(len(pending[0][1]))
+        )
+        return transition_ids, transitions
+
+    def discard_pending_transitions(self, view_key, through_id):
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+
+        through_id = int(through_id)
+        pending = view['pending']
+        while pending and pending[0][0] <= through_id:
+            pending.popleft()
+
+    def get_first_transition(self, view_key):
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+        return view['first_transition']
 
     def _preload(self):
         self._num_episodes = 0
@@ -82,8 +181,7 @@ class ReplayBufferStorage:
 
 class ReplayBuffer(IterableDataset):
     def __init__(self, storage, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot, first_transition=False, batch_size=None,
-                 delete_on_cursor_fetch=False):
+                 fetch_every, save_snapshot, first_transition=False, batch_size=None):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -95,12 +193,15 @@ class ReplayBuffer(IterableDataset):
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
         self._save_snapshot = save_snapshot
-        self._delete_on_cursor_fetch = delete_on_cursor_fetch
         self._first_transition = first_transition
         self._batch_size = batch_size
         self._transition_cache = dict()
         self._all_data_cache = None
         self._all_data_cache_key = None
+        self._transition_view_key = self._storage.register_transition_view(
+            self._nstep,
+            self._discount,
+        )
 
     def _invalidate_transition_views(self):
         self._all_data_cache = None
@@ -132,8 +233,8 @@ class ReplayBuffer(IterableDataset):
             eps_fn.unlink(missing_ok=True)
         return True
 
-    def _try_fetch(self, force=False):
-        if not force and self._samples_since_last_fetch < self._fetch_every:
+    def _try_fetch(self):
+        if self._samples_since_last_fetch < self._fetch_every:
             return
         self._samples_since_last_fetch = 0
         try:
@@ -226,18 +327,19 @@ class ReplayBuffer(IterableDataset):
         self._all_data_cache_key = cache_key
         return all_transitions
 
-    def _get_transition_batches(self, last_n=None):
+    def get_all_data(self, last_n=None):
+        try:
+            self._try_fetch()
+        except:
+            traceback.print_exc()
+
         if last_n is not None and last_n <= 0:
             raise ValueError('last_n must be positive when provided')
 
-        transition_batches = []
         if last_n is None:
-            for eps_fn in self._episode_fns:
-                transitions = self._episode_to_transitions(eps_fn)
-                if transitions is not None:
-                    transition_batches.append(transitions)
-            return transition_batches
+            return self._get_all_transitions()
 
+        transition_batches = []
         remaining = last_n
         for eps_fn in reversed(self._episode_fns):
             if remaining == 0:
@@ -255,178 +357,46 @@ class ReplayBuffer(IterableDataset):
             transition_batches.append(transitions)
             remaining -= batch_size
 
-        transition_batches.reverse()
-        return transition_batches
-
-    def _slice_transition_batch(self, transitions, index):
-        return tuple(field[index] for field in transitions)
-
-    def _delete_episode_files_through_cursor(self, cursor):
-        if cursor is None:
-            return
-        cursor_name = str(cursor[0])
-        for eps_fn in self._episode_fns:
-            if eps_fn.name <= cursor_name:
-                eps_fn.unlink(missing_ok=True)
-
-    def _concatenate_transition_batches(self, transition_batches):
         if not transition_batches:
             raise RuntimeError('Replay buffer is empty')
 
+        transition_batches.reverse()
         return tuple(
             np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
             for field_idx in range(len(transition_batches[0]))
         )
 
-    def _transition_batches_to_matrices(self, transition_batches):
-        if not transition_batches:
-            raise RuntimeError('Replay buffer is empty')
-
-        episode_length = transition_batches[0][0].shape[0]
-        if episode_length <= 0:
-            raise RuntimeError('Encountered an empty transition batch while building matrices')
-
-        if any(batch[0].shape[0] != episode_length for batch in transition_batches[1:]):
-            raise NotImplementedError(
-                'get_all_data_matrix currently requires equal-length episodes.'
-            )
-
-        return tuple(
-            np.stack([batch[field_idx] for batch in transition_batches], axis=0)
-            for field_idx in range(len(transition_batches[0]))
+    def get_new_transitions_since(self, last_transition_id=None, limit=None):
+        # Actor FIFO integration point: this streams only transitions that have
+        # not been acknowledged yet and does not rely on saved episode files.
+        return self._storage.get_pending_transition_batch(
+            self._transition_view_key,
+            after_id=last_transition_id,
+            limit=limit,
         )
 
-    def _get_first_stored_transition(self):
-        first_transition, _ = self._get_first_stored_transition_with_cursor()
-        return first_transition
+    def mark_transitions_encoded(self, through_transition_id):
+        self._storage.discard_pending_transitions(
+            self._transition_view_key,
+            through_transition_id,
+        )
 
-    def _get_first_stored_transition_with_cursor(self):
+    def get_first_transition(self):
+        first_transition = self._storage.get_first_transition(self._transition_view_key)
+        if first_transition is not None:
+            return tuple(np.expand_dims(field, axis=0) for field in first_transition)
+
+        try:
+            self._try_fetch()
+        except:
+            traceback.print_exc()
+
         for eps_fn in self._episode_fns:
             transitions = self._episode_to_transitions(eps_fn)
-            if transitions is None:
-                continue
-            return tuple(field[:1] for field in transitions), (eps_fn.name, 1)
+            if transitions is not None and transitions[0].shape[0] > 0:
+                return tuple(field[:1] for field in transitions)
+
         raise RuntimeError('Replay buffer is empty')
-
-    def get_first_transition(self, with_cursor=False):
-        try:
-            self._try_fetch(force=True)
-        except:
-            traceback.print_exc()
-
-        first_transition, cursor = self._get_first_stored_transition_with_cursor()
-        if with_cursor:
-            return first_transition, cursor
-        return first_transition
-
-    def get_all_data(self, last_n=None, first=False):
-        try:
-            self._try_fetch(force=True)
-        except:
-            traceback.print_exc()
-
-        if last_n is None:
-            return self._get_all_transitions()
-
-        if first:
-            first_transition = self._get_first_stored_transition()
-            if last_n == 1:
-                return first_transition
-
-        remaining = last_n - 1 if first else last_n
-        transition_batches = self._get_transition_batches(last_n=remaining)
-
-        if not transition_batches:
-            if first:
-                return first_transition
-            raise RuntimeError('Replay buffer is empty')
-
-        all_transitions = self._concatenate_transition_batches(transition_batches)
-
-        if not first:
-            return all_transitions
-
-        return tuple(
-            np.concatenate([first_transition[field_idx], all_transitions[field_idx]], axis=0)
-            for field_idx in range(len(first_transition))
-        )
-
-    def get_new_data_since(self, cursor=None, max_transitions=None):
-        try:
-            self._try_fetch(force=True)
-        except:
-            traceback.print_exc()
-
-        if max_transitions is not None and max_transitions <= 0:
-            raise ValueError('max_transitions must be positive when provided')
-
-        cursor_name = None
-        cursor_offset = 0
-        if cursor is not None:
-            cursor_name, cursor_offset = cursor
-            cursor_name = str(cursor_name)
-            cursor_offset = int(cursor_offset)
-
-        transition_batches = []
-        latest_cursor = cursor
-        for eps_fn in self._episode_fns:
-            transitions = self._episode_to_transitions(eps_fn)
-            if transitions is None:
-                continue
-
-            eps_name = eps_fn.name
-            transition_count = transitions[0].shape[0]
-            latest_cursor = (eps_name, transition_count)
-
-            if cursor_name is None:
-                start = 0
-            elif eps_name < cursor_name:
-                continue
-            elif eps_name == cursor_name:
-                start = min(cursor_offset, transition_count)
-            else:
-                start = 0
-
-            if start < transition_count:
-                transition_batches.append(self._slice_transition_batch(transitions, slice(start, None)))
-
-        if transition_batches and max_transitions is not None:
-            remaining = max_transitions
-            limited_batches = []
-            for transitions in reversed(transition_batches):
-                if remaining == 0:
-                    break
-                batch_size = transitions[0].shape[0]
-                if batch_size > remaining:
-                    transitions = self._slice_transition_batch(transitions, slice(-remaining, None))
-                    batch_size = remaining
-                limited_batches.append(transitions)
-                remaining -= batch_size
-            transition_batches = list(reversed(limited_batches))
-
-        if transition_batches:
-            new_transitions = self._concatenate_transition_batches(transition_batches)
-            if self._delete_on_cursor_fetch:
-                self._delete_episode_files_through_cursor(latest_cursor)
-            return new_transitions, latest_cursor
-        raise RuntimeError('No new replay data available')
-
-    def get_all_data_matrix(self, last_n=None):
-        try:
-            self._try_fetch(force=True)
-        except:
-            traceback.print_exc()
-
-        transition_batches = self._get_transition_batches(last_n=None)
-        if not transition_batches:
-            raise RuntimeError('Replay buffer is empty')
-        if last_n is not None:
-            episode_length = transition_batches[0][0].shape[0]
-            if episode_length <= 0:
-                raise RuntimeError('Encountered an empty transition batch while building matrices')
-            num_episodes = max(1, int(np.ceil(last_n / episode_length)))
-            transition_batches = transition_batches[-num_episodes:]
-        return self._transition_batches_to_matrices(transition_batches)
 
     def __iter__(self):
         while True:
@@ -447,8 +417,7 @@ def _worker_init_fn(worker_id):
 
 
 def make_replay_loader(storage, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount, first_transition=False,
-                       delete_on_cursor_fetch=False):
+                       save_snapshot, nstep, discount, first_transition=False):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(storage,
@@ -459,8 +428,7 @@ def make_replay_loader(storage, max_size, batch_size, num_workers,
                             fetch_every=1000,
                             save_snapshot=save_snapshot,
                             first_transition=first_transition,
-                            batch_size=batch_size if first_transition else None,
-                            delete_on_cursor_fetch=delete_on_cursor_fetch)
+                            batch_size=batch_size if first_transition else None)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,

@@ -22,8 +22,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
 import utils
 from distribution_matching import DistributionVisualizer
-torch.set_default_dtype(torch.float64)
-from agent.utils import InternalDatasetFIFO
 from PIL import Image
 from sklearn.manifold import TSNE
 import seaborn as sns
@@ -31,6 +29,27 @@ import logging
 from agent.utils_debug_visualization import build_debug_visualizer_suite
 # set logging level to info
 import logging
+
+
+def _resolve_torch_dtype(dtype):
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    dtype = str(dtype).lower()
+    dtype_map = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "32": torch.float32,
+        "float64": torch.float64,
+        "fp64": torch.float64,
+        "double": torch.float64,
+        "64": torch.float64,
+    }
+    if dtype not in dtype_map:
+        raise ValueError("compute_dtype must be one of: float32, fp32, float64, fp64, double")
+    return dtype_map[dtype]
+
+
+torch.set_default_dtype(_resolve_torch_dtype(os.environ.get("ROVER_COMPUTE_DTYPE", "float32")))
 
 logger = logging.getLogger("myapp")
 logger.setLevel(logging.INFO)
@@ -67,7 +86,7 @@ class Encoder(nn.Module):
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
-        obs = obs.double()
+        obs = obs.to(dtype=torch.get_default_dtype())
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
         return h
@@ -110,7 +129,7 @@ class CNNEncoder(nn.Module):
 
     def forward(self, obs):
         obs = obs / 255.
-        obs = obs.double()
+        obs = obs.to(dtype=torch.get_default_dtype())
         h = self.conv(obs)
         h = self.adaptive_pool(h)
         h = h.view(h.shape[0], -1)
@@ -143,6 +162,108 @@ class ProjectSA(nn.Module):
         return self.project_sa(encoded_state_action)
 
 
+class EncodedTransitionFIFO:
+    """FIFO storage for actor-ready encoded transitions.
+
+    The first transition is pinned separately so actor batches can always place
+    it at index 0 without duplicating it in the random sample.
+    """
+
+    def __init__(self, capacity: int):
+        if capacity <= 0:
+            raise ValueError("encoded FIFO capacity must be positive")
+        self.capacity = int(capacity)
+        self._data = None
+        self._ids = None
+        self._first = None
+        self._first_id = None
+
+    def __len__(self):
+        size = 0 if self._ids is None else int(self._ids.numel())
+        return size + (1 if self._first is not None else 0)
+
+    @property
+    def has_first(self):
+        return self._first is not None
+
+    @property
+    def data_count(self):
+        return 0 if self._ids is None else int(self._ids.numel())
+
+    @staticmethod
+    def _index(encoded, index):
+        return {key: value[index] for key, value in encoded.items()}
+
+    @staticmethod
+    def _cat(encoded_batches):
+        keys = encoded_batches[0].keys()
+        return {
+            key: torch.cat([batch[key] for batch in encoded_batches], dim=0)
+            for key in keys
+        }
+
+    def add(self, transition_ids, encoded):
+        transition_ids = torch.as_tensor(transition_ids, dtype=torch.long, device='cpu')
+        encoded = {
+            key: value.detach().to('cpu')
+            for key, value in encoded.items()
+        }
+
+        first_mask = transition_ids == 0
+        if first_mask.any():
+            first_idx = int(torch.nonzero(first_mask, as_tuple=False)[0].item())
+            self._first = self._index(encoded, slice(first_idx, first_idx + 1))
+            self._first_id = int(transition_ids[first_idx].item())
+
+        if self._first_id is None:
+            keep_mask = torch.ones_like(transition_ids, dtype=torch.bool)
+        else:
+            keep_mask = transition_ids != self._first_id
+        if not keep_mask.any():
+            return
+
+        new_ids = transition_ids[keep_mask]
+        new_data = self._index(encoded, keep_mask)
+        if self._data is None:
+            self._ids = new_ids
+            self._data = new_data
+        else:
+            self._ids = torch.cat([self._ids, new_ids], dim=0)
+            self._data = self._cat([self._data, new_data])
+
+        overflow = int(self._ids.numel()) - max(0, self.capacity - (1 if self._first is not None else 0))
+        if overflow > 0:
+            self._ids = self._ids[overflow:]
+            self._data = self._index(self._data, slice(overflow, None))
+
+    def sample(self, size, device, include_first=True):
+        if size <= 0:
+            raise ValueError("sample size must be positive")
+        if len(self) == 0:
+            raise RuntimeError("Encoded actor FIFO is empty")
+
+        batches = []
+        remaining = int(size)
+        if include_first and self._first is not None:
+            batches.append(self._first)
+            remaining -= 1
+
+        data_size = 0 if self._ids is None else int(self._ids.numel())
+        if remaining > 0 and data_size > 0:
+            take = min(remaining, data_size)
+            indices = torch.randperm(data_size)[:take]
+            batches.append(self._index(self._data, indices))
+
+        if not batches:
+            raise RuntimeError("Encoded actor FIFO does not contain a first transition yet")
+
+        sampled = batches[0] if len(batches) == 1 else self._cat(batches)
+        return {
+            key: value.to(device)
+            for key, value in sampled.items()
+        }
+
+
 # ============================================================================
 # Distribution Matching Mathematics
 # ============================================================================
@@ -167,40 +288,31 @@ class DistributionMatcher:
             max_tries: int = 3,
         ) -> torch.Tensor:
         """Solve AX=B robustly when A is singular/ill-conditioned."""
-        # if A.shape[0] != A.shape[1]:
-        #     X = torch.linalg.lstsq(A, B).solution
-        #     return torch.nan_to_num(X)
-        #TODO  Capire meglio questa cosa del jitter, non-singular etc. per pseudo inversione 
         eye = torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
         
         A  = A + jitter_scale* eye
-        # a_norm = torch.linalg.matrix_norm(A, ord='fro')
-        # base_jitter = jitter_scale * (a_norm / max(A.shape[0], 1) + 1.0)
-        # c = torch.linalg.cholesky(A)
-        # s,v,d = torch.linalg.svd(A)
 
         X = torch.linalg.solve(A, B)
-        # U, S, Vh = torch.linalg.svd(A)
+        
+        return X 
+    
+    def _regularized_solve_memory_efficient(
+            self,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            tag: str,
+            jitter_scale: float = 1e-10,
+            max_tries: int = 3,
+        ) -> torch.Tensor:
+        """Solve AX=B robustly when A is singular/ill-conditioned."""
+        
 
-        # # Inverti solo i valori singolari non nulli
-        # tol = 1e-6
-        # S_inv = torch.where(S > tol, 1.0 / S, torch.zeros_like(S))
-        # X = U @ (torch.diag(S_inv) @ (Vh @ B) )
-        # for trial in range(max_tries + 1):
-        #     jitter = base_jitter * (10.0 ** trial)
-        #     A_reg = A + jitter * eye
-        #     try:
-        #         X = torch.linalg.solve(A_reg, B)
-        #     except RuntimeError:
-        #         continue
-        #     if torch.isfinite(X).all():
-        #         if trial > 0:
-        #             logger.debug(f"Applied jitter={jitter:.2e} while solving {tag}")
-        #         return X
+        idx = torch.arange(A.shape[0], device=A.device)
+        A[idx, idx] += jitter_scale
 
-        # logger.warning(f"Falling back to pinv for {tag}")
-        # X = torch.linalg.pinv(A + base_jitter * eye) @ B
-        return X # torch.nan_to_num(X)
+        X = torch.linalg.solve(A, B)
+        
+        return X 
             
     def compute_nu_pi(
             self, 
@@ -263,14 +375,13 @@ class DistributionMatcher:
             phi_sub_next_obs: torch.Tensor, 
             psi_sub_obs_action: torch.Tensor,
             psi_all_obs_action: torch.Tensor,
-            K: torch.Tensor,
             M: torch.Tensor,
             alpha: torch.Tensor,
             sink_norm: float
         ) -> torch.Tensor:
         """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
        
-        N = K.shape[0]
+        N = psi_all_obs_action.shape[0]
         subsamples = psi_sub_obs_action.shape[0]
        
         # α̃ augmented to be [α; 1]
@@ -288,14 +399,6 @@ class DistributionMatcher:
             ) # [m, n]
        
         # ** COMPUTATION STEP **
-        # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
-        # A = K + self.lambda_reg * torch.eye(N, device=self.device)
-        # L = torch.linalg.cholesky(A)
-        # BM = torch.cholesky_solve(M, L)
-
-
-        # BM = B @ M
-        
         # M̃ augmented to be [M 0; 0 1]
         tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
         tilde_BM[:-1, :-1] = BM
@@ -320,21 +423,6 @@ class DistributionMatcher:
         occupancy = (1 - self.gamma) *  tilde_phi_sub_next_obs_transposed @ inv_term
         # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
         return occupancy
-    
-    def compute_BM(
-            self,
-            M: torch.Tensor,  # [N, N] forward operator
-            psi: torch.Tensor  # [N, d*|A|] state-action features
-        ) -> torch.Tensor:
-        """Compute BM = (ψψᵀ + λI)⁻¹M."""
-        N = psi.shape[0]
-        identity = torch.eye(N, device=self.device)
-        gram_matrix = psi @ psi.T + self.lambda_reg * identity
-
-        
-        L = torch.linalg.cholesky(gram_matrix)
-        BM = torch.cholesky_solve(M, L)
-        return BM
     
     def compute_gradient_coefficient(
             self, 
@@ -421,10 +509,6 @@ class DistributionMatcher:
         sink_state[-1] = sink_norm
 
         # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        # upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
-        # tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
-        # tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
-
         tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
         upper_left_sub = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
         tilde_phi_sub_next_obs_transposed[:upper_left_sub.shape[0], :upper_left_sub.shape[1]] = upper_left_sub
@@ -433,10 +517,6 @@ class DistributionMatcher:
 
         tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
         tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
-
-        # tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
-        # tilde_phi_all_next_obs = tilde_phi_all_next_obs_transposed.T
-        # assert torch.all(tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] == sink_state), "Last column of tilde_phi_all_next_obs should be sink_state"
 
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
@@ -450,6 +530,7 @@ class DistributionMatcher:
         ) # [m, n]
         tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
         tilde_B[:-1, :-1] = B
+        tilde_B[-1, -1] = 1.0
 
         # M̃ augmented to be [M 0; 0 1]
         tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
@@ -461,13 +542,6 @@ class DistributionMatcher:
         tilde_alpha[:-1] = alpha
 
         # ** COMPUTATION STEP **
-        # Compute Cholesky decomposition and solve: BM = A⁻¹M
-        # L = torch.linalg.cholesky(A)
-        # BM = torch.cholesky_solve(M, L)
-        # tilde_B_tilde_M = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
-        # tilde_B_tilde_M[:-1, :-1] = BM
-        # tilde_B_tilde_M[-1, -1] = 1.0
-
         # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
         # Using the precomputed terms and solves:
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
@@ -480,9 +554,292 @@ class DistributionMatcher:
         )
 
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
-        # Solve Ãᵀ x = left_term_without_b using Cholesky
-        # L_T = torch.linalg.cholesky(tilde_A.T)
-        # left_term = torch.cholesky_solve(symmetric_term, L_T)
+        left_term = tilde_B.T @ symmetric_term
+
+        
+        # Right term: Φ̃ᵀ(I - γB̃M̃)⁻¹ α̃
+        right_term = symmetric_term.T @ tilde_alpha
+        gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
+      
+        return gradient
+
+    def compute_nu_pi_nystrom_memory_efficient(
+            self, 
+            phi_all_obs: torch.Tensor,
+            phi_sub_next_obs: torch.Tensor, 
+            psi_sub_obs_action: torch.Tensor,
+            psi_all_obs_action: torch.Tensor,
+            H: torch.Tensor,
+            pi: torch.Tensor,
+            E: torch.Tensor,
+            alpha: torch.Tensor,
+            sink_norm: float
+        ) -> torch.Tensor:
+        """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
+        N = psi_all_obs_action.shape[0]
+
+        m = psi_sub_obs_action.shape[0]
+
+        d = phi_sub_next_obs.shape[1]
+
+        # α̃ = [α; 1], but avoid torch.ones
+        alpha_tilde = torch.empty(
+            (alpha.shape[0] + 1, 1),
+            device=alpha.device,
+            dtype=alpha.dtype,
+        )
+        alpha_tilde[:-1] = alpha
+        alpha_tilde[-1] = 1.0
+
+        # Nyström matrices
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T
+        A_nystrom = K_nm.T @ K_nm
+        A_nystrom.add_(K_mm, alpha=self.lambda_reg * N)
+
+        # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
+        M = H*(E@pi.T) # [n, m]
+
+        BM = self._regularized_solve(
+            A_nystrom,
+            K_nm.T @ M,
+            tag="A_nystrom (compute_nu_pi_nystrom)",
+
+        )
+
+        # release big temporaries earlier
+        del K_nm, K_mm, A_nystrom
+
+        # Build S = I - gamma * tilde_BM directly
+        # tilde_BM = [BM 0]
+        #            [0  1]
+
+        S = torch.empty(
+            (BM.shape[0] + 1, BM.shape[1] + 1),
+            device=BM.device,
+            dtype=BM.dtype,
+
+        )
+
+        S[:-1, :-1] = BM
+        S[:-1, :-1].mul_(-self.gamma)
+        idx = torch.arange(BM.shape[0], device=BM.device)
+        S[idx, idx] += 1.0
+        S[:-1, -1] = 0.0
+        S[-1, :-1] = 0.0
+        S[-1, -1] = 1.0 - self.gamma
+
+        inv_term = self._regularized_solve_memory_efficient(
+            S,
+            alpha_tilde,
+            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
+        )
+
+        del S, alpha_tilde, BM
+
+        # Build Φ̃ᵀ directly
+        tilde_phi_T = torch.zeros(
+            (d + 1, m + 1),
+            device=phi_sub_next_obs.device,
+            dtype=phi_sub_next_obs.dtype,
+        )
+
+        tilde_phi_T[:d, :m] = phi_sub_next_obs.T
+        # sink_state is zero except at index d-1, so only this row changes
+        tilde_phi_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
+        tilde_phi_T[d - 1, m] = sink_norm
+        occupancy = tilde_phi_T @ inv_term
+        occupancy.mul_(1 - self.gamma)
+
+        return occupancy
+
+        N = psi_all_obs_action.shape[0]
+        subsamples = psi_sub_obs_action.shape[0]
+       
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N* K_mm # [m, m]
+
+        BM = self._regularized_solve(
+            A_nystrom,
+            K_nm.T@M,
+            tag="A_nystrom (compute_nu_pi_nystrom)"
+            ) # [m, n]
+       
+        # ** COMPUTATION STEP **
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_BM[:-1, :-1] = BM
+        tilde_BM[-1, -1] = 1.0
+
+        inv_term = self._regularized_solve(
+            torch.eye(subsamples+1, device=self.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM,
+            tilde_alpha,
+            tag="(I - gamma*tilde_BM) (compute_nu_pi_nystrom)",
+        )
+        
+        sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
+        sink_state[-1] = sink_norm
+
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        upper_left = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
+        tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
+        tilde_phi_sub_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
+        tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_sub_next_obs_transposed[-1, -1] = 1.0 # TODO patch 0.1
+
+        occupancy = (1 - self.gamma) *  tilde_phi_sub_next_obs_transposed @ inv_term
+        # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
+        return occupancy
+    
+    def compute_gradient_coefficient_nystrom_memory_efficient(
+            self, 
+            phi_all_obs: torch.Tensor,
+            phi_all_next_obs:torch.Tensor, 
+            phi_sub_next_obs:torch.Tensor,
+            psi_all_obs_action:torch.Tensor, 
+            psi_sub_obs_action:torch.Tensor,
+            H: torch.Tensor,
+            pi: torch.Tensor,
+            E: torch.Tensor,
+            alpha:torch.Tensor,
+            sink_norm: float
+        ) -> torch.Tensor:
+        """Compute gradient coefficient for policy update."""
+        # Identity matrix
+        # I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
+        N = psi_all_obs_action.shape[0]
+        m = phi_sub_next_obs.shape[0]
+        d = phi_sub_next_obs.shape[1]
+
+        # Build Phi-tilde directly, without upper_left_sub temporary
+        tilde_phi_sub_next_obs_T = torch.zeros(
+
+            (d + 1, m + 1),
+
+            device=phi_sub_next_obs.device,
+
+            dtype=phi_sub_next_obs.dtype,
+
+        )
+        tilde_phi_sub_next_obs_T[:d, :m] = phi_sub_next_obs.T
+        tilde_phi_sub_next_obs_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
+        tilde_phi_sub_next_obs_T[d - 1, m] = sink_norm
+        tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_T.T
+
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state[-1] = sink_norm
+
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
+        A_nystrom = K_nm.T @ K_nm
+        A_nystrom.add_(K_mm, alpha=self.lambda_reg * N)  # In-place addition for memory efficiency
+
+        B = self._regularized_solve_memory_efficient(
+            A_nystrom,
+            K_nm.T,
+            tag="A_nystrom (compute_gradient_coefficient_nystrom)"
+        ) # [m, n]
+        # H = self._phi_all_obs @ self._phi_sub_next.T
+        # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
+        M = H*(E@pi.T) # [n, m]
+        BM = B @ M
+
+        # Build S = I - gamma * tilde_B * tilde_M directly
+        S = torch.empty(
+
+            (BM.shape[0] + 1, BM.shape[1] + 1),
+
+            device=BM.device,
+
+            dtype=BM.dtype,
+
+        )
+
+        S[:-1, :-1] = BM
+        S[:-1, :-1].mul_(-self.gamma)
+        idx = torch.arange(BM.shape[0], device=BM.device)
+        S[idx, idx] += 1.0
+        S[:-1, -1] = 0.0
+        S[-1, :-1] = 0.0
+        S[-1, -1] = 1.0 - self.gamma
+
+        symmetric_term = self._regularized_solve_memory_efficient(
+            S.T,
+            tilde_phi_sub_next_obs,
+            tag="(I - gamma*tilde_B_tilde_M)^T",
+
+        )   
+
+        # left_term = tilde_B.T @ symmetric_term, without tilde_B
+        left_term = torch.empty(
+            (B.shape[1] + 1, symmetric_term.shape[1]),
+            device=symmetric_term.device,
+            dtype=symmetric_term.dtype,
+        )
+        left_term[:-1] = B.T @ symmetric_term[:-1]
+        left_term[-1:] = symmetric_term[-1:]
+
+        # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
+
+        right_term = symmetric_term[:-1].T @ alpha + symmetric_term[-1:].T
+
+        gradient = left_term @ right_term
+
+        gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
+
+        return gradient
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        # tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
+        # # upper_left_sub = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
+        # upper_left_sub = phi_sub_next_obs.T - sink_state @ psi_sub_obs_action.sum(dim=1).unsqueeze(0)  # [d, m]
+        # tilde_phi_sub_next_obs_transposed[:upper_left_sub.shape[0], :upper_left_sub.shape[1]] = upper_left_sub
+
+        # assert sink_state.shape[0] == upper_left_sub.shape[0], "Sink state and upper left matrix row size mismatch"
+
+        # tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
+
+        # Ã augmented to be [A 0; 0 1]
+        # Symmetric positive definite matrix A = ψψᵀ + λI
+        K_nm = psi_all_obs_action @ psi_sub_obs_action.T # [n, m]
+        K_mm = psi_sub_obs_action @ psi_sub_obs_action.T # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
+        B = self._regularized_solve(
+            A_nystrom,
+            K_nm.T,
+            tag="A_nystrom (compute_gradient_coefficient_nystrom)",
+        ) # [m, n]
+        tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
+        tilde_B[:-1, :-1] = B
+        tilde_B[-1, -1] = 1.0
+
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
+        tilde_M[:-1, :-1] = M
+        tilde_M[-1, -1] = 1.0
+
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        # ** COMPUTATION STEP **
+        # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
+        # Using the precomputed terms and solves:
+        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
+        tilde_B_tilde_M = tilde_B @ tilde_M
+        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
+        symmetric_term = self._regularized_solve(
+            (I_n_plus1 - self.gamma * tilde_B_tilde_M).T,
+            tilde_phi_sub_next_obs,
+            tag="(I - gamma*tilde_B_tilde_M)^T",
+        )
+
+        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
         left_term = tilde_B.T @ symmetric_term
 
         
@@ -579,13 +936,13 @@ class FixedRandomEncoder(nn.Module):
         """
         with torch.no_grad():
             if self.obs_type == 'pixels':
-                obs = obs.double() / 255.0
+                obs = obs.to(dtype=torch.get_default_dtype()) / 255.0
                 h = self.conv(obs)
                 h = self.adaptive_pool(h)
                 h = h.reshape(h.size(0), -1)
             else:
                 # Flatten state to [B, state_dim]
-                obs = obs.double()
+                obs = obs.to(dtype=torch.get_default_dtype())
                 h = obs.reshape(obs.size(0), -1)
                 h = self.mlp(h)
             return h
@@ -1314,67 +1671,6 @@ class EmbeddingDistributionVisualizerV2:
                 nu_init = torch.ones(self.n_states, 1) / self.n_states
         return nu_init.flatten().cpu().numpy()
     
-    def _compute_current_distribution(self) -> np.ndarray:
-        """Compute current occupancy distribution for all states."""
-        if self.agent.gradient_coeff is None:
-            return np.ones(self.n_states) / self.n_states
-        
-        if self.agent.obs_type == 'pixels':
-            # Use pre-rendered images
-            enc_all_states = self.agent.aug_and_encode(self._prerendered_states, project=True).detach()
-        else:
-            # Use one-hot encodings
-            enc_all_states = self.agent.encoder(self.all_state_ids_one_hot).detach()
-        enc_all_states_cpu = enc_all_states.detach().cpu()
-        
-        with torch.no_grad():
-            if self.agent.subsamples is not None and hasattr(self.agent, '_phi_sub_next'):
-                nu_current = self.agent.distribution_matcher.compute_nu_pi_nystrom(
-                    phi_sub_next_obs=self.agent._phi_sub_next,
-                    psi_sub_obs_action=self.agent._psi_sub,
-                    psi_all_obs_action=self.agent._psi_all,
-                    K=self.agent.K_sub,
-                    M=self.agent.sub_H * (self.agent.E @ self.agent.pi.T),
-                    alpha=self.agent._sub_alpha,
-                    sink_norm=utils.schedule(self.agent.sink_schedule, 0)
-                )
-                support_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
-            else:
-                # Add augmented dimension
-                zero_col = torch.zeros(*enc_all_states.shape[:-1], 1, device=enc_all_states.device)
-                enc_all_states_aug = torch.cat([enc_all_states, zero_col], dim=-1)
-
-                H = enc_all_states_aug @ self.agent._phi_all_obs.T
-                pi_all = self.agent._policy_from_H(H)
-                M = H * (self.agent.E @ pi_all.T)
-
-                alpha_all = torch.zeros(self.n_states, 1, device=enc_all_states.device)
-                alpha_all[0] = 1.0
-
-                nu_current = self.agent.distribution_matcher.compute_nu_pi(
-                    phi_all_next_obs=self.agent._phi_all_next,
-                    psi_all_obs_action=self.agent._psi_all,
-                    K=self.agent.K,
-                    M=M,
-                    alpha=alpha_all,
-                    sink_norm=utils.schedule(self.agent.sink_schedule, 0)
-                )
-                support_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
-
-        support_weights = nu_current[:-1].flatten().detach().cpu().numpy()
-        state_dist = np.zeros(self.n_states, dtype=np.float32)
-
-        for support_embedding, weight in zip(support_embeddings, support_weights):
-            similarities = F.cosine_similarity(
-                support_embedding.unsqueeze(0),
-                enc_all_states_cpu,
-                dim=1
-            )
-            closest_state = torch.argmax(similarities).item()
-            state_dist[closest_state] += float(weight)
-
-        state_dist = state_dist / (state_dist.sum() + 1e-10)
-        return state_dist
     
     def render_observation_from_state(self, state_idx: int) -> np.ndarray:
         """
@@ -2046,8 +2342,15 @@ class RoverAgent:
                  pmd_eta_max: float = 1e3,
                  pmd_backtrack_factor: float = 0.5,
                  pmd_backtrack_max_trials: int = 8,
+                 compute_dtype: str = "float32",
+                 encoded_fifo_capacity: Optional[int] = None,
+                 encoded_fifo_encode_batch_size: int = 4096,
+                 encoded_fifo_cuda_oom_splits: int = 4,
                  device: str = "cpu",
                  ):
+
+        self.compute_dtype = _resolve_torch_dtype(compute_dtype)
+        torch.set_default_dtype(self.compute_dtype)
 
         self.n_states = obs_shape[0]
         self.n_actions = action_shape[0]
@@ -2099,6 +2402,24 @@ class RoverAgent:
         self.lambda_reg = lambda_reg
         self.image_channels = 1 if self.grayscale else 3
         self.subsamples = subsamples
+        min_fifo_capacity = max(
+            int(self.batch_size_actor),
+            int(self.subsamples) if self.subsamples is not None else 0,
+            1,
+        )
+        if encoded_fifo_capacity is None:
+            encoded_fifo_capacity = min_fifo_capacity
+        self.encoded_fifo_capacity = int(encoded_fifo_capacity)
+        if self.encoded_fifo_capacity < min_fifo_capacity:
+            utils.ColorPrint.yellow(
+                f"encoded_fifo_capacity={self.encoded_fifo_capacity} is smaller than "
+                f"the actor sample size; raising it to {min_fifo_capacity}."
+            )
+            self.encoded_fifo_capacity = min_fifo_capacity
+        self.encoded_fifo_encode_batch_size = int(encoded_fifo_encode_batch_size)
+        self.encoded_fifo_cuda_oom_splits = int(encoded_fifo_cuda_oom_splits)
+        self._encoded_actor_fifo = EncodedTransitionFIFO(self.encoded_fifo_capacity)
+        self._encoded_fifo_replay_marker = None
         
         # Track unique state-action pairs from previous dataset
         self._previous_unique_pairs = set()
@@ -2329,7 +2650,7 @@ class RoverAgent:
     def _policy_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Closed-form PMD policy from logits."""
         logits = self._policy_logits_from_H(H, coeff=coeff)
-        return torch.softmax(-logits, dim=1, dtype=torch.float32)
+        return torch.softmax(-logits, dim=1, dtype=logits.dtype)
     
     
     def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
@@ -2469,13 +2790,15 @@ class RoverAgent:
         return metrics
     
 
-    def update_actor(self, obs, action, next_obs, step, rewards=None):
+    def update_actor(self, obs=None, action=None, next_obs=None, step=None, rewards=None, encoded_full=None):
         """Update policy using Projected Mirror Descent."""
         metrics = dict()
 
-        # Compute features augmented
-        self._sync_policy_encoder()
-        self._cache_features(obs, action, next_obs, encoder=self.policy_encoder)
+        if encoded_full is None:
+            self._sync_policy_encoder()
+            self._cache_features(obs, action, next_obs, encoder=self.policy_encoder)
+        else:
+            self._cache_encoded_features(encoded_full)
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -2599,6 +2922,7 @@ class RoverAgent:
             metrics['actor_loss'] = actor_loss
             metrics['actor_eta'] = float(self.current_eta)
             metrics['actor_best_loss'] = float(best_loss)
+            metrics['sink_norm'] = float(sink_norm)
    
         return metrics
 
@@ -2611,44 +2935,49 @@ class RoverAgent:
                              sub_obs=None,
                              sub_action=None,
                              sub_next_obs=None,
-                             sub_rewards=None):
+                             sub_rewards=None,
+                             encoded_full=None,
+                             encoded_sub=None):
         """Update policy using Projected Mirror Descent and Nystrom Approximation."""
         metrics = dict()
-        if sub_obs is None or sub_action is None or sub_next_obs is None:
+        if encoded_full is not None or encoded_sub is not None:
+            if encoded_full is None or encoded_sub is None:
+                raise ValueError("Nyström actor update requires both encoded_full and encoded_sub.")
+            self._cache_encoded_features(encoded_full, encoded_sub=encoded_sub)
+        elif sub_obs is None or sub_action is None or sub_next_obs is None:
             raise ValueError("Nyström actor update requires subsampled observations, actions, and next observations.")
-
-        # Compute features augmented
-        self._sync_policy_encoder()
-        self._cache_features(
-            full_obs, 
-            full_action, 
-            full_next_obs, 
-            encoder=self.policy_encoder, 
-            sub_obs=sub_obs, 
-            sub_action=sub_action,
-            sub_next_obs=sub_next_obs)
+        else:
+            self._sync_policy_encoder()
+            self._cache_features(
+                full_obs,
+                full_action,
+                full_next_obs,
+                encoder=self.policy_encoder,
+                sub_obs=sub_obs,
+                sub_action=sub_action,
+                sub_next_obs=sub_next_obs,
+            )
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
-        self.sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
-        self.K = self._psi_all @ self._psi_all.T  # [n, n]
+        sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
 
         sink_norm = utils.schedule(self.sink_schedule, step)
-        self.pi = self._policy_from_H(self.sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
+        self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
         # M = self.H*(self.E@self.pi.T) # [n, ]
-        sub_M = self.sub_H*(self.E@self.pi.T) # [n, m]
 
-        nu_pi = self.distribution_matcher.compute_nu_pi_nystrom(
+        nu_pi = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                    phi_all_obs=self._phi_all_obs,
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
-                    K= self.K,
-                    M = sub_M,
+                    H = sub_H,
+                    pi = self.pi,
+                    E = self.E,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
                 )
@@ -2661,12 +2990,15 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom(
-                M=sub_M, 
+            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient(
+                phi_all_obs=self._phi_all_obs,
                 phi_all_next_obs = self._phi_all_next,
                 phi_sub_next_obs = self._phi_sub_next,
                 psi_all_obs_action = self._psi_all,
                 psi_sub_obs_action = self._psi_sub,
+                H = sub_H,
+                pi=self.pi,
+                E=self.E,
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm
             )           
@@ -2697,17 +3029,20 @@ class RoverAgent:
                 eta_t = base_eta
 
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
-            candidate_pi = self._policy_from_H(self.sub_H.T, coeff=candidate_coeff)
-            candidate_M = self.sub_H * (self.E @ candidate_pi.T)
-            candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
+            candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
+            # candidate_M = sub_H * (self.E @ candidate_pi.T)
+            candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                    phi_all_obs=self._phi_all_obs,
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
                     psi_all_obs_action = self._psi_all,
-                    K= self.K,
-                    M =candidate_M,
+                    H = sub_H,
+                    pi = candidate_pi,
+                    E = self.E,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm 
                 )
+            
             candidate_loss = torch.linalg.norm(candidate_nu) ** 2
 
             if self.pmd_eta_mode == "backtracking":
@@ -2717,17 +3052,19 @@ class RoverAgent:
                     trial_eta *= self.pmd_backtrack_factor
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
-                    candidate_pi = self._policy_from_H(self.sub_H.T, coeff=candidate_coeff)
-                    candidate_M = self.sub_H * (self.E @ candidate_pi.T)
-                    candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom(
-                        phi_sub_next_obs = self._phi_sub_next,
-                        psi_sub_obs_action = self._psi_sub,
-                        psi_all_obs_action = self._psi_all,
-                        K= self.K,
-                        M = candidate_M,
-                        alpha=self._sub_alpha,
-                        sink_norm=sink_norm 
-                    )
+                    candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
+                    # candidate_M = sub_H * (self.E @ candidate_pi.T)
+                    candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                            phi_all_obs=self._phi_all_obs,
+                            phi_sub_next_obs = self._phi_sub_next,
+                            psi_sub_obs_action = self._psi_sub,
+                            psi_all_obs_action = self._psi_all,
+                            H = sub_H,
+                            pi = candidate_pi,
+                            E = self.E,
+                            alpha=self._sub_alpha,
+                            sink_norm=sink_norm 
+                        )                    
                     candidate_loss = torch.linalg.norm(candidate_nu) ** 2
                     trial += 1
                 eta_t = trial_eta
@@ -2736,7 +3073,6 @@ class RoverAgent:
             self.gradient_coeff = candidate_coeff
             prev_gradient_coeff = grad_update.clone()
             self.pi = candidate_pi
-            sub_M = candidate_M
             actor_loss = candidate_loss
 
             if actor_loss < best_loss:
@@ -2757,6 +3093,7 @@ class RoverAgent:
             metrics['actor_loss'] = actor_loss
             metrics['actor_eta'] = float(self.current_eta)
             metrics['actor_best_loss'] = float(best_loss)
+            metrics['sink_norm'] = float(sink_norm)
    
         return metrics
 
@@ -2825,7 +3162,7 @@ class RoverAgent:
             self.E = F.one_hot(
                 action, 
                 self.n_actions,
-            ).reshape(-1, self.n_actions).to(torch.float32).to(self.device)
+            ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
 
             # ** AUGMENTATION STEP **
             # ψ and Φ are augmented with an additional zero dimension
@@ -2858,274 +3195,308 @@ class RoverAgent:
 
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
-    def _load_actor_batch_from_replay_buffer(self, replay_buffer, smart_subsample=False):
+    def _append_zero_feature_column(self, tensor):
+        zeros_col = torch.zeros(*tensor.shape[:-1], 1, device=tensor.device, dtype=tensor.dtype)
+        return torch.cat([tensor, zeros_col], dim=-1)
 
-        if self.subsamples is None:
-            actor_batch = replay_buffer.get_all_data(last_n=self.batch_size_actor, first=True)
-            obs_actor_full, action_actor_full, reward_actor_full, _, next_obs_actor_full = utils.to_torch(
-                actor_batch[:5], self.device
-            )
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-            )
-        elif smart_subsample and hasattr(replay_buffer, 'get_all_data_matrix'):
-            actor_batch = replay_buffer.get_all_data_matrix(last_n=self.batch_size_actor)
-            obs_actor_matrix, action_actor_matrix, reward_actor_matrix, _, next_obs_actor_matrix = utils.to_torch(
-                actor_batch[:5], self.device
-            )
-            obs_actor_full = self._flatten_episode_matrix(obs_actor_matrix)
-            action_actor_full = self._flatten_episode_matrix(action_actor_matrix)
-            next_obs_actor_full = self._flatten_episode_matrix(next_obs_actor_matrix)
-            reward_actor_full = self._flatten_episode_matrix(reward_actor_matrix)
+    def _cache_encoded_features(self, encoded_full, encoded_sub=None):
+        with torch.no_grad():
+            self._phi_all_obs = self._append_zero_feature_column(encoded_full["phi_obs"])
+            self._phi_all_next = self._append_zero_feature_column(encoded_full["phi_next"])
+            self._psi_all = self._append_zero_feature_column(encoded_full["psi"])
 
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                (obs_actor_matrix, action_actor_matrix, next_obs_actor_matrix, reward_actor_matrix),
-            )
-        else:
-            actor_batch = replay_buffer.get_all_data(last_n=self.batch_size_actor, first=True)
-            obs_actor_full, action_actor_full, reward_actor_full, _, next_obs_actor_full = utils.to_torch(
-                actor_batch[:5], self.device
-            )
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-            )
+            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self._phi_all_next.dtype)
+            self._alpha[0] = 1.0
 
-    def _load_actor_batch_from_replay_iter(self, replay_iter, obs, action, next_obs, reward):
-        num_batches_needed = self.batch_size_actor // self.batch_size
-        obs_list = [obs]
-        action_list = [action]
-        next_obs_list = [next_obs]
-        reward_list = [reward.reshape(-1, 1)]
+            self.E = encoded_full["E"].to(dtype=self.compute_dtype, device=self.device)
 
-        for _ in range(num_batches_needed - 1):
+            if encoded_sub is not None:
+                self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"])
+                self._phi_sub_next = self._append_zero_feature_column(encoded_sub["phi_next"])
+                self._psi_sub = self._append_zero_feature_column(encoded_sub["psi"])
+
+                self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
+                self._sub_alpha[0] = 1.0
+
+            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
+
+    def _make_actor_batch(self, obs, action, next_obs, reward):
+        return (
+            obs,
+            action,
+            next_obs,
+            reward.reshape(obs.shape[0], -1),
+        )
+
+    def _slice_actor_batch(self, actor_batch, index):
+        return tuple(field[index] for field in actor_batch)
+
+    def _concat_actor_batches(self, actor_batches, max_samples):
+        if not actor_batches:
+            raise RuntimeError("No replay samples available for actor update")
+        actor_batch = tuple(
+            torch.cat([batch[field_idx] for batch in actor_batches], dim=0)
+            for field_idx in range(len(actor_batches[0]))
+        )
+        return self._slice_actor_batch(actor_batch, slice(0, max_samples))
+
+    def _load_first_actor_transition(self, replay_buffer=None, fallback_actor_batch=None):
+        if replay_buffer is not None and hasattr(replay_buffer, "get_first_transition"):
+            first_batch = replay_buffer.get_first_transition()
+            first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(
+                first_batch[:5],
+                self.device,
+            )
+            return self._make_actor_batch(first_obs, first_action, first_next_obs, first_reward)
+
+        if fallback_actor_batch is None:
+            return None
+        return self._slice_actor_batch(fallback_actor_batch, slice(0, 1))
+
+    def _replace_first_actor_transition(self, actor_batch, first_actor_transition):
+        if first_actor_transition is None:
+            return actor_batch
+
+        actor_batch = tuple(field.clone() for field in actor_batch)
+        for field_idx, first_field in enumerate(first_actor_transition):
+            actor_batch[field_idx][:1] = first_field.to(actor_batch[field_idx].device)
+        return actor_batch
+
+    def _is_cuda_oom(self, error):
+        return (
+            isinstance(error, RuntimeError)
+            and "out of memory" in str(error).lower()
+            and "cuda" in str(error).lower()
+        )
+
+    def _encoded_batch_size(self, encoded):
+        return next(iter(encoded.values())).shape[0]
+
+    def _concat_encoded_batches(self, encoded_batches):
+        return {
+            key: torch.cat([batch[key] for batch in encoded_batches], dim=0)
+            for key in encoded_batches[0].keys()
+        }
+
+    def _slice_raw_transition_batch(self, transitions, index):
+        return tuple(field[index] for field in transitions)
+
+    def _encode_actor_transition_batch(self, transitions):
+        obs, action, reward, _, next_obs = utils.to_torch(transitions[:5], self.device)
+        reward = reward.reshape(obs.shape[0], -1)
+        with torch.no_grad():
+            phi_obs = self._encode_with_module(self.policy_encoder, obs, project=True)
+            phi_next = self._encode_with_module(self.policy_encoder, next_obs, project=True)
+            psi = self._encode_state_action(phi_obs, action)
+            action_onehot = F.one_hot(
+                action.long(),
+                self.n_actions,
+            ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
+        return {
+            "phi_obs": phi_obs,
+            "phi_next": phi_next,
+            "psi": psi,
+            "E": action_onehot,
+            "reward": reward,
+        }
+
+    def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
+        splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
+        batch_size = transitions[0].shape[0]
+        try:
+            return self._encode_actor_transition_batch(transitions)
+        except RuntimeError as error:
+            if not self._is_cuda_oom(error) or splits_left <= 0 or batch_size <= 1:
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            midpoint = batch_size // 2
+            left = self._slice_raw_transition_batch(transitions, slice(0, midpoint))
+            right = self._slice_raw_transition_batch(transitions, slice(midpoint, None))
+            encoded_left = self._encode_actor_transition_batch_with_retries(left, splits_left - 1)
+            encoded_right = self._encode_actor_transition_batch_with_retries(right, splits_left - 1)
+            return self._concat_encoded_batches([encoded_left, encoded_right])
+
+    def _insert_first_transition_if_available(self, replay_buffer):
+        if self._encoded_actor_fifo.has_first:
+            return
+        if replay_buffer is None or not hasattr(replay_buffer, "get_first_transition"):
+            return
+        try:
+            first_transition = replay_buffer.get_first_transition()
+        except RuntimeError:
+            return
+        encoded = self._encode_actor_transition_batch_with_retries(first_transition)
+        self._encoded_actor_fifo.add(np.array([0], dtype=np.int64), encoded)
+
+    def _update_encoded_actor_fifo(self, replay_buffer):
+        if replay_buffer is None or not hasattr(replay_buffer, "get_new_transitions_since"):
+            return False
+
+        self._sync_policy_encoder()
+        inserted = 0
+        encode_batch_size = max(1, self.encoded_fifo_encode_batch_size)
+
+        while True:
+            transition_ids, transitions = replay_buffer.get_new_transitions_since(
+                self._encoded_fifo_replay_marker,
+                limit=encode_batch_size,
+            )
+            if transition_ids is None:
+                break
+
+            # Encode only the new replay-buffer transitions, then immediately
+            # acknowledge them so raw pending data can be released by storage.
+            encoded = self._encode_actor_transition_batch_with_retries(transitions)
+            self._encoded_actor_fifo.add(transition_ids, encoded)
+            self._encoded_fifo_replay_marker = int(transition_ids[-1])
+            if hasattr(replay_buffer, "mark_transitions_encoded"):
+                replay_buffer.mark_transitions_encoded(self._encoded_fifo_replay_marker)
+            inserted += int(len(transition_ids))
+
+        self._insert_first_transition_if_available(replay_buffer)
+        return inserted > 0 or len(self._encoded_actor_fifo) > 0
+
+    def _sample_encoded_actor_data(self, size, include_first):
+        encoded = self._encoded_actor_fifo.sample(
+            int(size),
+            self.device,
+            include_first=include_first,
+        )
+        return encoded, encoded.get("reward")
+
+    def _load_actor_batch_from_replay_iter(
+            self,
+            replay_iter,
+            obs,
+            action,
+            next_obs,
+            reward,
+            max_samples,
+            replay_buffer=None):
+        if max_samples <= 0:
+            raise ValueError("max_samples must be positive")
+
+        actor_batches = [self._make_actor_batch(obs, action, next_obs, reward)]
+        collected = obs.shape[0]
+
+        while collected < max_samples:
             batch = next(replay_iter)
             obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
-            obs_list.append(obs_b)
-            action_list.append(action_b)
-            next_obs_list.append(next_obs_b)
-            reward_list.append(reward_b.reshape(-1, 1))
+            actor_batch = self._make_actor_batch(obs_b, action_b, next_obs_b, reward_b)
+            actor_batches.append(actor_batch)
+            collected += obs_b.shape[0]
 
-        obs_actor_full = torch.cat(obs_list, dim=0)
-        action_actor_full = torch.cat(action_list, dim=0)
-        next_obs_actor_full = torch.cat(next_obs_list, dim=0)
-        reward_actor_full = torch.cat(reward_list, dim=0)
-        return obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full
+        actor_batch = self._concat_actor_batches(actor_batches, max_samples)
+        first_actor_transition = self._load_first_actor_transition(
+            replay_buffer=replay_buffer,
+            fallback_actor_batch=actor_batch,
+        )
+        return self._replace_first_actor_transition(actor_batch, first_actor_transition)
 
-    def _flatten_episode_matrix(self, field_matrix):
-        if field_matrix.ndim < 2:
-            raise ValueError("Expected an episode matrix with shape [num_episodes, episode_length, ...].")
-        return field_matrix.reshape(-1, *field_matrix.shape[2:])
-
-    def _maybe_subsample_actor_batch(self, obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full):
-        obs_actor_subsampled = None
-        action_actor_subsampled = None
-        next_obs_actor_subsampled = None
-        reward_actor_subsampled = None
-
-        if self.subsamples is None:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                obs_actor_subsampled,
-                action_actor_subsampled,
-                next_obs_actor_subsampled,
-                reward_actor_subsampled,
-            )
-
-        total_samples = obs_actor_full.shape[0]
-        if self.subsamples > total_samples:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-            )
-            
-        if self.subsamples <= 0:
+    def _load_actor_subsample_from_replay_iter(
+            self,
+            replay_iter,
+            max_samples,
+            replay_buffer=None,
+            fallback_actor_batch=None):
+        if max_samples <= 0:
             raise ValueError("subsamples must be positive when provided")
 
-        if self.subsamples == 1:
-            subsample_indices = torch.zeros(1, device=obs_actor_full.device, dtype=torch.long)
-        else:
-            remaining_indices = torch.randperm(total_samples - 1, device=obs_actor_full.device)[:self.subsamples - 1] + 1
-            subsample_indices = torch.cat([
-                torch.zeros(1, device=obs_actor_full.device, dtype=torch.long),
-                remaining_indices,
-            ])
-
-        obs_actor_subsampled = obs_actor_full[subsample_indices]
-        action_actor_subsampled = action_actor_full[subsample_indices]
-        next_obs_actor_subsampled = next_obs_actor_full[subsample_indices]
-        reward_actor_subsampled = reward_actor_full[subsample_indices]
-
-        return (
-            obs_actor_full,
-            action_actor_full,
-            next_obs_actor_full,
-            reward_actor_full,
-            obs_actor_subsampled,
-            action_actor_subsampled,
-            next_obs_actor_subsampled,
-            reward_actor_subsampled,
+        first_actor_transition = self._load_first_actor_transition(
+            replay_buffer=replay_buffer,
+            fallback_actor_batch=fallback_actor_batch,
         )
-    
-    def _maybe_smart_subsample_actor_batch(
-        self,
-        obs_actor_full,
-        action_actor_full,
-        next_obs_actor_full,
-        reward_actor_full,
-        actor_matrix_data=None,
-    ):
-        if actor_matrix_data is None:
-            return self._maybe_subsample_actor_batch(
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
+        if first_actor_transition is None:
+            raise RuntimeError("Could not build a subsample with the first transition in position 0")
+        if max_samples == 1:
+            return first_actor_transition
+
+        actor_batches = []
+        collected = 0
+        remaining_samples = max_samples - 1
+
+        while collected < remaining_samples:
+            batch = next(replay_iter)
+            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+            actor_batch = self._make_actor_batch(obs_b, action_b, next_obs_b, reward_b)
+
+            if actor_batch[0].shape[0] > 1:
+                actor_batch = self._slice_actor_batch(actor_batch, slice(1, None))
+            if actor_batch[0].shape[0] == 0:
+                continue
+            actor_batches.append(actor_batch)
+            collected += actor_batch[0].shape[0]
+
+        sampled_actor_batch = self._concat_actor_batches(actor_batches, remaining_samples)
+        return self._concat_actor_batches(
+            [first_actor_transition, sampled_actor_batch],
+            max_samples,
+        )
+
+    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None):
+        if self._update_encoded_actor_fifo(replay_buffer):
+            if self.subsamples is None:
+                encoded_full, rewards = self._sample_encoded_actor_data(
+                    self.batch_size_actor,
+                    include_first=True,
+                )
+                return encoded_full, rewards, None, None
+
+            if self.subsamples <= 0:
+                raise ValueError("subsamples must be positive when provided")
+
+            encoded_full, rewards = self._sample_encoded_actor_data(
+                self.batch_size_actor,
+                include_first=self._encoded_actor_fifo.data_count == 0,
             )
+            encoded_sub, sub_rewards = self._sample_encoded_actor_data(
+                int(self.subsamples),
+                include_first=True,
+            )
+            return encoded_full, rewards, encoded_sub, sub_rewards
+
+        full_actor_batch = self._load_actor_batch_from_replay_iter(
+            replay_iter,
+            obs,
+            action,
+            next_obs,
+            reward,
+            max_samples=self.batch_size_actor,
+            replay_buffer=replay_buffer,
+        )
 
         if self.subsamples is None:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
-                None,
-                None,
-                None,
-            )
+            return (*full_actor_batch, None, None, None, None)
 
         if self.subsamples <= 0:
             raise ValueError("subsamples must be positive when provided")
 
-        (
-            obs_actor_matrix,
-            action_actor_matrix,
-            next_obs_actor_matrix,
-            reward_actor_matrix,
-        ) = actor_matrix_data
-
-        num_episodes, episode_length = obs_actor_matrix.shape[:2]
-        total_samples = num_episodes * episode_length
-        if self.subsamples > total_samples:
-            return (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-            )
-
-        if self.subsamples == 1:
-            episode_indices = torch.randint(num_episodes, (1,), device=obs_actor_matrix.device)
-            step_indices = torch.zeros(1, device=obs_actor_matrix.device, dtype=torch.long)
+        if self.subsamples >= full_actor_batch[0].shape[0]:
+            subsampled_actor_batch = full_actor_batch
         else:
-            t_max = episode_length - 1
-            max_value = (1-self.discount**t_max)/(1-self.discount)
-
-            episode_indices = torch.zeros(self.subsamples, dtype=torch.long, device=obs_actor_matrix.device)  
-            episode_indices[1:] = torch.randint(num_episodes, (self.subsamples - 1,), device=obs_actor_matrix.device)
-
-            step_indices = torch.zeros(self.subsamples, dtype=torch.long, device=obs_actor_matrix.device)  
-            # log_\gamma (x/(1-x))) gives a distribution that favors later timesteps, with the degree of bias controlled by the discount factor gamma.
-            m = torch.rand(size=(self.subsamples - 1,), device=obs_actor_matrix.device) * max_value
-            ind = torch.log(1-m*(1-self.discount))/torch.log(torch.tensor(self.discount, device=obs_actor_matrix.device)) - 1
-            step_indices[1:] = torch.ceil(ind)
-
-            # Assert that step indices are within bounds
-            if torch.any(step_indices[1:] < 0) or torch.any(step_indices[1:] >= episode_length):
-                utils.ColorPrint.red(f"Warning: Some step indices are out of bounds. Clamping to valid range. Values < 0 are: {step_indices[1:][step_indices[1:] < 0]}" )
-            step_indices[1:] = torch.clamp(step_indices[1:], 0, episode_length - 1)
-
-            # plot the heatmap of the step indices distribution
-            # import matplotlib.pyplot as plt
-            # step_indices_cpu = step_indices[1:].cpu().numpy()
-            # plt.figure(figsize=(10, 6))
-            # sns.histplot(step_indices_cpu, bins=50, kde=True)
-            # plt.title('Distribution of Subsampled Step Indices')
-            # plt.xlabel('Step Index')
-            # plt.ylabel('Frequency')
-            # plt.savefig('step_indices_distribution.png')
-
-
-        obs_actor_subsampled = obs_actor_matrix[episode_indices, step_indices]
-        action_actor_subsampled = action_actor_matrix[episode_indices, step_indices]
-        next_obs_actor_subsampled = next_obs_actor_matrix[episode_indices, step_indices]
-        reward_actor_subsampled = reward_actor_matrix[episode_indices, step_indices]
-
-        return (
-            obs_actor_full,
-            action_actor_full,
-            next_obs_actor_full,
-            reward_actor_full,
-            obs_actor_subsampled,
-            action_actor_subsampled,
-            next_obs_actor_subsampled,
-            reward_actor_subsampled,
-        )
-
-    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None, smart_subsample=False):
-        if (replay_buffer is not None and hasattr(replay_buffer, 'get_all_data')) or (replay_buffer is not None and hasattr(replay_buffer, 'get_all_data_matrix') and smart_subsample):
-            actor_data = self._load_actor_batch_from_replay_buffer(
-                replay_buffer,
-                smart_subsample=smart_subsample,
-            )
-        else:
-            obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full = self._load_actor_batch_from_replay_iter(
+            subsampled_actor_batch = self._load_actor_subsample_from_replay_iter(
                 replay_iter,
-                obs,
-                action,
-                next_obs,
-                reward,
-            )
-            actor_data = (
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                None,
+                max_samples=int(self.subsamples),
+                replay_buffer=replay_buffer,
+                fallback_actor_batch=full_actor_batch,
             )
 
-        obs_actor_full, action_actor_full, next_obs_actor_full, reward_actor_full, actor_matrix_data = actor_data
+        return (*full_actor_batch, *subsampled_actor_batch)
 
-        if smart_subsample:
-            return self._maybe_smart_subsample_actor_batch(
-                obs_actor_full,
-                action_actor_full,
-                next_obs_actor_full,
-                reward_actor_full,
-                actor_matrix_data=actor_matrix_data,
+    def _build_debug_visualizer_batch(self, obs, max_observations=2000):
+        if obs is None:
+            return None, None
+
+        max_observations = min(max_observations, obs.shape[0])
+        visualizer_obs = obs[:max_observations]
+        with torch.no_grad():
+            visualizer_z = self._encode_with_module(
+                self.policy_encoder,
+                visualizer_obs,
+                project=True,
             )
-
-        return self._maybe_subsample_actor_batch(
-            obs_actor_full,
-            action_actor_full,
-            next_obs_actor_full,
-            reward_actor_full,
-        )
+        return visualizer_obs, visualizer_z
 
     def _compute_mean_action_probs_deviation(self, action_probs: np.ndarray) -> float:
         """
@@ -3384,39 +3755,70 @@ class RoverAgent:
             return metrics
         
         # In ideal mode, we can update actor immediately
-        if  step % self.update_actor_every_steps == 0: # or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
-            use_smart_subsample = False
-            (
-                all_obs_actor,
-                all_action_actor,
-                all_next_obs_actor,
-                all_reward_actor,
-                subsampled_obs_actor,
-                subsampled_action_actor,
-                subsampled_next_obs_actor,
-                subsampled_reward_actor,
-            ) = self._get_actor_update_data(
+        if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
+            actor_update_data = self._get_actor_update_data(
                 replay_iter,
                 obs,
                 action,
                 next_obs,
                 reward,
                 replay_buffer=replay_buffer,
-                smart_subsample=use_smart_subsample,
             )
+            if isinstance(actor_update_data[0], dict):
+                encoded_full, all_reward_actor, encoded_sub, subsampled_reward_actor = actor_update_data
+                utils.ColorPrint.red(
+                    f"samples for actor update: full {self._encoded_batch_size(encoded_full)}, "
+                    f"subsampled {self._encoded_batch_size(encoded_sub) if encoded_sub is not None else 'N/A'}"
+                )
+            else:
+                (
+                    all_obs_actor,
+                    all_action_actor,
+                    all_next_obs_actor,
+                    all_reward_actor,
+                    subsampled_obs_actor,
+                    subsampled_action_actor,
+                    subsampled_next_obs_actor,
+                    subsampled_reward_actor,
+                ) = actor_update_data
+                encoded_full = None
+                encoded_sub = None
+                utils.ColorPrint.red(
+                    f"samples for actor update: full {all_obs_actor.shape[0]}, "
+                    f"subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}"
+                )
 
-            utils.ColorPrint.red(f"samples for actor update: full {all_obs_actor.shape[0]}, subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}")
-            if self.subsamples is None:
+            if self.subsamples is None and encoded_full is not None:
+                metrics.update(
+                    self.update_actor(
+                        step=step,
+                        rewards=all_reward_actor,
+                        encoded_full=encoded_full,
+                    )
+                )
+            elif self.subsamples is None:
                 metrics.update(
                     self.update_actor(
                         all_obs_actor,
                         all_action_actor,
                         all_next_obs_actor,
-                        step,
+                        step=step,
                         rewards=all_reward_actor,
                     )
                 )
-                
+            elif encoded_full is not None:
+                metrics.update(
+                    self.update_actor_nystrom(
+                        None,
+                        None,
+                        None,
+                        step=step,
+                        rewards=all_reward_actor,
+                        sub_rewards=subsampled_reward_actor,
+                        encoded_full=encoded_full,
+                        encoded_sub=encoded_sub,
+                    )
+                )
             else:
                 metrics.update(
                     self.update_actor_nystrom(
@@ -3424,7 +3826,7 @@ class RoverAgent:
                         all_action_actor,
                         all_next_obs_actor,
                         step=step,
-                        rewards=all_reward_actor, # at the moment keeping fixed the nystrom subsampling
+                        rewards=all_reward_actor,
                         sub_obs=subsampled_obs_actor,
                         sub_action=subsampled_action_actor,
                         sub_next_obs=subsampled_next_obs_actor,
@@ -3433,25 +3835,19 @@ class RoverAgent:
                 )
 
 
+        if self.debug_visualizer is not None:
+            param_text = (
+                f"Step: {step}\n"
+                f"γ = {self.discount}\n"
+                f"η = {self.current_eta}\n"
+                f"λ = {self.lambda_reg}\n"
+                f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
+                f"PMD steps = {self.pmd_steps}\n"
+                f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
+            )
 
-            if self.debug_visualizer is not None:
-                param_text = (
-                    f"Step: {step}\n"
-                    f"γ = {self.discount}\n"
-                    f"η = {self.current_eta}\n"
-                    f"λ = {self.lambda_reg}\n"
-                    f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
-                    f"PMD steps = {self.pmd_steps}\n"
-                    f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
-                )
-
-                # For visualization, we can only use a subset of the full batch if it's too large
-                max_observations_to_visualize = min(2000, all_obs_actor.shape[0])
-                
-
-                visualizer_obs = all_obs_actor[:max_observations_to_visualize]
-                visualizer_z = self._phi_all_obs[:max_observations_to_visualize, :-1]
-                
+            if  step % self.update_actor_every_steps == 0: #step % 10000 == 0 
+                visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
                 metrics.update(
                     self.debug_visualizer.save(
                         step=step,
@@ -3460,27 +3856,27 @@ class RoverAgent:
                         param_text=param_text,
                     )
                 )
-             
-            with torch.no_grad():
             
-                if len(self.current_action_probs) == 0:
-                    return metrics
-                current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
-                # Compute mean deviation from uniform
-                mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                with torch.no_grad():
                 
-                # Store in history
-                self.policy_deviation_history.append((step, mean_deviation))
-                
-                # Also store the mean action probabilities
-                mean_probs = np.mean(current_action_probs, axis=0)
-                self.action_probs_history.append((step, mean_probs))
-                
-                # Log to metrics
-                metrics['policy_deviation_from_uniform'] = mean_deviation
-                print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
-                self.current_action_probs = []  # Clear after processing
-            self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
-            self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
-    
+                    if len(self.current_action_probs) == 0:
+                        return metrics
+                    current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
+                    # Compute mean deviation from uniform
+                    mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                    
+                    # Store in history
+                    self.policy_deviation_history.append((step, mean_deviation))
+                    
+                    # Also store the mean action probabilities
+                    mean_probs = np.mean(current_action_probs, axis=0)
+                    self.action_probs_history.append((step, mean_probs))
+                    
+                    # Log to metrics
+                    metrics['policy_deviation_from_uniform'] = mean_deviation
+                    print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
+                    self.current_action_probs = []  # Clear after processing
+                self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+                self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
+
         return metrics

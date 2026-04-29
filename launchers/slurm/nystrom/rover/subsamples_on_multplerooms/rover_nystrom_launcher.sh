@@ -3,7 +3,7 @@
 seeds="1"
 
 subsamples=(
-# "none"
+"none"
 "4000"
 # "1000"
 # "500"
@@ -12,7 +12,7 @@ subsamples=(
 )
 
 feature_dims=(
-    109
+    200
 )
 
 lr_actors=( 
@@ -33,7 +33,7 @@ for seed in $seeds; do
         for lr_actor in "${lr_actors[@]}"; do
             for sink_idx in "${sink_idxs[@]}"; do
                 for feature in "${feature_dims[@]}"; do
-                    sbatch --export=SEED="${seed}",SUBSAMPLES="${subsamples}",LR_ACTOR="${lr_actor}",SINK_IDX="${sink_idx}",FEATURE_DIM="${feature}" launchers/slurm/nystrom/rover/subsamples_on_multplerooms/rover_memory_efficient_base.sh
+                    sbatch --export=SEED="${seed}",SUBSAMPLES="${subsamples}",LR_ACTOR="${lr_actor}",SINK_IDX="${sink_idx}",FEATURE_DIM="${feature}" launchers/slurm/nystrom/rover/subsamples_on_multplerooms/rover_nystrom_base.sh
                 done
             done
         done

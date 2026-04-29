@@ -72,7 +72,7 @@ from tqdm.rich import tqdm
 
 import gym_env
 import utils
-from agent.rover_nystrom_memory_efficient import (
+from agent.rover_nystrom import (
     EmbeddingDistributionVisualizerV2,
     ProjectSA,
     RoverAgent,
