@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /agent: ddpg_discrete
-  - /env: multiplerooms5_4x4_0
+  - /env: atari/pong_score_masked
   # - override hydra/launcher: submitit_local
 
 # mode
@@ -46,7 +46,7 @@ use_wandb: true
 wandb_id: null
 wandb_project: "finetune_atari"
 wandb_entity: "urlb"
-wandb_tag: "rover"
+wandb_tag: null
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}
 wandb_mode: online # online, offline, disabled
 # experiment
@@ -56,13 +56,12 @@ agent:
   actor_lr: 1e-7
   feature_dim: 200
 
-env.render_mode: null
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}
   sweep:
-    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${env.goal_position}_${experiment}_${get_filename:${p_path}}
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}
     subdir: ${hydra.job.num}
   # launcher:
   #   timeout_min: 4300
