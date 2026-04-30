@@ -19,7 +19,7 @@ random_init: true
 random_goal: true
 
 # train settings
-num_train_frames: 60000
+num_train_frames: 120000
 num_seed_frames: 2000
 update_actor_after_critic_steps: 7999
 num_agent_updates_per_env_step: 1
@@ -44,7 +44,7 @@ save_train_video: false
 use_tb: false
 use_wandb: true
 wandb_id: null
-wandb_project: "finetune_rebuttals"
+wandb_project: "finetune_atari"
 wandb_entity: "urlb"
 wandb_tag: "rover"
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}
