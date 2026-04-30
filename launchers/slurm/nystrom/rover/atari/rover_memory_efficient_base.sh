@@ -43,6 +43,7 @@ python pretrain.py \
     agent.subsamples=${SUBSAMPLES} \
     agent.lr_actor=${LR_ACTOR} \
     agent.feature_dim=${FEATURE_DIM}\
+    agent.svd_truncation=${SVD_RANK} \
     seed=${SEED} \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
     env=${ENV} \

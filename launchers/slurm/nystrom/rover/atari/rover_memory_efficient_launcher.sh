@@ -47,7 +47,9 @@ for seed in $seeds; do
                 for sink_idx in "${sink_idxs[@]}"; do
                     for feature in "${feature_dims[@]}"; do
                         for lambda_reg in "${lambda_regs[@]}"; do
-                            sbatch --export=SEED="${seed}",ENV="${env}",SUBSAMPLES="${subsamples}",LR_ACTOR="${lr_actor}",SINK_IDX="${sink_idx}",FEATURE_DIM="${feature}",LAMBDA_REG="${lambda_reg}" launchers/slurm/nystrom/rover/atari/rover_memory_efficient_base.sh
+                            for svd_rank in "${svd_ranks[@]}"; do
+                                sbatch --export=SEED="${seed}",ENV="${env}",SUBSAMPLES="${subsamples}",LR_ACTOR="${lr_actor}",SINK_IDX="${sink_idx}",FEATURE_DIM="${feature}",LAMBDA_REG="${lambda_reg}",SVD_RANK="${svd_rank}" launchers/slurm/nystrom/rover/atari/rover_memory_efficient_base.sh
+                            done
                         done
                     done
                 done
