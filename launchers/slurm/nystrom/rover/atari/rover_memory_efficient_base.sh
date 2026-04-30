@@ -37,7 +37,8 @@ SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 python pretrain.py \
     --config-name=pretrain/pretrain_atari \
-    agent=rover_nystrom_memory_efficient \
+    agent=rover_nystrom \
+    grayscale=true \
     use_wandb=true \
     agent.subsamples=${SUBSAMPLES} \
     agent.lr_actor=${LR_ACTOR} \
@@ -45,9 +46,10 @@ python pretrain.py \
     seed=${SEED} \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
     env=${ENV} \
+    agent.lambda_reg=${LAMBDA_REG} \
     agent.update_every_steps=100 \
     agent.update_actor_every_steps=2000 \
     agent.pmd_steps=50 \
     wandb_project="atari_rover_nystrom" \
+    save_buffer=true \
     ${EXTRA_ARGS} 
-

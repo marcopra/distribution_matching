@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.rover_nystrom.RoverAgent
+_target_: agent.rover_nystrom_debug.RoverAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -9,11 +9,10 @@ lr_actor: 10 # eta
 discount: ${discount} # gamma
 lambda_reg: 1e-6
 lr_T: 1e-4
-linear_projection: false
 batch_size: 1024
 batch_size_actor: 10000
 subsamples: 4000
-encoded_fifo_capacity: 50000
+encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 nstep: 1
@@ -45,4 +44,3 @@ use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
 device: ${device}
 compute_dtype: float64 # [float32, float64]
-svd_truncation: 460 # if not null, truncates the SVD to this rank when computing the pseudo-inverse in the Nyström method, which can help with stability and speed. If null, no truncation is applied.
