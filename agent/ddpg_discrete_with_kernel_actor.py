@@ -44,41 +44,41 @@ class Encoder(nn.Module):
         h = self.forward(obs)
         return h
 
+from agent.rover import CNNEncoder
+# class CNNEncoder(nn.Module):
+#     def __init__(self, obs_shape, feature_dim):
+#         super().__init__()
 
-class CNNEncoder(nn.Module):
-    def __init__(self, obs_shape, feature_dim):
-        super().__init__()
+#         assert len(obs_shape) == 3
 
-        assert len(obs_shape) == 3
+#         self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+#                                   nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+#                                   nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+#                                   nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+#                                   nn.ReLU())
 
-        self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                  nn.ReLU())
+#         self.repr_dim = 32 * 35 * 35
 
-        self.repr_dim = 32 * 35 * 35
+#         self.projector = nn.Sequential(
+#             nn.Linear(self.repr_dim, feature_dim),
+#             # nn.LayerNorm(feature_dim),
+#             nn.ReLU()
+#         )
 
-        self.projector = nn.Sequential(
-            nn.Linear(self.repr_dim, feature_dim),
-            # nn.LayerNorm(feature_dim),
-            nn.ReLU()
-        )
+#         self.apply(utils.weight_init)
 
-        self.apply(utils.weight_init)
+#     def forward(self, obs):
+#         obs = obs / 255.
+#         h = self.conv(obs)
+#         h = h.view(h.shape[0], -1)
+#         # h = F.softmax(h/0.1, dim=-1)
+#         return h
 
-    def forward(self, obs):
-        obs = obs / 255.
-        h = self.conv(obs)
-        h = h.view(h.shape[0], -1)
-        # h = F.softmax(h/0.1, dim=-1)
-        return h
-
-    def encode_and_project(self, obs):
-        h = self.forward(obs)
-        z = self.projector(h)
-        z =F.normalize(z, p=1, dim=-1)
-        return z
+#     def encode_and_project(self, obs):
+#         h = self.forward(obs)
+#         z = self.projector(h)
+#         z =F.normalize(z, p=1, dim=-1)
+#         return z
     
 class DDPGAgent:
     def __init__(self,
