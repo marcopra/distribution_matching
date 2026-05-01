@@ -8,6 +8,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 from matplotlib import patches
 import numpy as np
 
@@ -71,6 +72,477 @@ def _get_env_method(env, method_name: str):
         current = getattr(current, "env", None)
 
     return None
+
+
+def _as_xy(value) -> Optional[np.ndarray]:
+    if value is None:
+        return None
+
+    xy = np.asarray(value, dtype=np.float32).reshape(-1)
+    if xy.size < 2 or not np.all(np.isfinite(xy[:2])):
+        return None
+    return xy[:2]
+
+
+def extract_eval_trajectory_point(env, time_step) -> Optional[np.ndarray]:
+    """Extract an x/y point from an evaluation time step when available."""
+    info = getattr(time_step, "info", None)
+    if isinstance(info, dict):
+        for key in ("agent_position", "position", "xy"):
+            xy = _as_xy(info.get(key))
+            if xy is not None:
+                return xy
+
+    method = _get_env_method(env, "get_debug_coordinates")
+    if callable(method):
+        debug_info = method()
+        if isinstance(debug_info, dict):
+            for key in ("xy", "xyz", "agent_position", "position"):
+                xy = _as_xy(debug_info.get(key))
+                if xy is not None:
+                    return xy
+
+    discrete_env = _find_discrete_env(env)
+    raw_proprio = getattr(time_step, "proprio_observation", [])
+    proprio_array = np.asarray(raw_proprio, dtype=np.float32)
+    proprio = proprio_array.reshape(-1)
+    if discrete_env is not None and proprio.size == getattr(discrete_env, "n_states", -1):
+        state_idx = int(np.argmax(proprio))
+        return _as_xy(discrete_env.idx_to_state.get(state_idx))
+
+    if proprio_array.ndim <= 1:
+        return _as_xy(proprio)
+    return None
+
+
+def _prepare_trajectories(trajectories) -> list[np.ndarray]:
+    prepared = []
+    for trajectory in trajectories:
+        if trajectory is None:
+            continue
+        points = [_as_xy(point) for point in trajectory]
+        points = [point for point in points if point is not None]
+        if points:
+            prepared.append(np.asarray(points, dtype=np.float32))
+    return prepared
+
+
+def _trajectory_colors(n_trajectories: int) -> list:
+    if n_trajectories <= 10:
+        cmap = plt.get_cmap("tab10")
+        return [cmap(i) for i in range(n_trajectories)]
+    if n_trajectories <= 20:
+        cmap = plt.get_cmap("tab20")
+        return [cmap(i) for i in range(n_trajectories)]
+    cmap = plt.get_cmap("turbo")
+    return [cmap(i / max(n_trajectories - 1, 1)) for i in range(n_trajectories)]
+
+
+def _get_discrete_plot_cells(env) -> Optional[list[tuple[int, int]]]:
+    discrete_env = _find_discrete_env(env)
+    if discrete_env is None:
+        return None
+
+    cells = []
+    dead_state = getattr(discrete_env, "DEAD_STATE", None)
+    for state in getattr(discrete_env, "cells", []):
+        if dead_state is not None and state == dead_state:
+            continue
+        xy = _as_xy(state)
+        if xy is not None:
+            cells.append((int(xy[0]), int(xy[1])))
+    return cells or None
+
+
+def _plot_bounds(env, trajectories: list[np.ndarray]) -> tuple[float, float, float, float]:
+    cells = _get_discrete_plot_cells(env)
+    if cells is not None:
+        xs = [cell[0] for cell in cells]
+        ys = [cell[1] for cell in cells]
+        return min(xs) - 0.5, max(xs) + 0.5, min(ys) - 0.5, max(ys) + 0.5
+
+    all_points = np.concatenate(trajectories, axis=0)
+    min_x, min_y = all_points.min(axis=0)
+    max_x, max_y = all_points.max(axis=0)
+    span_x = max(max_x - min_x, 1e-3)
+    span_y = max(max_y - min_y, 1e-3)
+    margin_x = max(0.05 * span_x, 1e-3)
+    margin_y = max(0.05 * span_y, 1e-3)
+    return min_x - margin_x, max_x + margin_x, min_y - margin_y, max_y + margin_y
+
+
+def _draw_discrete_background(ax, env) -> None:
+    cells = _get_discrete_plot_cells(env)
+    if cells is None:
+        return
+
+    for x, y in cells:
+        ax.add_patch(
+            patches.Rectangle(
+                (x - 0.5, y - 0.5),
+                1.0,
+                1.0,
+                facecolor="#f7f7f7",
+                edgecolor="#d9d9d9",
+                linewidth=0.35,
+                zorder=0,
+            )
+        )
+
+
+def _style_trajectory_axis(ax, env, trajectories: list[np.ndarray], title: str) -> None:
+    min_x, max_x, min_y, max_y = _plot_bounds(env, trajectories)
+    ax.set_xlim(min_x, max_x)
+    ax.set_ylim(min_y, max_y)
+    if _get_discrete_plot_cells(env) is not None:
+        ax.invert_yaxis()
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(title, pad=4)
+    ax.tick_params(direction="out", length=3, width=0.7)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+
+
+def _draw_start_goal_markers(ax, env, trajectories: list[np.ndarray]) -> None:
+    if trajectories:
+        starts = np.asarray([trajectory[0] for trajectory in trajectories], dtype=np.float32)
+        ends = np.asarray([trajectory[-1] for trajectory in trajectories], dtype=np.float32)
+        ax.scatter(
+            starts[:, 0],
+            starts[:, 1],
+            marker="o",
+            s=22,
+            facecolors="white",
+            edgecolors="black",
+            linewidths=0.7,
+            zorder=7,
+            label="start",
+        )
+        ax.scatter(
+            ends[:, 0],
+            ends[:, 1],
+            marker="x",
+            s=28,
+            c="black",
+            linewidths=0.9,
+            zorder=8,
+            label="end",
+        )
+
+    goal = None
+    current = env
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        goal = getattr(current, "goal_position", None)
+        if goal is not None:
+            break
+        current = getattr(current, "env", None)
+    goal_xy = _as_xy(goal)
+    # if goal_xy is not None:
+    #     ax.scatter(
+    #         goal_xy[0],
+    #         goal_xy[1],
+    #         marker="*",
+    #         s=90,
+    #         facecolors="#ffd92f",
+    #         edgecolors="black",
+    #         linewidths=0.6,
+    #         zorder=9,
+    #         label="goal",
+    #     )
+
+
+def _draw_colored_trajectories(ax, trajectories: list[np.ndarray], alpha: float = 0.92) -> None:
+    colors = _trajectory_colors(len(trajectories))
+    for idx, trajectory in enumerate(trajectories):
+        color = colors[idx]
+        ax.plot(
+            trajectory[:, 0],
+            trajectory[:, 1],
+            color=color,
+            linewidth=1.35,
+            alpha=alpha,
+            solid_capstyle="round",
+            zorder=4,
+        )
+        ax.scatter(
+            trajectory[:, 0],
+            trajectory[:, 1],
+            s=7,
+            color=color,
+            alpha=min(alpha + 0.05, 1.0),
+            linewidths=0,
+            zorder=5,
+        )
+
+
+def _draw_visit_heatmap(fig, ax, env, trajectories: list[np.ndarray], cmap: str = "magma"):
+    all_points = np.concatenate(trajectories, axis=0)
+    cells = _get_discrete_plot_cells(env)
+    if cells is not None:
+        xs = [cell[0] for cell in cells]
+        ys = [cell[1] for cell in cells]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        heatmap = np.zeros((max_y - min_y + 1, max_x - min_x + 1), dtype=np.float32)
+        valid = set(cells)
+        for point in all_points:
+            cell = (int(round(point[0])), int(round(point[1])))
+            if cell in valid:
+                heatmap[cell[1] - min_y, cell[0] - min_x] += 1
+        heatmap = np.ma.masked_where(heatmap <= 0, heatmap)
+        im = ax.imshow(
+            heatmap,
+            extent=[min_x - 0.5, max_x + 0.5, max_y + 0.5, min_y - 0.5],
+            cmap=cmap,
+            norm=mcolors.LogNorm(vmin=1, vmax=max(float(heatmap.max()), 1.0)),
+            interpolation="nearest",
+            zorder=1,
+        )
+    else:
+        min_x, max_x, min_y, max_y = _plot_bounds(env, trajectories)
+        heatmap, xedges, yedges = np.histogram2d(
+            all_points[:, 0],
+            all_points[:, 1],
+            bins=48,
+            range=[[min_x, max_x], [min_y, max_y]],
+        )
+        heatmap = np.ma.masked_where(heatmap.T <= 0, heatmap.T)
+        im = ax.imshow(
+            heatmap,
+            origin="lower",
+            extent=[min_x, max_x, min_y, max_y],
+            cmap=cmap,
+            norm=mcolors.LogNorm(vmin=1, vmax=max(float(heatmap.max()), 1.0)),
+            interpolation="nearest",
+            zorder=1,
+        )
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.025)
+    cbar.set_label("visit count")
+    return im
+
+
+def _plot_colored_overlay(fig, ax, env, trajectories: list[np.ndarray]) -> None:
+    _draw_discrete_background(ax, env)
+    _draw_colored_trajectories(ax, trajectories)
+    _draw_start_goal_markers(ax, env, trajectories)
+    _style_trajectory_axis(ax, env, trajectories, "Colored trajectories")
+
+
+def _plot_heatmap_overlay(fig, ax, env, trajectories: list[np.ndarray]) -> None:
+    _draw_discrete_background(ax, env)
+    _draw_visit_heatmap(fig, ax, env, trajectories, cmap="magma")
+    _draw_colored_trajectories(ax, trajectories, alpha=0.72)
+    _draw_start_goal_markers(ax, env, trajectories)
+    _style_trajectory_axis(ax, env, trajectories, "Log visit heatmap + trajectories")
+
+
+def _plot_occupancy_only(fig, ax, env, trajectories: list[np.ndarray]) -> None:
+    _draw_discrete_background(ax, env)
+    _draw_visit_heatmap(fig, ax, env, trajectories, cmap="viridis")
+    _draw_start_goal_markers(ax, env, trajectories)
+    _style_trajectory_axis(ax, env, trajectories, "Aggregated visitation")
+
+
+def _plot_endpoint_summary(fig, ax, env, trajectories: list[np.ndarray]) -> None:
+    _draw_discrete_background(ax, env)
+    _draw_colored_trajectories(ax, trajectories, alpha=0.22)
+    colors = _trajectory_colors(len(trajectories))
+    for idx, trajectory in enumerate(trajectories):
+        end = trajectory[-1]
+        ax.scatter(
+            end[0],
+            end[1],
+            s=36,
+            color=colors[idx],
+            edgecolors="black",
+            linewidths=0.45,
+            zorder=8,
+        )
+    _draw_start_goal_markers(ax, env, trajectories)
+    _style_trajectory_axis(ax, env, trajectories, "Endpoints with faint paths")
+
+
+def _save_single_eval_trajectory_style(
+    trajectories: list[np.ndarray],
+    env,
+    save_path: Path,
+    style: str,
+    step: int,
+) -> None:
+    plotters = {
+        "colored": _plot_colored_overlay,
+        "heatmap_overlay": _plot_heatmap_overlay,
+        "occupancy": _plot_occupancy_only,
+        "endpoints": _plot_endpoint_summary,
+    }
+    plotter = plotters.get(style)
+    if plotter is None:
+        return
+
+    with plt.rc_context(_paper_trajectory_rc()):
+        fig, ax = plt.subplots(figsize=(3.25, 3.05), constrained_layout=True)
+        plotter(fig, ax, env, trajectories)
+        ax.text(
+            0.01,
+            0.99,
+            f"step {step}, n={len(trajectories)}",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=6.5,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.82, pad=1.5),
+            zorder=10,
+        )
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            unique = dict(zip(labels, handles))
+            ax.legend(
+                unique.values(),
+                unique.keys(),
+                loc="lower right",
+                frameon=True,
+                framealpha=0.88,
+                fontsize=6,
+                borderpad=0.25,
+                handlelength=1.0,
+            )
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+def _save_eval_trajectory_suite(
+    trajectories: list[np.ndarray],
+    env,
+    save_path: Path,
+    step: int,
+) -> None:
+    with plt.rc_context(_paper_trajectory_rc()):
+        fig, axes = plt.subplots(2, 2, figsize=(6.9, 6.3), constrained_layout=True)
+        plotters = (
+            _plot_colored_overlay,
+            _plot_heatmap_overlay,
+            _plot_occupancy_only,
+            _plot_endpoint_summary,
+        )
+        for ax, plotter in zip(axes.flat, plotters):
+            plotter(fig, ax, env, trajectories)
+        fig.suptitle(f"Evaluation trajectories at step {step} (n={len(trajectories)})", fontsize=9)
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+def _save_eval_trajectory_small_multiples(
+    trajectories: list[np.ndarray],
+    env,
+    save_path: Path,
+    step: int,
+    max_episodes: int = 16,
+) -> None:
+    shown = trajectories[:max_episodes]
+    if not shown:
+        return
+
+    ncols = min(4, len(shown))
+    nrows = int(np.ceil(len(shown) / ncols))
+    colors = _trajectory_colors(len(shown))
+    with plt.rc_context(_paper_trajectory_rc()):
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(1.75 * ncols, 1.65 * nrows),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for idx, ax in enumerate(axes.flat):
+            if idx >= len(shown):
+                ax.axis("off")
+                continue
+            trajectory = shown[idx]
+            _draw_discrete_background(ax, env)
+            ax.plot(
+                trajectory[:, 0],
+                trajectory[:, 1],
+                color=colors[idx],
+                linewidth=1.4,
+                alpha=0.95,
+                zorder=4,
+            )
+            ax.scatter(trajectory[0, 0], trajectory[0, 1], s=16, facecolor="white", edgecolor="black", linewidth=0.6, zorder=6)
+            ax.scatter(trajectory[-1, 0], trajectory[-1, 1], s=20, marker="x", color="black", linewidth=0.8, zorder=7)
+            _style_trajectory_axis(ax, env, trajectories, f"episode {idx}")
+            ax.tick_params(labelsize=5.5)
+        fig.suptitle(f"Per-episode evaluation trajectories at step {step}", fontsize=8)
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+def _paper_trajectory_rc() -> dict:
+    return {
+        "font.family": "DejaVu Sans",
+        "font.size": 7,
+        "axes.titlesize": 7.5,
+        "axes.labelsize": 7,
+        "xtick.labelsize": 6,
+        "ytick.labelsize": 6,
+        "legend.fontsize": 6,
+        "figure.titlesize": 9,
+        "axes.linewidth": 0.8,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+
+
+def save_eval_trajectory_plots(
+    trajectories,
+    env,
+    step: int,
+    save_dir: str | os.PathLike = "eval_trajectory_plots",
+    styles: Optional[tuple[str, ...]] = None,
+) -> dict[str, str]:
+    """
+    Save paper-style evaluation trajectory candidates.
+
+    Styles:
+    - colored: one color per episode, useful when individual paths matter.
+    - heatmap_overlay: log visitation heatmap plus colored paths, best for overlaps.
+    - occupancy: aggregate visitation only, cleanest for density/coverage.
+    - endpoints: faint paths with emphasized final states, useful for success modes.
+    - small_multiples: one subplot per episode, useful when overlays are too dense.
+    - suite: a 2x2 comparison panel of the first four styles.
+    """
+    trajectories = _prepare_trajectories(trajectories)
+    if not trajectories:
+        return {}
+
+    if styles is None:
+        styles = ("suite", "colored", "heatmap_overlay", "occupancy", "endpoints", "small_multiples")
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths = {}
+    for style in styles:
+        if style == "suite":
+            save_path = save_dir / f"eval_trajectories_step_{step}_suite.png"
+            _save_eval_trajectory_suite(trajectories, env, save_path, step)
+        elif style == "small_multiples":
+            save_path = save_dir / f"eval_trajectories_step_{step}_small_multiples.png"
+            _save_eval_trajectory_small_multiples(trajectories, env, save_path, step)
+        else:
+            save_path = save_dir / f"eval_trajectories_step_{step}_{style}.png"
+            _save_single_eval_trajectory_style(trajectories, env, save_path, style, step)
+            if not save_path.exists():
+                continue
+        saved_paths[style] = str(save_path)
+
+    if saved_paths:
+        print(f"✓ Evaluation trajectory plots saved in: {save_dir}")
+    return saved_paths
 
 
 class BaseDomainDebugVisualizer:

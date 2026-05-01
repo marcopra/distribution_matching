@@ -24,6 +24,10 @@ from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 import ale_py
 from omegaconf import open_dict
+from agent.utils_debug_visualization import (
+    extract_eval_trajectory_point,
+    save_eval_trajectory_plots,
+)
 
 
 torch.backends.cudnn.benchmark = True
@@ -84,6 +88,7 @@ class Workspace:
         # create envs
         env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
         env_kwargs.pop('name', None)
+        env_kwargs.pop('synthetic_first_transition', None)
 
         self.train_env = gym_env.make(
             self.cfg.task_name,
@@ -211,15 +216,31 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
+    def _should_use_synthetic_first_transition(self):
+        env_cfg = getattr(self.cfg, "env", None)
+        if env_cfg is not None and hasattr(env_cfg, "synthetic_first_transition"):
+            return bool(env_cfg.synthetic_first_transition)
+        return str(self.cfg.task_name) in {"MiddleRoom-v0"}
+
+    def _maybe_set_synthetic_first_transition(self, time_step, meta):
+        if not self._should_use_synthetic_first_transition():
+            return
+        self.replay_storage.set_synthetic_first_transition(time_step, meta=meta)
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         meta = self.agent.init_meta()
+        eval_trajectories = []
         eval_mode = False
         if eval_mode == False:
             utils.ColorPrint.yellow("Evaluating with eval_mode=False")
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
+            trajectory = []
+            point = extract_eval_trajectory_point(self.eval_env, time_step)
+            if point is not None:
+                trajectory.append(point)
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
@@ -228,12 +249,19 @@ class Workspace:
                                             self.global_step,
                                             eval_mode=eval_mode) # I am not sure we should evaluate with eval_mode=True during pretrain... ORIGINAL CODE: True
                 time_step = self.eval_env.step(action)
+                point = extract_eval_trajectory_point(self.eval_env, time_step)
+                if point is not None:
+                    trajectory.append(point)
                 self.video_recorder.record(self.eval_env)
                 total_reward += time_step.reward
                 step += 1
 
             episode += 1
+            if trajectory:
+                eval_trajectories.append(trajectory)
             self.video_recorder.save(f'{self.global_frame}.mp4')
+
+        self._save_eval_trajectory_plots(eval_trajectories)
 
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             log('episode_reward', total_reward / episode)
@@ -247,6 +275,28 @@ class Workspace:
                         float(info['montezuma_visited_second_room']))
                 if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
                     log('montezuma_max_room_id', info['montezuma_max_room_id'])
+
+    def _save_eval_trajectory_plots(self, trajectories):
+        enabled = getattr(self.cfg, "plot_eval_trajectories", False)
+        if not enabled or not trajectories:
+            return
+
+        save_dir = getattr(self.cfg, "eval_trajectory_plot_dir", "eval_trajectory_plots")
+        save_dir = self.work_dir / Path(save_dir)
+        styles = getattr(self.cfg, "eval_trajectory_plot_styles", None)
+        if styles is not None:
+            styles = tuple(styles)
+
+        try:
+            save_eval_trajectory_plots(
+                trajectories=trajectories,
+                env=self.eval_env,
+                step=self.global_frame,
+                save_dir=save_dir,
+                styles=styles,
+            )
+        except Exception as exc:
+            print(f"⚠ Could not generate evaluation trajectory plots: {exc}")
 
     def train(self):
         # predicates
@@ -271,6 +321,7 @@ class Workspace:
         else:
             print(f"Initial observation shape: {time_step.observation.shape}")
         meta = self.agent.init_meta()
+        self._maybe_set_synthetic_first_transition(time_step, meta)
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)
         metrics = None

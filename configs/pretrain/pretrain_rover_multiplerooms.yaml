@@ -26,7 +26,16 @@ num_seed_frames: 2000
 
 # eval
 eval_every_frames: 10000
-num_eval_episodes: 1
+num_eval_episodes: 10
+plot_eval_trajectories: true
+eval_trajectory_plot_dir: eval_trajectory_plots
+eval_trajectory_plot_styles:
+  - suite
+  - colored
+  - heatmap_overlay
+  - occupancy
+  - endpoints
+  - small_multiples
 
 # snapshot
 snapshots: [500000000000]

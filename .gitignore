@@ -218,3 +218,4 @@ tmp*
 data_plot/
 data*
 .hydra
+maxent/

@@ -38,6 +38,7 @@ class ReplayBufferStorage:
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
         self._transition_views = {}
+        self._synthetic_first_transition = None
         self._preload()
 
     def __len__(self):
@@ -79,6 +80,53 @@ class ReplayBufferStorage:
                 'first_transition': None,
             }
         return key
+
+    def set_synthetic_first_transition(self, time_step, meta=None, overwrite=False):
+        """Set a fake first transition whose next state is the provided time step.
+
+        This is intentionally storage-level and opt-in so normal replay sampling
+        stays unchanged. The synthetic transition is returned only by the
+        "first transition" paths used by Rover-style actor updates.
+        """
+        if self._synthetic_first_transition is not None and not overwrite:
+            return
+
+        meta = {} if meta is None else meta
+        values = {}
+        for spec in self._data_specs:
+            value = time_step[spec.name]
+            if np.isscalar(value):
+                value = np.full(spec.shape, value, spec.dtype)
+            values[spec.name] = np.asarray(value, dtype=spec.dtype)
+
+        next_obs = values['observation']
+        obs = np.zeros_like(next_obs)
+        action = np.zeros_like(values['action'])
+        reward = np.zeros_like(values['reward'])
+        discount = np.ones_like(values['discount'])
+
+        meta_values = []
+        for spec in self._meta_specs:
+            value = meta.get(spec.name, None)
+            if value is None:
+                value = np.zeros(spec.shape, dtype=spec.dtype)
+            elif np.isscalar(value):
+                value = np.full(spec.shape, value, spec.dtype)
+            else:
+                value = np.asarray(value, dtype=spec.dtype)
+            meta_values.append(value)
+
+        self._synthetic_first_transition = (
+            obs,
+            action,
+            reward,
+            discount,
+            next_obs,
+            *meta_values,
+        )
+
+    def get_synthetic_first_transition(self):
+        return self._synthetic_first_transition
 
     def _record_pending_transitions(self):
         if not self._transition_views:
@@ -156,6 +204,8 @@ class ReplayBufferStorage:
             pending.popleft()
 
     def get_first_transition(self, view_key):
+        if self._synthetic_first_transition is not None:
+            return self._synthetic_first_transition
         view = self._transition_views.get(view_key)
         if view is None:
             raise KeyError(f'Unknown transition view: {view_key}')
@@ -256,6 +306,11 @@ class ReplayBuffer(IterableDataset):
                 break
 
     def _sample(self, first=False):
+        if first:
+            synthetic_first_transition = self._storage.get_synthetic_first_transition()
+            if synthetic_first_transition is not None:
+                return synthetic_first_transition
+
         try:
             self._try_fetch()
         except:

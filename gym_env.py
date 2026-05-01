@@ -23,6 +23,7 @@ from env.classic_minigrid_domain import (
     wrap_classic_minigrid_env,
 )
 from env.fetch_domain import is_fetch_env, prepare_fetch_make_kwargs, wrap_fetch_env
+from env.middle_room import MiddleRoomEnv
 from env.multiple_rooms import MultipleRoomsEnv
 from env.pointmaze_domain import (
     is_point_maze_env,
