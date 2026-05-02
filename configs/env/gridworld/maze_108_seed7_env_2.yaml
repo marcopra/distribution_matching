@@ -8,8 +8,8 @@ env:
   render_mode: rgb_array
   show_coordinates: false
   goal_position:
-  - 7
-  - 13
+  - 4
+  - 4
   start_position:
-  - 4
-  - 4
+  - 13
+  - 12
