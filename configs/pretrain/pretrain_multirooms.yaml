@@ -31,7 +31,7 @@ plot_eval_trajectories: true
 eval_trajectory_plot_dir: eval_trajectory_plots
 # 1-based eval episode ids to include in trajectory plots. Empty means all.
 # The final eval episode is always included when this list is non-empty.
-eval_trajectory_plot_episodes: [20 25 35]
+eval_trajectory_plot_episodes: [20,25,35]
 eval_trajectory_plot_styles:
   - suite
   - occupancy
