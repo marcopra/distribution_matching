@@ -21,7 +21,7 @@ from env.maze_generator import write_maze_files
 def main() -> None:
     output_dir = Path("encoder_testing/maze_test_outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
-    n_states = 108
+    n_states = 200
     architecture_path = output_dir / f"maze_{n_states}_seed7.yaml"
     env_config_path = output_dir / f"maze_{n_states}_seed7_env.yaml"
     write_maze_files(
@@ -37,7 +37,7 @@ def main() -> None:
         obs_type="pixels",
         frame_stack=1,
         action_repeat=1,
-        resolution=128,
+        resolution=512,
         render_mode="rgb_array",
         maze_file=str(architecture_path),
         max_steps=128,
@@ -54,7 +54,7 @@ def main() -> None:
     Image.fromarray(image.astype("uint8")).save(figure_path)
 
     assert env.n_states == n_states
-    assert image.shape == (128, 128, 3)
+    assert image.shape == (512, 512, 3)
     print(f"Saved generated maze config to {architecture_path}")
     print(f"Saved env config to {env_config_path}")
     print(f"Saved rendered maze figure to {figure_path}")
