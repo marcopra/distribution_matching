@@ -4,7 +4,7 @@
 env:
   name: Maze-v0
   maze_file: configs/env/gridworld/mazes/maze_108_seed7.yaml
-  max_steps: 200
+  max_steps: 150
   render_mode: rgb_array
   show_coordinates: false
   goal_position:
