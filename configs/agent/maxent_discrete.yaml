@@ -28,13 +28,16 @@ update_actor_after_critic_steps: ${update_actor_after_critic_steps}
 maxent_scale: 1.0
 maxent_eps: 1e-3
 maxent_bandwidth: 0.1
-maxent_kernel: epanechnikov # [epanechnikov, gaussian]
-maxent_buffer_size: 4096
-maxent_rep_dim: 32
-maxent_rollout_steps: 1000
-maxent_rollout_every_steps: 1000
+maxent_kernel: epanechnikov
+maxent_pca_components: 32
+maxent_rollout_steps: 300
+maxent_rollout_every_steps: 5000
 maxent_rollout_eval_mode: false
 maxent_rollout_batch_size: 256
+maxent_num_rollouts: 10
+maxent_policy_weighting: uniform # [uniform, geometric]
+maxent_geometric_gamma: 0.90
+maxent_max_policies: 0 # 0 keeps all policy snapshots
 maxent_log_reward: false
 maxent_reward_clip: 0.0
 non_episodic_intrinsic_returns: false

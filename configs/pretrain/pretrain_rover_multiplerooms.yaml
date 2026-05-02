@@ -26,15 +26,16 @@ num_seed_frames: 2000
 
 # eval
 eval_every_frames: 10000
-num_eval_episodes: 10
+num_eval_episodes: 50
 plot_eval_trajectories: true
 eval_trajectory_plot_dir: eval_trajectory_plots
+# 1-based eval checkpoints at which to save cumulative trajectory plots.
+# For [20, 25, 35], plots contain the first 20, 25, 35 trajectories;
+# the final eval episode is always included when this list is non-empty.
+eval_trajectory_plot_episodes: [20,25,35]
 eval_trajectory_plot_styles:
   - suite
-  - colored
-  - heatmap_overlay
   - occupancy
-  - endpoints
   - small_multiples
 
 # snapshot

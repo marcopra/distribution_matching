@@ -26,16 +26,15 @@ num_seed_frames: 2000
 
 # eval
 eval_every_frames: 10000
-num_eval_episodes: 20
+num_eval_episodes: 50
 plot_eval_trajectories: true
 eval_trajectory_plot_dir: eval_trajectory_plots
+# 1-based eval episode ids to include in trajectory plots. Empty means all.
+# The final eval episode is always included when this list is non-empty.
+eval_trajectory_plot_episodes: [20 25 35]
 eval_trajectory_plot_styles:
   - suite
-  - colored
-  - heatmap_overlay
   - occupancy
-  - endpoints
-  - small_multiples
 
 # snapshot
 snapshots: [500000000000]

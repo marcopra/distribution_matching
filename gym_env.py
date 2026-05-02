@@ -18,6 +18,7 @@ from env.continuous_rooms import (
     ContinuousTwoRoomsEnv,
 )
 from env.corridor import CorridorEnv
+from env.maze import MazeEnv
 from env.classic_minigrid_domain import (
     is_classic_minigrid_env,
     wrap_classic_minigrid_env,

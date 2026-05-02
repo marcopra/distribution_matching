@@ -287,16 +287,31 @@ class Workspace:
         if styles is not None:
             styles = tuple(styles)
 
-        try:
-            save_eval_trajectory_plots(
-                trajectories=trajectories,
-                env=self.eval_env,
-                step=self.global_frame,
-                save_dir=save_dir,
-                styles=styles,
-            )
-        except Exception as exc:
-            print(f"⚠ Could not generate evaluation trajectory plots: {exc}")
+        for checkpoint in self._eval_trajectory_plot_checkpoints(len(trajectories)):
+            checkpoint_trajectories = trajectories[:checkpoint]
+            try:
+                save_eval_trajectory_plots(
+                    trajectories=checkpoint_trajectories,
+                    env=self.eval_env,
+                    step=self.global_frame,
+                    save_dir=save_dir,
+                    styles=styles,
+                )
+            except Exception as exc:
+                print(f"⚠ Could not generate evaluation trajectory plots: {exc}")
+
+    def _eval_trajectory_plot_checkpoints(self, n_trajectories):
+        plot_episodes = getattr(self.cfg, "eval_trajectory_plot_episodes", None)
+        if plot_episodes is None or len(plot_episodes) == 0:
+            return [n_trajectories]
+
+        checkpoints = {int(episode) for episode in plot_episodes}
+        checkpoints.add(n_trajectories)
+        return [
+            checkpoint
+            for checkpoint in sorted(checkpoints)
+            if 1 <= checkpoint <= n_trajectories
+        ]
 
     def train(self):
         # predicates

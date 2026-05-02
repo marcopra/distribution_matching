@@ -524,17 +524,18 @@ def save_eval_trajectory_plots(
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    filename_prefix = f"eval_trajectories_step_{step}_ntraj_{len(trajectories)}"
 
     saved_paths = {}
     for style in styles:
         if style == "suite":
-            save_path = save_dir / f"eval_trajectories_step_{step}_suite.png"
+            save_path = save_dir / f"{filename_prefix}_suite.png"
             _save_eval_trajectory_suite(trajectories, env, save_path, step)
         elif style == "small_multiples":
-            save_path = save_dir / f"eval_trajectories_step_{step}_small_multiples.png"
+            save_path = save_dir / f"{filename_prefix}_small_multiples.png"
             _save_eval_trajectory_small_multiples(trajectories, env, save_path, step)
         else:
-            save_path = save_dir / f"eval_trajectories_step_{step}_{style}.png"
+            save_path = save_dir / f"{filename_prefix}_{style}.png"
             _save_single_eval_trajectory_style(trajectories, env, save_path, style, step)
             if not save_path.exists():
                 continue
