@@ -19,7 +19,7 @@ random_init: true
 random_goal: true
 
 # train settings
-num_train_frames: 100000
+num_train_frames: 50000
 num_seed_frames: 2000
 update_actor_after_critic_steps: 7999
 num_agent_updates_per_env_step: 1
