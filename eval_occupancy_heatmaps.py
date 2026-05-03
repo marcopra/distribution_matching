@@ -1,5 +1,5 @@
 '''
-python eval_occupancy_heatmaps.py --snapshot exp_local/2026.05.02/143749_062710_dist_matching/models/pixels/gym/dist_matching/1/snapshot.pt --env-config configs/env/gridworld/middle_room.yaml obs_type=pixels
+python eval_occupancy_heatmaps.py --snapshot /home/mprattico-iit.local/distribution_matching/exp_local/2026.05.02/233058_518739_dist_matching/models/discrete_states/gym/dist_matching/1/snapshot.pt --env-config configs/env/gridworld/middle_room.yaml --obs-type=pixels
 '''
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib import patches
+from gymnasium import spaces
 import numpy as np
 from omegaconf import OmegaConf
 import torch
@@ -221,7 +222,19 @@ def make_env(args):
     )
 
 
+def sample_random_action(action_space, rng: np.random.Generator):
+    if isinstance(action_space, spaces.Discrete):
+        return int(rng.integers(action_space.n))
+    if isinstance(action_space, spaces.Box):
+        return rng.uniform(action_space.low, action_space.high).astype(action_space.dtype)
+    return action_space.sample()
+
+
 def collect_one_trajectory(env, agent, meta, step: int, seed: int, eval_mode: bool):
+    rng = np.random.default_rng(seed)
+    if agent is None:
+        env.action_space.seed(seed)
+
     time_step = env.reset(seed=seed)
     trajectory = []
     point = extract_occupancy_trajectory_point(env, time_step)
@@ -229,8 +242,11 @@ def collect_one_trajectory(env, agent, meta, step: int, seed: int, eval_mode: bo
         trajectory.append(point)
 
     while not time_step.last():
-        with torch.no_grad(), utils.eval_mode(agent):
-            action = call_agent_act(agent, time_step.observation, meta, step, eval_mode)
+        if agent is None:
+            action = sample_random_action(env.action_space, rng)
+        else:
+            with torch.no_grad(), utils.eval_mode(agent):
+                action = call_agent_act(agent, time_step.observation, meta, step, eval_mode)
         time_step = env.step(action)
         point = extract_occupancy_trajectory_point(env, time_step)
         if point is not None:
@@ -240,11 +256,14 @@ def collect_one_trajectory(env, agent, meta, step: int, seed: int, eval_mode: bo
 
 
 def collect_trajectory_groups(env, agent, args) -> list[list[np.ndarray]]:
-    insert_env = getattr(agent, "insert_env", None)
-    if callable(insert_env):
-        insert_env(env)
+    if agent is None:
+        print("No snapshot provided; collecting trajectories with a random policy.")
+    else:
+        insert_env = getattr(agent, "insert_env", None)
+        if callable(insert_env):
+            insert_env(env)
 
-    meta = agent.init_meta() if hasattr(agent, "init_meta") else {}
+    meta = agent.init_meta() if agent is not None and hasattr(agent, "init_meta") else {}
     groups = []
     for plot_idx in range(args.n_plots):
         group = []
@@ -528,7 +547,12 @@ def parse_args():
             "with a shared visit-count color scale."
         )
     )
-    parser.add_argument("--snapshot", type=Path, required=True, help="Path to snapshot.pt or snapshot_<step>.pt.")
+    parser.add_argument(
+        "--snapshot",
+        type=Path,
+        default=None,
+        help="Optional path to snapshot.pt or snapshot_<step>.pt. If omitted, a random policy is used.",
+    )
     parser.add_argument(
         "--env-config",
         type=Path,
@@ -537,11 +561,11 @@ def parse_args():
     )
     parser.add_argument("--output-dir", type=Path, default=Path("eval_occupancy_heatmaps"))
     parser.add_argument("--n-plots", type=int, default=20, help="Number of occupancy plots to create.")
-    parser.add_argument("--k-trajectories", type=int, default=20, help="Trajectories sampled per occupancy plot.")
-    parser.add_argument("--step", type=int, default=50000, help="Step value passed to the policy and shown in the plot label.")
+    parser.add_argument("--k-trajectories", type=int, default=50, help="Trajectories sampled per occupancy plot.")
+    parser.add_argument("--step", type=int, default=100000, help="Step value passed to the policy and shown in the plot label.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--obs-type", type=str, default="discrete_states")
+    parser.add_argument("--obs-type", type=str, default="pixels")
     parser.add_argument("--frame-stack", type=int, default=1)
     parser.add_argument("--action-repeat", type=int, default=1)
     parser.add_argument("--resolution", type=int, default=84)
@@ -549,7 +573,7 @@ def parse_args():
     parser.add_argument("--no-url", action="store_true", help="Disable the url=True continuing-task wrapper used by pretrain.py.")
     parser.add_argument("--eval-mode", action="store_true", help="Use deterministic/eval policy mode. Default matches pretrain.py eval_mode=False.")
     parser.add_argument("--bins", type=int, default=48, help="Histogram bins for continuous-coordinate environments.")
-    parser.add_argument("--zero-fill-probability", type=float, default=0.7)
+    parser.add_argument("--zero-fill-probability", type=float, default=0.0)
     parser.add_argument("--cmap", type=str, default="viridis")
     parser.add_argument("--dpi", type=int, default=300)
     return parser.parse_args()
@@ -560,7 +584,7 @@ def main():
     device = torch.device(args.device)
     env = make_env(args)
     try:
-        agent = load_snapshot_agent(args.snapshot, device)
+        agent = load_snapshot_agent(args.snapshot, device) if args.snapshot is not None else None
         groups = collect_trajectory_groups(env, agent, args)
         saved_paths = save_occupancy_plots(env, groups, args)
     finally:

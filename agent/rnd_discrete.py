@@ -220,8 +220,9 @@ class RNDAgent(DDPGAgent):
             self.update_critic(obs.detach(), action, reward, critic_discount,
                                next_obs.detach(), step))
 
-        # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

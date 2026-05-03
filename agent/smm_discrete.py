@@ -283,8 +283,9 @@ class SMMAgent(DDPGAgent):
             self.update_critic(obs_z.detach(), action, reward, discount,
                                next_obs_z.detach(), step))
 
-        # update actor
-        metrics.update(self.update_actor(obs_z.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs_z.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

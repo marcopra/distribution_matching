@@ -245,8 +245,9 @@ class CICAgent(DDPGAgent):
         metrics.update(
             self.update_critic(obs, action, reward, discount, next_obs, step))
 
-        # update actor
-        metrics.update(self.update_actor(obs, step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs, step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
