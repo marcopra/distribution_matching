@@ -21,7 +21,7 @@ random_goal: true
 # train settings
 num_train_frames: 50000
 num_seed_frames: 2000
-update_actor_after_critic_steps: 7999
+update_actor_after_critic_steps: 9999
 num_agent_updates_per_env_step: 1
 # eval
 eval_every_frames: 5000
@@ -54,6 +54,7 @@ experiment: exp
 
 agent:
   actor_lr: 1e-7
+  eps_schedule: linear(0.3, 0.01, 30000)
 
 
 
