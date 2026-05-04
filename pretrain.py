@@ -236,6 +236,7 @@ class Workspace:
         if eval_mode == False:
             utils.ColorPrint.yellow("Evaluating with eval_mode=False")
         while eval_until_episode(episode):
+            meta = self.agent.init_meta()
             time_step = self.eval_env.reset()
             trajectory = []
             point = extract_eval_trajectory_point(self.eval_env, time_step)

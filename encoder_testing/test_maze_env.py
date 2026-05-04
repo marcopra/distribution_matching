@@ -21,7 +21,7 @@ from env.maze_generator import write_maze_files
 def main() -> None:
     output_dir = Path("encoder_testing/maze_test_outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
-    n_states = 200
+    n_states = 500
     architecture_path = output_dir / f"maze_{n_states}_seed7.yaml"
     env_config_path = output_dir / f"maze_{n_states}_seed7_env.yaml"
     write_maze_files(
@@ -29,7 +29,7 @@ def main() -> None:
         seed=7,
         architecture_path=architecture_path,
         env_config_path=env_config_path,
-        max_steps=128,
+        max_steps=600,
     )
 
     env = gym_env.make(
@@ -40,7 +40,7 @@ def main() -> None:
         resolution=512,
         render_mode="rgb_array",
         maze_file=str(architecture_path),
-        max_steps=128,
+        max_steps=600,
     )
     time_step = env.reset(seed=0)
 
