@@ -49,7 +49,7 @@ class DDPGAgent:
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.num_expl_steps = num_expl_steps
-        self.update_actor_after_critic_steps = update_actor_after_critic_steps
+        self.update_actor_after_critic_steps = num_expl_steps + update_actor_after_critic_steps
         self.eps_schedule = eps_schedule
         self.init_critic = init_critic
         self.feature_dim = feature_dim
