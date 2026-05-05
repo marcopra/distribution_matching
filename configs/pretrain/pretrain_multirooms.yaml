@@ -26,7 +26,7 @@ num_seed_frames: 2000
 
 # eval
 eval_every_frames: 10000
-num_eval_episodes: 50
+num_eval_episodes: 1
 plot_eval_trajectories: true
 eval_trajectory_plot_dir: eval_trajectory_plots
 # 1-based eval episode ids to include in trajectory plots. Empty means all.
