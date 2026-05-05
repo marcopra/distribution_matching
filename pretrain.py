@@ -59,6 +59,9 @@ class Workspace:
         if not hasattr(self.cfg, 'grayscale'):
             with open_dict(self.cfg):
                 self.cfg.grayscale = False
+        if cfg.seed == -1:
+            cfg.seed = np.random.randint(0, 1000000)
+            
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
 

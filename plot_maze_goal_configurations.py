@@ -189,8 +189,8 @@ def draw_maze(ax, config: MazeConfig, show_coordinates: bool) -> None:
                     1.0,
                     1.0,
                     facecolor="#161616",
-                    edgecolor="#f2f2f2",
-                    linewidth=0.45,
+                    edgecolor="#b9b6b6",
+                    linewidth=0.25,
                 )
             )
 
@@ -200,7 +200,7 @@ def draw_maze(ax, config: MazeConfig, show_coordinates: bool) -> None:
         marker="s",
         s=150,
         c="#d62728",
-        edgecolors="white",
+        # edgecolors="white",
         linewidths=1.0,
         zorder=5,
     )
@@ -210,7 +210,7 @@ def draw_maze(ax, config: MazeConfig, show_coordinates: bool) -> None:
         marker="*",
         s=270,
         c="#2ca02c",
-        edgecolors="white",
+        # edgecolors="white",
         linewidths=0.8,
         zorder=6,
     )
@@ -251,10 +251,6 @@ def draw_maze(ax, config: MazeConfig, show_coordinates: bool) -> None:
 
     ax.set_xticks(range(min_x, max_x + 1))
     ax.set_yticks(range(min_y, max_y + 1))
-    ax.set_xticks([x - 0.5 for x in range(min_x, max_x + 2)], minor=True)
-    ax.set_yticks([y - 0.5 for y in range(min_y, max_y + 2)], minor=True)
-    ax.grid(which="minor", color="white", linewidth=0.35, alpha=0.45)
-    ax.tick_params(which="minor", length=0)
 
     if show_coordinates:
         ax.set_xlabel("x coordinate")

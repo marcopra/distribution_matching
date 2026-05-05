@@ -1,9 +1,10 @@
 # @package _global_
 defaults:
-  - /env: two_rooms7_0
+  - /env/gridworld: maze_108_seed7_env
+  - _self_
 
 task_name: ${env.name}
-obs_type: states
+obs_type: pixels
 frame_stack: 1
 action_repeat: 1
 resolution: 84
@@ -12,8 +13,10 @@ random_init: false
 random_goal: false
 seed: 1
 
-replay_buffer_dir: ???
-output_path: replay_buffer_heatmap.png
+replay_buffer_dir: models/maze/108/pixels/smm/buffer
+output_path: models/maze/108/pixels/smm/replay_buffer_heatmap.png
+max_samples: null
+pixel_nearest_batch_size: 64
 
 hydra:
   run:
