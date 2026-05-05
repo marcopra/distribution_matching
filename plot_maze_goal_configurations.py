@@ -21,7 +21,7 @@ from matplotlib.patches import Rectangle
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIGS = [
     REPO_ROOT / "configs/env/gridworld/maze_108_seed7_env.yaml",
-    REPO_ROOT / "configs/env/gridworld/maze_108_seed7_env_2.yaml",
+    REPO_ROOT / "configs/env/gridworld/maze_108_seed7_env_4.yaml",
     REPO_ROOT / "configs/env/gridworld/maze_108_seed7_env_3.yaml",
 ]
 
