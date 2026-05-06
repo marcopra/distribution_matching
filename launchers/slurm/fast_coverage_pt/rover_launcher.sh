@@ -10,6 +10,6 @@ envs=(
 
 for seed in $seeds; do
     for env in "${envs[@]}"; do
-            sbatch --export=SEED="${seed}",ENV="${env}" "launchers/slurm/fast coverage_pt/rover_base.sh"
+            sbatch --export=SEED="${seed}",ENV="${env}" "launchers/slurm/fast_coverage_pt/rover_base.sh"
     done
 done

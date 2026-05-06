@@ -20,7 +20,7 @@ agents=(
 for seed in $seeds; do
     for env in "${envs[@]}"; do
         for agent in "${agents[@]}"; do
-            sbatch --export=SEED="${seed}",ENV="${env}",AGENT="${agent}" "launchers/slurm/fast coverage_pt/baseline_base.sh"
+            sbatch --export=SEED="${seed}",ENV="${env}",AGENT="${agent}" "launchers/slurm/fast_coverage_pt/baseline_base.sh"
         done
     done
 done
