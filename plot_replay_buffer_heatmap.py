@@ -2,6 +2,8 @@ from pathlib import Path
 
 import hydra
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
+from matplotlib import patches
 import numpy as np
 from omegaconf import OmegaConf
 
@@ -86,20 +88,40 @@ def get_heatmap_percentiles(cfg):
 
 
 def compute_heatmap_bounds(grid, lower_percentile, upper_percentile):
-    if lower_percentile is None or upper_percentile is None:
-        return None, None
-
     visited_counts = grid[grid > 0]
     if len(visited_counts) == 0:
         return None, None
 
-    vmin, vmax = np.percentile(
-        visited_counts,
-        [lower_percentile, upper_percentile],
-    )
-    if vmin == vmax:
-        return None, None
-    return float(vmin), float(vmax)
+    if lower_percentile is None or upper_percentile is None:
+        vmin = 1.0
+        vmax = float(np.max(visited_counts))
+    else:
+        vmin, vmax = np.percentile(
+            visited_counts,
+            [lower_percentile, upper_percentile],
+        )
+
+    vmin = max(float(vmin), 1.0)
+    vmax = max(float(vmax), vmin)
+    if vmax == vmin:
+        vmax = max(float(np.max(visited_counts)), vmin + 1.0)
+    return vmin, vmax
+
+
+def paper_heatmap_rc():
+    return {
+        'font.family': 'DejaVu Sans',
+        'font.size': 7,
+        'axes.titlesize': 7.5,
+        'axes.labelsize': 7,
+        'xtick.labelsize': 6,
+        'ytick.labelsize': 6,
+        'legend.fontsize': 6,
+        'figure.titlesize': 9,
+        'axes.linewidth': 0.8,
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    }
 
 
 def limited_observations(observations, total_observations, max_samples):
@@ -275,35 +297,85 @@ def build_visitation_grid(env, state_counts):
     return grid
 
 
-def plot_heatmap(grid, total_observations, save_path,
+def draw_discrete_background(ax, env):
+    dead_state = getattr(env.unwrapped, 'DEAD_STATE', None)
+    for cell in env.unwrapped.cells:
+        if dead_state is not None and cell == dead_state:
+            continue
+        x, y = cell[:2]
+        ax.add_patch(
+            patches.Rectangle(
+                (x - 0.5, y - 0.5),
+                1.0,
+                1.0,
+                facecolor='#f7f7f7',
+                edgecolor='#d9d9d9',
+                linewidth=0.35,
+                zorder=0,
+            )
+        )
+
+
+def get_heatmap_extent(env):
+    cells = env.unwrapped.cells
+    max_x = max(cell[0] for cell in cells)
+    max_y = max(cell[1] for cell in cells)
+    min_x = min(cell[0] for cell in cells)
+    min_y = min(cell[1] for cell in cells)
+    return [min_x - 0.5, max_x + 0.5, max_y + 0.5, min_y - 0.5]
+
+
+def style_heatmap_axis(ax, env, title):
+    cells = env.unwrapped.cells
+    max_x = max(cell[0] for cell in cells)
+    max_y = max(cell[1] for cell in cells)
+    min_x = min(cell[0] for cell in cells)
+    min_y = min(cell[1] for cell in cells)
+
+    ax.set_xlim(min_x - 0.5, max_x + 0.5)
+    ax.set_ylim(max_y + 0.5, min_y - 0.5)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_title(title, pad=4)
+    ax.tick_params(direction='out', length=3, width=0.7)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+
+
+def plot_heatmap(env, grid, total_observations, save_path,
                  lower_percentile, upper_percentile):
-    masked_grid = np.ma.masked_where(grid == 0, grid)
+    masked_grid = np.ma.masked_where(grid <= 0, grid)
     vmin, vmax = compute_heatmap_bounds(
         grid,
         lower_percentile,
         upper_percentile,
     )
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_facecolor('#B2B2B2')
-    im = ax.imshow(
-        masked_grid,
-        cmap='viridis',
-        interpolation='nearest',
-        vmin=vmin,
-        vmax=vmax,
-    )
-    ax.set_title(f'Replay Buffer State Visitation (n={total_observations})')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_xticks(np.arange(-0.5, grid.shape[1], 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, grid.shape[0], 1), minor=True)
-    ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
-    plt.colorbar(im, ax=ax, label='Visit Count')
+    with plt.rc_context(paper_heatmap_rc()):
+        fig, ax = plt.subplots(figsize=(3.25, 3.05), constrained_layout=True)
+        draw_discrete_background(ax, env)
+        norm = None
+        if vmin is not None and vmax is not None:
+            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
 
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
+        im = ax.imshow(
+            masked_grid,
+            extent=get_heatmap_extent(env),
+            cmap='viridis',
+            norm=norm,
+            interpolation='nearest',
+            zorder=1,
+        )
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.025)
+        cbar.set_label('visit count')
+        style_heatmap_axis(
+            ax,
+            env,
+            f'Aggregated visitation (n={total_observations})',
+        )
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     return vmin, vmax
 
@@ -358,6 +430,7 @@ def main(cfg):
     save_path = Path(cfg.output_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     vmin, vmax = plot_heatmap(
+        env,
         grid,
         total_observations,
         save_path,
@@ -370,7 +443,12 @@ def main(cfg):
     print(f'Decoded {total_observations} observations using {decode_mode} mode')
     if max_samples is not None:
         print(f'Stopped after first_n_elements={max_samples}')
-    if vmin is not None and vmax is not None:
+    if (
+        vmin is not None
+        and vmax is not None
+        and lower_percentile is not None
+        and upper_percentile is not None
+    ):
         print(
             f'Heatmap color bounds from percentiles '
             f'{lower_percentile:g}/{upper_percentile:g}: vmin={vmin:g}, vmax={vmax:g}'

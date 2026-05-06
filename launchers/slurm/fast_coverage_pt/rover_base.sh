@@ -18,9 +18,12 @@ export HYDRA_FULL_ERROR=1
 
 python pretrain.py --config-name=pretrain/pretrain_rover_multiplerooms \
     env=${ENV} \
-    obs_type=pixels \
+    obs_type=${OBS_TYPE} \
     agent.feature_dim=200 \
+    "agent.sink_schedule='linear(0.0, 0.5, 100_000)'" \
+    discount=0.9  \
     agent.update_every_steps=50 \
+    agent.batch_size_actor=8000 \
     agent.lr_actor=200 \
     agent.pmd_steps=50 \
     num_seed_frames=1000 \

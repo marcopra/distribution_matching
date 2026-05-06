@@ -13,8 +13,8 @@ random_init: false
 random_goal: false
 seed: 1
 
-replay_buffer_dir: exp_local/2026.05.03/054536_122866_maxent/buffer
-output_path: heatmaps_replay_buffer/MAXENT
+replay_buffer_dir: exp_local/2026.05.01/231900_178671_cic
+output_path: heatmaps_replay_buffer/CIC
 first_n_elements: 100_000
 max_samples: null
 pixel_nearest_batch_size: 64

@@ -1,15 +1,21 @@
 #!/bin/bash
 
-seeds="0 1 2 3"
+seeds="0"
 
 envs=(
     "gridworld/maze_108_seed7_env"
     # "gridworld/multiplerooms5_4x4_0"
 )
 
+obs_types=(
+    "pixels"
+    "discrete_states"
+)
 
 for seed in $seeds; do
     for env in "${envs[@]}"; do
-            sbatch --export=SEED="${seed}",ENV="${env}" "launchers/slurm/fast_coverage_pt/rover_base.sh"
+        for obs_type in "${obs_types[@]}"; do
+            sbatch --export=SEED="${seed}",ENV="${env}",OBS_TYPE="${obs_type}" "launchers/slurm/fast_coverage_pt/rover_base.sh"
+        done
     done
 done

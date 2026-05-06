@@ -220,3 +220,4 @@ data*
 .hydra
 maxent/
 *outputs
+exp_local*
