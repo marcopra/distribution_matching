@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /env/gridworld: middle_room
+  - /env/gridworld: maze_108_seed7_env
   - _self_
 
 task_name: ${env.name}
@@ -13,8 +13,8 @@ random_init: false
 random_goal: false
 seed: 1
 
-replay_buffer_dir: exp_local/2026.05.03/072326_220419_smm/buffer
-output_path: heatmaps_replay_buffer/SMM
+replay_buffer_dir: data_coverage/raw/maze/2026.05.05_states/024943_770762_dist_matching/buffer
+output_path: heatmaps_replay_buffer/ROVER1
 first_n_elements: 100_000
 max_samples: null
 pixel_nearest_batch_size: 64
