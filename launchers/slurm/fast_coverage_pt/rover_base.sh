@@ -24,6 +24,7 @@ python pretrain.py --config-name=pretrain/pretrain_rover_multiplerooms \
     discount=0.9  \
     agent.update_every_steps=50 \
     agent.batch_size_actor=8000 \
+    num_eval_episodes=50 \
     agent.lr_actor=200 \
     agent.pmd_steps=50 \
     num_seed_frames=1000 \

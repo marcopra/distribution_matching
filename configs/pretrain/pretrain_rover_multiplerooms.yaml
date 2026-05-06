@@ -25,7 +25,7 @@ num_train_frames: 1_000_000
 num_seed_frames: 2000
 
 # eval
-eval_every_frames: 10000
+eval_every_frames: 25000
 num_eval_episodes: 1
 plot_eval_trajectories: true
 eval_trajectory_plot_dir: eval_trajectory_plots
