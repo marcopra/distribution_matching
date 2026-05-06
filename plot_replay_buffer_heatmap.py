@@ -29,13 +29,28 @@ def observation_key(observation):
 
 
 def get_max_samples(cfg):
+    first_n_elements = cfg.get("first_n_elements", None)
     max_samples = cfg.get("max_samples", None)
+
+    if first_n_elements is not None and max_samples is not None:
+        if int(first_n_elements) != int(max_samples):
+            raise ValueError(
+                "Set only one replay-buffer limit: first_n_elements or max_samples "
+                f"(got first_n_elements={first_n_elements}, max_samples={max_samples})"
+            )
+
+    if first_n_elements is not None:
+        max_samples = first_n_elements
+
     if max_samples is None:
         return None
 
     max_samples = int(max_samples)
     if max_samples <= 0:
-        raise ValueError(f"max_samples must be positive or null, got {max_samples}")
+        raise ValueError(
+            "first_n_elements/max_samples must be positive or null, "
+            f"got {max_samples}"
+        )
     return max_samples
 
 
@@ -282,7 +297,7 @@ def main(cfg):
     print(f"Loaded {len(npz_files)} episodes from {replay_dir}")
     print(f"Decoded {total_observations} observations using {decode_info['mode']} mode")
     if max_samples is not None:
-        print(f"Stopped after max_samples={max_samples}")
+        print(f"Stopped after first_n_elements={max_samples}")
     for key, value in decode_info.items():
         if key != "mode":
             print(f"{key}: {value}")

@@ -15,6 +15,7 @@ seed: 1
 
 replay_buffer_dir: models/maze/108/pixels/smm/buffer
 output_path: models/maze/108/pixels/smm/replay_buffer_heatmap.png
+first_n_elements: null
 max_samples: null
 pixel_nearest_batch_size: 64
 
