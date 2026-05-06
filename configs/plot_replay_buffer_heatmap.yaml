@@ -13,8 +13,8 @@ random_init: false
 random_goal: false
 seed: 1
 
-replay_buffer_dir: exp_local/2026.05.01/231900_178671_cic
-output_path: heatmaps_replay_buffer/CIC
+replay_buffer_dir: exp_local/2026.05.03/072326_220419_smm/buffer
+output_path: heatmaps_replay_buffer/SMM
 first_n_elements: 100_000
 max_samples: null
 pixel_nearest_batch_size: 64
