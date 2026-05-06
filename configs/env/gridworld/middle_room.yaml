@@ -10,7 +10,7 @@ env:
   render_mode: rgb_array
   show_coordinates: false
   dense_reward: false
-  synthetic_first_transition: true
+  # synthetic_first_transition: true
 
   # Optional per-side size overrides. Leave null to use outer_room_size.
   north_room_size: null

@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /env/gridworld: maze_108_seed7_env
+  - /env/gridworld: middle_room
   - _self_
 
 task_name: ${env.name}
@@ -13,11 +13,15 @@ random_init: false
 random_goal: false
 seed: 1
 
-replay_buffer_dir: models/maze/108/pixels/smm/buffer
-output_path: models/maze/108/pixels/smm/replay_buffer_heatmap.png
-first_n_elements: null
+replay_buffer_dir: exp_local/2026.05.03/054536_122866_maxent/buffer
+output_path: heatmaps_replay_buffer/MAXENT
+first_n_elements: 100_000
 max_samples: null
 pixel_nearest_batch_size: 64
+heatmap_lower_percentile: 0
+heatmap_upper_percentile: 99
+
+
 
 hydra:
   run:

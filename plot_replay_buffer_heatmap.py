@@ -9,7 +9,7 @@ import gym_env
 
 
 def load_episode(fn):
-    with fn.open("rb") as f:
+    with fn.open('rb') as f:
         episode = np.load(f)
         return {k: episode[k] for k in episode.keys()}
 
@@ -18,7 +18,7 @@ def decode_state_indices(observations):
     observations = np.asarray(observations)
     if observations.ndim != 2:
         raise ValueError(
-            f"Expected one-hot observations with shape [T, n_states], got {observations.shape}"
+            f'Expected one-hot observations with shape [T, n_states], got {observations.shape}'
         )
     return np.argmax(observations, axis=1)
 
@@ -29,14 +29,14 @@ def observation_key(observation):
 
 
 def get_max_samples(cfg):
-    first_n_elements = cfg.get("first_n_elements", None)
-    max_samples = cfg.get("max_samples", None)
+    first_n_elements = cfg.get('first_n_elements', None)
+    max_samples = cfg.get('max_samples', None)
 
     if first_n_elements is not None and max_samples is not None:
         if int(first_n_elements) != int(max_samples):
             raise ValueError(
-                "Set only one replay-buffer limit: first_n_elements or max_samples "
-                f"(got first_n_elements={first_n_elements}, max_samples={max_samples})"
+                'Set only one replay-buffer limit: first_n_elements or max_samples '
+                f'(got first_n_elements={first_n_elements}, max_samples={max_samples})'
             )
 
     if first_n_elements is not None:
@@ -48,10 +48,58 @@ def get_max_samples(cfg):
     max_samples = int(max_samples)
     if max_samples <= 0:
         raise ValueError(
-            "first_n_elements/max_samples must be positive or null, "
-            f"got {max_samples}"
+            'first_n_elements/max_samples must be positive or null, '
+            f'got {max_samples}'
         )
     return max_samples
+
+
+def get_heatmap_percentiles(cfg):
+    lower_percentile = cfg.get('heatmap_lower_percentile', None)
+    upper_percentile = cfg.get('heatmap_upper_percentile', None)
+
+    if lower_percentile is None and upper_percentile is None:
+        return None, None
+    if lower_percentile is None or upper_percentile is None:
+        raise ValueError(
+            'Set both heatmap_lower_percentile and heatmap_upper_percentile, '
+            'or null for both'
+        )
+
+    lower_percentile = float(lower_percentile)
+    upper_percentile = float(upper_percentile)
+    if not 0 <= lower_percentile <= 100:
+        raise ValueError(
+            f'heatmap_lower_percentile must be in [0, 100], got {lower_percentile}'
+        )
+    if not 0 <= upper_percentile <= 100:
+        raise ValueError(
+            f'heatmap_upper_percentile must be in [0, 100], got {upper_percentile}'
+        )
+    if lower_percentile > upper_percentile:
+        raise ValueError(
+            'heatmap_lower_percentile must be <= heatmap_upper_percentile '
+            f'(got {lower_percentile} > {upper_percentile})'
+        )
+
+    return lower_percentile, upper_percentile
+
+
+def compute_heatmap_bounds(grid, lower_percentile, upper_percentile):
+    if lower_percentile is None or upper_percentile is None:
+        return None, None
+
+    visited_counts = grid[grid > 0]
+    if len(visited_counts) == 0:
+        return None, None
+
+    vmin, vmax = np.percentile(
+        visited_counts,
+        [lower_percentile, upper_percentile],
+    )
+    if vmin == vmax:
+        return None, None
+    return float(vmin), float(vmax)
 
 
 def limited_observations(observations, total_observations, max_samples):
@@ -70,7 +118,7 @@ def render_all_state_observations(env):
     duplicate_states = []
 
     for state_idx in range(env.unwrapped.n_states):
-        time_step = env.reset(options={"start_state": state_idx})
+        time_step = env.reset(options={'start_state': state_idx})
         observation = np.asarray(time_step.observation)
         rendered_observations.append(observation)
 
@@ -80,10 +128,10 @@ def render_all_state_observations(env):
         key_to_state[key] = state_idx
 
     if duplicate_states:
-        pairs = ", ".join(f"{a}/{b}" for a, b in duplicate_states[:5])
+        pairs = ', '.join(f'{a}/{b}' for a, b in duplicate_states[:5])
         raise ValueError(
-            "Pixel matching is ambiguous because some rendered states are identical: "
-            f"{pairs}"
+            'Pixel matching is ambiguous because some rendered states are identical: '
+            f'{pairs}'
         )
 
     return np.stack(rendered_observations, axis=0), key_to_state
@@ -116,11 +164,11 @@ def count_one_hot_observations(npz_files, n_states, max_samples):
 
     for npz_file in npz_files:
         episode = load_episode(npz_file)
-        if "observation" not in episode:
-            raise KeyError(f"Missing 'observation' in {npz_file}")
+        if 'observation' not in episode:
+            raise KeyError(f'Missing observation in {npz_file}')
 
         observations = limited_observations(
-            episode["observation"],
+            episode['observation'],
             total_observations,
             max_samples,
         )
@@ -130,14 +178,14 @@ def count_one_hot_observations(npz_files, n_states, max_samples):
         state_indices = decode_state_indices(observations)
         if np.any(state_indices >= n_states):
             raise ValueError(
-                f"Found decoded states outside the environment range in {npz_file}: "
-                f"max index {state_indices.max()}, env has {n_states} states"
+                f'Found decoded states outside the environment range in {npz_file}: '
+                f'max index {state_indices.max()}, env has {n_states} states'
             )
 
         state_counts += np.bincount(state_indices, minlength=n_states)
         total_observations += len(state_indices)
 
-    return state_counts, total_observations, {"mode": "one-hot"}
+    return state_counts, total_observations, {'mode': 'one-hot'}
 
 
 def count_pixel_observations(npz_files, env, max_samples, nearest_batch_size):
@@ -151,11 +199,11 @@ def count_pixel_observations(npz_files, env, max_samples, nearest_batch_size):
 
     for npz_file in npz_files:
         episode = load_episode(npz_file)
-        if "observation" not in episode:
-            raise KeyError(f"Missing 'observation' in {npz_file}")
+        if 'observation' not in episode:
+            raise KeyError(f'Missing observation in {npz_file}')
 
         observations = limited_observations(
-            episode["observation"],
+            episode['observation'],
             total_observations,
             max_samples,
         )
@@ -164,9 +212,9 @@ def count_pixel_observations(npz_files, env, max_samples, nearest_batch_size):
 
         if tuple(observations.shape[1:]) != tuple(rendered_shape):
             raise ValueError(
-                f"Observation shape mismatch in {npz_file}: buffer has "
-                f"{observations.shape[1:]}, rendered states have {rendered_shape}. "
-                "Check obs_type, frame_stack, resolution, grayscale, and env config."
+                f'Observation shape mismatch in {npz_file}: buffer has '
+                f'{observations.shape[1:]}, rendered states have {rendered_shape}. '
+                'Check obs_type, frame_stack, resolution, grayscale, and env config.'
             )
 
         for observation in observations:
@@ -193,17 +241,17 @@ def count_pixel_observations(npz_files, env, max_samples, nearest_batch_size):
             state_counts[int(state_idx)] += unmatched_counts[key]
 
         nearest_summary = {
-            "nearest_fallback_unique_observations": len(keys),
-            "nearest_fallback_total_observations": int(
+            'nearest_fallback_unique_observations': len(keys),
+            'nearest_fallback_total_observations': int(
                 sum(unmatched_counts.values())
             ),
-            "nearest_max_squared_distance": float(np.max(nearest_distances)),
-            "nearest_mean_squared_distance": float(np.mean(nearest_distances)),
+            'nearest_max_squared_distance': float(np.max(nearest_distances)),
+            'nearest_mean_squared_distance': float(np.mean(nearest_distances)),
         }
 
     return state_counts, total_observations, {
-        "mode": "pixels",
-        "rendered_states": n_states,
+        'mode': 'pixels',
+        'rendered_states': n_states,
         **nearest_summary,
     }
 
@@ -227,36 +275,52 @@ def build_visitation_grid(env, state_counts):
     return grid
 
 
-def plot_heatmap(grid, total_observations, save_path):
+def plot_heatmap(grid, total_observations, save_path,
+                 lower_percentile, upper_percentile):
     masked_grid = np.ma.masked_where(grid == 0, grid)
+    vmin, vmax = compute_heatmap_bounds(
+        grid,
+        lower_percentile,
+        upper_percentile,
+    )
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_facecolor("#B2B2B2")
-    im = ax.imshow(masked_grid, cmap="YlOrRd", interpolation="nearest")
-    ax.set_title(f"Replay Buffer State Visitation (n={total_observations})")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
+    ax.set_facecolor('#B2B2B2')
+    im = ax.imshow(
+        masked_grid,
+        cmap='viridis',
+        interpolation='nearest',
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_title(f'Replay Buffer State Visitation (n={total_observations})')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
     ax.set_xticks(np.arange(-0.5, grid.shape[1], 1), minor=True)
     ax.set_yticks(np.arange(-0.5, grid.shape[0], 1), minor=True)
-    ax.grid(which="minor", color="white", linestyle="-", linewidth=0.5, alpha=0.5)
-    plt.colorbar(im, ax=ax, label="Visit Count")
+    ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+    plt.colorbar(im, ax=ax, label='Visit Count')
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
+    return vmin, vmax
 
-@hydra.main(config_path="configs", config_name="plot_replay_buffer_heatmap", version_base="1.1")
+
+@hydra.main(config_path='configs',
+            config_name='plot_replay_buffer_heatmap',
+            version_base='1.1')
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))
 
     replay_dir = Path(cfg.replay_buffer_dir).resolve()
-    npz_files = sorted(replay_dir.glob("*.npz"))
+    npz_files = sorted(replay_dir.glob('*.npz'))
     if not npz_files:
-        raise FileNotFoundError(f"No .npz files found in {replay_dir}")
+        raise FileNotFoundError(f'No .npz files found in {replay_dir}')
 
-    env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, "env") else {}
-    env_kwargs.pop("name", None)
+    env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
+    env_kwargs.pop('name', None)
     env = gym_env.make(
         cfg.task_name,
         cfg.obs_type,
@@ -271,11 +335,12 @@ def main(cfg):
 
     n_states = env.unwrapped.n_states
     max_samples = get_max_samples(cfg)
+    lower_percentile, upper_percentile = get_heatmap_percentiles(cfg)
     first_episode = load_episode(npz_files[0])
-    if "observation" not in first_episode:
-        raise KeyError(f"Missing 'observation' in {npz_files[0]}")
+    if 'observation' not in first_episode:
+        raise KeyError(f'Missing observation in {npz_files[0]}')
 
-    if np.asarray(first_episode["observation"]).ndim == 2:
+    if np.asarray(first_episode['observation']).ndim == 2:
         state_counts, total_observations, decode_info = count_one_hot_observations(
             npz_files,
             n_states,
@@ -286,23 +351,35 @@ def main(cfg):
             npz_files,
             env,
             max_samples,
-            cfg.get("pixel_nearest_batch_size", 64),
+            cfg.get('pixel_nearest_batch_size', 64),
         )
 
     grid = build_visitation_grid(env, state_counts)
     save_path = Path(cfg.output_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    plot_heatmap(grid, total_observations, save_path)
+    vmin, vmax = plot_heatmap(
+        grid,
+        total_observations,
+        save_path,
+        lower_percentile,
+        upper_percentile,
+    )
 
-    print(f"Loaded {len(npz_files)} episodes from {replay_dir}")
-    print(f"Decoded {total_observations} observations using {decode_info['mode']} mode")
+    print(f'Loaded {len(npz_files)} episodes from {replay_dir}')
+    decode_mode = decode_info['mode']
+    print(f'Decoded {total_observations} observations using {decode_mode} mode')
     if max_samples is not None:
-        print(f"Stopped after first_n_elements={max_samples}")
+        print(f'Stopped after first_n_elements={max_samples}')
+    if vmin is not None and vmax is not None:
+        print(
+            f'Heatmap color bounds from percentiles '
+            f'{lower_percentile:g}/{upper_percentile:g}: vmin={vmin:g}, vmax={vmax:g}'
+        )
     for key, value in decode_info.items():
-        if key != "mode":
-            print(f"{key}: {value}")
-    print(f"Saved heatmap to {save_path.resolve()}")
+        if key != 'mode':
+            print(f'{key}: {value}')
+    print(f'Saved heatmap to {save_path.resolve()}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
