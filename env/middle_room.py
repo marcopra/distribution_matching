@@ -63,6 +63,7 @@ class MiddleRoomEnv(BaseRoomEnv):
         connector_positions: Optional[Dict[str, int]] = None,
         goal_position: Optional[Tuple[int, int]] = None,
         start_position: Optional[Tuple[int, int]] = None,
+        synthetic_first_transition: bool = False,
         max_steps: int = 300,
         render_mode: Optional[str] = None,
         show_coordinates: bool = False,

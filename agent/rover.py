@@ -18,6 +18,7 @@ from sklearn.manifold import TSNE
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 from matplotlib.patches import Patch, Rectangle
 import utils
 from distribution_matching import DistributionVisualizer
@@ -1289,17 +1290,17 @@ class EmbeddingDistributionVisualizerV2:
         fig.text(0.02, 0.98, param_text, fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        gs = fig.add_gridspec(3, 6, hspace=0.35, wspace=0.4, height_ratios=[1.0, 1.2, 1.2])
+        gs = fig.add_gridspec(4, 6, hspace=0.35, wspace=0.4, height_ratios=[1.0, 1.15, 1.15, 1.0])
         
         # Top row: initial distribution, policy arrows, correlation matrix
         ax_init = fig.add_subplot(gs[0, 0])
         ax_policy = fig.add_subplot(gs[0, 1:3])
         ax_corr = fig.add_subplot(gs[0, 3:6])
         
-        # Lower rows: give the policy bar chart most of the vertical space
-        ax_sample_occ = fig.add_subplot(gs[1, 0])
-        ax_state_corr = fig.add_subplot(gs[2, 0])
-        ax_policy_bars = fig.add_subplot(gs[1:, 1:5])
+        # Lower rows: give the occupancy heatmap and policy bar chart more room
+        ax_sample_occ = fig.add_subplot(gs[1:3, 0:2])
+        ax_state_corr = fig.add_subplot(gs[3, 0:2])
+        ax_policy_bars = fig.add_subplot(gs[1:, 2:6])
         
         # Compute distributions
         nu_init = self._compute_initial_distribution()
@@ -1553,13 +1554,14 @@ class EmbeddingDistributionVisualizerV2:
         plt.close(fig)
         print(f"MiniGrid policy debug visualization saved to: {panel_save_path}")
 
-    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
+    def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True, heatmax_percentile=95):
         """Plot state occupancy from the current batch.
         
         Args:
             ax: matplotlib axis
             title: plot title
             normalize: if True, normalize counts to probabilities; if False, show raw counts
+            heatmax_percentile: percentile of visited-cell values to use as the heatmap maximum
         """
         # Use the cached features from the last actor update
         if not hasattr(self.agent, '_phi_all_next') or self.agent._phi_all_next is None:
@@ -1606,13 +1608,32 @@ class EmbeddingDistributionVisualizerV2:
         
         # Plot on grid
         grid = self._state_dist_to_grid(state_dist)
-        
-        im = ax.imshow(grid, cmap='YlGnBu', interpolation='nearest')
-        ax.set_title(title, fontsize=12, fontweight='bold')
+        visited_values = grid[grid > 0]
+        heatmin = None
+        heatmax = None
+        if visited_values.size > 0:
+            heatmax = np.percentile(visited_values, heatmax_percentile)
+            heatmin = visited_values.min() if normalize else 1
+            heatmax = max(float(heatmax), float(heatmin))
+            if heatmax == heatmin:
+                heatmax = heatmin * 1.01
+
+        masked_grid = ma.masked_where(grid <= 0, grid)
+        cmap = plt.get_cmap('viridis').copy()
+        cmap.set_bad(color='#f2f2f2')
+        norm = None
+        if heatmin is not None and heatmax is not None:
+            norm = mcolors.LogNorm(vmin=heatmin, vmax=heatmax)
+
+        im = ax.imshow(masked_grid, cmap=cmap, norm=norm, interpolation='nearest')
+        # ax.set_title(title, fontsize=12, fontweight='bold')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
+        ax.set_xticks(np.arange(self.grid_width))
+        ax.set_yticks(np.arange(self.grid_height))
+        ax.grid(True, which='both', color='white', linewidth=0.5, alpha=0.35)
         
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.025, label=f'{colorbar_label} (log scale)')
 
     def _plot_distribution(self, ax, nu, title):
         """Plot state distribution on grid WITHOUT text annotations."""
