@@ -12,6 +12,10 @@ lr_T: 1e-4
 batch_size: 1024
 batch_size_actor: 10000
 subsamples: 4000
+svd_truncation: 500
+nystrom_synthetic_subsamples: true
+synthetic_dataset_sub: half # null = all synthetic states; half uses stride 2 for n/2 states
+synthetic_dataset_exclude_states: 2 # e.g. [42] with synthetic_dataset_sub: 103 drops state index 42
 encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4

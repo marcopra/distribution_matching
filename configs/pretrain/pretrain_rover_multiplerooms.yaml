@@ -27,7 +27,7 @@ num_seed_frames: 2000
 # eval
 eval_every_frames: 25000
 num_eval_episodes: 1
-plot_eval_trajectories: true
+plot_eval_trajectories: false
 eval_trajectory_plot_dir: eval_trajectory_plots
 # 1-based eval checkpoints at which to save cumulative trajectory plots.
 # For [20, 25, 35], plots contain the first 20, 25, 35 trajectories;

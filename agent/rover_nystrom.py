@@ -611,7 +611,7 @@ class DistributionMatcher:
         alpha_tilde[:-1] = alpha
         alpha_tilde[-1] = 1.0
 
-        # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
+        # H = phi_all_obs @ phi_su_next_obs.T # [n, m] 
         M = H*(E@pi.T) # [n, m]
 
         if B_nystrom is not None:
