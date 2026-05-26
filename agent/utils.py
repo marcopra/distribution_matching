@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import utils
 from utils import ColorPrint
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Tuple, Optional, Dict
 from dm_env import StepType, specs
 from copy import deepcopy
@@ -13,9 +15,387 @@ import os
 import matplotlib
 matplotlib.use('Agg')  # Backend non-interattivo per salvare senza display
 import matplotlib.pyplot as plt
+from PIL import Image
 
 # torch.set_default_tensor_type(torch.FloatTensor)
 float_type = torch.float32
+
+
+@dataclass(frozen=True)
+class RawActorUpdateData:
+    """Raw observations/actions for one actor update."""
+    full: tuple
+    source: str = "unknown"
+    subsample: Optional[tuple] = None
+
+
+@dataclass(frozen=True)
+class EncodedActorUpdateData:
+    """Pre-encoded features for one actor update."""
+    full: Dict[str, torch.Tensor]
+    rewards: torch.Tensor
+    source: str = "unknown"
+    subsample: Optional[Dict[str, torch.Tensor]] = None
+    subsample_rewards: Optional[torch.Tensor] = None
+
+
+class PointMazeNystromDebugHelper:
+    """Build fixed PointMaze landmark transitions for Nyström debugging."""
+
+    def __init__(self, border_margin: float = 0.05, oversample: float = 2.0):
+        self.border_margin = float(border_margin)
+        self.oversample = float(oversample)
+        self.wrapped_env = None
+        self.env = None
+        self._subsample_batch = None
+        self._fixed_xy_points = None
+        self._fixed_actions = None
+
+    @property
+    def fixed_xy_points(self):
+        return self._fixed_xy_points
+
+    @property
+    def fixed_actions(self):
+        return self._fixed_actions
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["wrapped_env"] = None
+        state["env"] = None
+        return state
+
+    def attach_env(self, env):
+        self.wrapped_env = env
+        self.env = self._find_discrete_env(env)
+        self.clear_cache()
+
+    def clear_cache(self):
+        self._subsample_batch = None
+        self._fixed_xy_points = None
+        self._fixed_actions = None
+
+    @staticmethod
+    def _find_discrete_env(env):
+        current = env
+        while current is not None:
+            if all(hasattr(current, attr) for attr in ("n_states", "idx_to_state", "state_to_idx")):
+                return current
+            if hasattr(current, "env"):
+                current = current.env
+            elif hasattr(current, "unwrapped") and current.unwrapped is not current:
+                current = current.unwrapped
+            else:
+                break
+        return getattr(env, "unwrapped", env)
+
+    def _iter_env_chain(self):
+        current = self.wrapped_env
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            yield current
+            current = getattr(current, "env", None)
+
+    def _env_method(self, method_name):
+        for current in self._iter_env_chain():
+            method = getattr(current, method_name, None)
+            if callable(method):
+                return method
+        return None
+
+    def _base_and_point_env(self):
+        if self.wrapped_env is None:
+            raise RuntimeError("PointMaze Nyström grid requires insert_env(env) before actor updates.")
+        base_env = getattr(self.wrapped_env, "unwrapped", None)
+        point_env = getattr(base_env, "point_env", None)
+        if base_env is None or point_env is None:
+            raise RuntimeError("PointMaze Nyström grid requires unwrapped.point_env.")
+        return base_env, point_env
+
+    def _set_state(self, xy, velocity=(0.0, 0.0)):
+        base_env, point_env = self._base_and_point_env()
+        qpos = point_env.data.qpos.copy()
+        qvel = np.zeros_like(point_env.data.qvel)
+        qpos[:2] = np.asarray(xy, dtype=np.float64)
+        qvel[:2] = np.asarray(velocity, dtype=np.float64)
+        point_env.set_state(qpos, qvel)
+        if hasattr(base_env, "update_target_site_pos"):
+            base_env.update_target_site_pos()
+
+    @contextmanager
+    def _preserve_state(self):
+        base_env, point_env = self._base_and_point_env()
+        snapshot = {
+            "qpos": point_env.data.qpos.copy(),
+            "qvel": point_env.data.qvel.copy(),
+            "wrappers": [],
+        }
+        for current in self._iter_env_chain():
+            wrapper_state = {}
+            if hasattr(current, "_frames"):
+                wrapper_state["frames"] = [frame.copy() for frame in list(current._frames)]
+            if hasattr(current, "_cached_hidden_render"):
+                cached = current._cached_hidden_render
+                wrapper_state["cached_hidden_render"] = None if cached is None else cached.copy()
+            if wrapper_state:
+                snapshot["wrappers"].append((current, wrapper_state))
+
+        try:
+            yield
+        finally:
+            point_env.set_state(snapshot["qpos"], snapshot["qvel"])
+            if hasattr(base_env, "update_target_site_pos"):
+                base_env.update_target_site_pos()
+            for wrapper, wrapper_state in snapshot["wrappers"]:
+                if "frames" in wrapper_state and hasattr(wrapper, "_frames"):
+                    wrapper._frames.clear()
+                    wrapper._frames.extend([frame.copy() for frame in wrapper_state["frames"]])
+                if "cached_hidden_render" in wrapper_state and hasattr(wrapper, "_cached_hidden_render"):
+                    cached = wrapper_state["cached_hidden_render"]
+                    wrapper._cached_hidden_render = None if cached is None else cached.copy()
+
+    def _proprio_observation(self) -> np.ndarray:
+        base_env, _ = self._base_and_point_env()
+        point_obs, _ = base_env.point_env._get_obs()
+        raw_obs = base_env._get_obs(point_obs)
+        process_fn = self._env_method("_process_proprio_obs")
+        if callable(process_fn):
+            return np.asarray(process_fn(raw_obs), dtype=np.float32)
+
+        if isinstance(raw_obs, dict):
+            arrays = [
+                np.asarray(value, dtype=np.float32).reshape(-1)
+                for value in raw_obs.values()
+                if not isinstance(value, str)
+            ]
+            return np.concatenate(arrays, dtype=np.float32)
+        return np.asarray(raw_obs, dtype=np.float32)
+
+    def _prepare_rendered_image(self, agent, image: np.ndarray, render_resolution: int) -> np.ndarray:
+        image = np.asarray(image, dtype=np.uint8)
+        if agent.grayscale:
+            if image.ndim == 3 and image.shape[2] == 1:
+                image = image[..., 0]
+            elif image.ndim == 3:
+                image = np.asarray(Image.fromarray(image).convert("L"))
+            elif image.ndim != 2:
+                raise ValueError(f"Expected grayscale image to be 2D or HWC, got shape {image.shape}")
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.shape[:2] != (render_resolution, render_resolution):
+            image = np.asarray(
+                Image.fromarray(image).resize((render_resolution, render_resolution), Image.LANCZOS)
+            )
+
+        if agent.grayscale and image.ndim == 2:
+            image = image[..., None]
+        elif not agent.grayscale and image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.ndim != 3 or image.shape[2] != agent.image_channels:
+            raise ValueError(f"Expected image shape [H, W, {agent.image_channels}], got {image.shape}")
+        return image
+
+    def _observation(self, agent) -> np.ndarray:
+        if agent.obs_type != "pixels":
+            return self._proprio_observation().reshape(agent.obs_shape)
+
+        render_fn = self._env_method("render_observation") or self._env_method("render")
+        if not callable(render_fn):
+            raise RuntimeError("PointMaze pixel Nyström grid requires render_observation() or render().")
+
+        render_resolution = getattr(self.wrapped_env, "render_resolution", agent.obs_shape[-1])
+        frame_stack = agent.obs_shape[0] // agent.image_channels
+        image = self._prepare_rendered_image(agent, render_fn(), render_resolution)
+        image_chw = image.transpose(2, 0, 1).copy()
+        return np.tile(image_chw, (frame_stack, 1, 1))
+
+    def maze_layout(self):
+        layout_fn = self._env_method("get_debug_maze_layout")
+        layout = layout_fn() if callable(layout_fn) else None
+        layout = layout if isinstance(layout, dict) else self._layout_from_unwrapped_maze()
+        if not isinstance(layout, dict):
+            raise RuntimeError(
+                "PointMaze Nyström grid requires get_debug_maze_layout() or maze.maze_map."
+            )
+
+        maze_lower = np.asarray(layout.get("maze_lower"), dtype=np.float32).reshape(-1)
+        maze_upper = np.asarray(layout.get("maze_upper"), dtype=np.float32).reshape(-1)
+        wall_rectangles = np.asarray(layout.get("wall_rectangles"), dtype=np.float32).reshape(-1, 4)
+        if maze_lower.size != 2 or maze_upper.size != 2:
+            raise RuntimeError("PointMaze layout must provide 2D maze_lower and maze_upper bounds.")
+        return {
+            "maze_lower": maze_lower[:2],
+            "maze_upper": maze_upper[:2],
+            "wall_rectangles": wall_rectangles,
+        }
+
+    def _layout_from_unwrapped_maze(self):
+        base_env = getattr(self.wrapped_env, "unwrapped", None)
+        maze = getattr(base_env, "maze", None)
+        if maze is None or not hasattr(maze, "maze_map") or not hasattr(maze, "cell_rowcol_to_xy"):
+            return None
+
+        half_cell = 0.5 * float(getattr(maze, "maze_size_scaling", 1.0))
+        all_rectangles, wall_rectangles = [], []
+        for row_idx, row in enumerate(maze.maze_map):
+            for col_idx, cell in enumerate(row):
+                center = maze.cell_rowcol_to_xy(np.array([row_idx, col_idx], dtype=np.int32))
+                rect = np.array(
+                    [center[0] - half_cell, center[1] - half_cell, 2.0 * half_cell, 2.0 * half_cell],
+                    dtype=np.float32,
+                )
+                all_rectangles.append(rect)
+                if cell == 1:
+                    wall_rectangles.append(rect)
+
+        if not all_rectangles:
+            return None
+        all_rectangles = np.asarray(all_rectangles, dtype=np.float32)
+        return {
+            "maze_lower": all_rectangles[:, :2].min(axis=0),
+            "maze_upper": (all_rectangles[:, :2] + all_rectangles[:, 2:4]).max(axis=0),
+            "wall_rectangles": np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4),
+        }
+
+    @staticmethod
+    def _points_outside_walls(points: np.ndarray, wall_rectangles: np.ndarray, margin: float) -> np.ndarray:
+        if wall_rectangles.size == 0:
+            return np.ones(points.shape[0], dtype=bool)
+        wall_lower = wall_rectangles[:, :2] - margin
+        wall_upper = wall_rectangles[:, :2] + wall_rectangles[:, 2:4] + margin
+        in_wall = ((points[:, None, :] >= wall_lower) & (points[:, None, :] <= wall_upper)).all(axis=2).any(axis=1)
+        return ~in_wall
+
+    @staticmethod
+    def _xy_grid(lower: np.ndarray, upper: np.ndarray, n_x: int, n_y: int) -> np.ndarray:
+        xs = np.linspace(lower[0], upper[0], n_x, dtype=np.float32)
+        ys = np.linspace(lower[1], upper[1], n_y, dtype=np.float32)
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        return np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+    def _fixed_start_xy(self):
+        debug_fn = self._env_method("get_debug_coordinates")
+        debug_info = debug_fn() if callable(debug_fn) else {}
+        start = debug_info.get("fixed_start") if isinstance(debug_info, dict) else None
+        return None if start is None else np.asarray(start, dtype=np.float32).reshape(-1)[:2]
+
+    def build_grid_points(self, n_points: int) -> np.ndarray:
+        if n_points <= 0:
+            raise ValueError("Nyström PointMaze grid requires a positive number of points.")
+
+        layout = self.maze_layout()
+        margin = max(self.border_margin, 0.0)
+        lower, upper = layout["maze_lower"] + margin, layout["maze_upper"] - margin
+        if np.any(upper <= lower):
+            lower, upper, margin = layout["maze_lower"], layout["maze_upper"], 0.0
+
+        span = np.maximum(upper - lower, 1e-6)
+        n_x = max(2, int(np.ceil(np.sqrt(n_points * (span[0] / span[1]) * self.oversample))))
+        n_y = max(2, int(np.ceil(n_points * self.oversample / n_x)))
+
+        valid_points = np.empty((0, 2), dtype=np.float32)
+        for _ in range(8):
+            candidates = self._xy_grid(lower, upper, n_x, n_y)
+            valid_points = candidates[self._points_outside_walls(candidates, layout["wall_rectangles"], margin)]
+            if valid_points.shape[0] >= n_points:
+                break
+            n_x, n_y = int(np.ceil(n_x * 1.4)) + 1, int(np.ceil(n_y * 1.4)) + 1
+
+        if valid_points.shape[0] < n_points:
+            raise RuntimeError(
+                f"Could only place {valid_points.shape[0]} reachable PointMaze grid points; "
+                f"requested {n_points}. Try reducing nystrom_grid_border_margin."
+            )
+
+        indices = np.linspace(0, valid_points.shape[0] - 1, n_points)
+        selected = valid_points[np.round(indices).astype(np.int64)]
+
+        start_xy = self._fixed_start_xy()
+        if start_xy is not None and self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin)[0]:
+            nearest = int(np.argmin(np.sum((selected - start_xy) ** 2, axis=1)))
+            selected[nearest] = selected[0]
+            selected[0] = start_xy
+        return selected.astype(np.float32, copy=False)
+
+    def _landmark_transition(self, agent, xy, action_idx):
+        self._set_state(xy)
+        obs = self._observation(agent)
+        time_step = self.wrapped_env.step(int(action_idx))
+        next_obs = self._observation(agent)
+        reward = [float(getattr(time_step, "reward", 0.0))]
+        discount = [float(getattr(time_step, "discount", 1.0))]
+        return obs, next_obs, reward, discount
+
+    def build_subsample_batch(self, agent):
+        if self._subsample_batch is not None:
+            return self._subsample_batch
+
+        n_transitions = int(agent.subsamples if agent.subsamples is not None else agent.batch_size_actor)
+        if n_transitions % agent.n_actions != 0:
+            raise ValueError(
+                f"PointMaze fixed debug dataset size={n_transitions} must be divisible by "
+                f"n_actions={agent.n_actions} so each sampled state can include all actions. "
+                "Set agent.subsamples or agent.batch_size_actor accordingly."
+            )
+
+        n_states = n_transitions // agent.n_actions
+        state_points = self.build_grid_points(n_states)
+        xy_points = np.repeat(state_points, agent.n_actions, axis=0)
+        actions_np = np.tile(np.arange(agent.n_actions, dtype=np.int64), n_states)
+
+        with self._preserve_state():
+            transitions = [
+                self._landmark_transition(agent, xy, action_idx)
+                for xy, action_idx in zip(xy_points, actions_np)
+            ]
+        obs_list, next_obs_list, rewards, discounts = zip(*transitions)
+
+        obs = torch.as_tensor(np.stack(obs_list), dtype=torch.float32, device=agent.device)
+        next_obs = torch.as_tensor(np.stack(next_obs_list), dtype=torch.float32, device=agent.device)
+        action = torch.as_tensor(actions_np, dtype=torch.long, device=agent.device)
+        reward = torch.as_tensor(rewards, dtype=agent.compute_dtype, device=agent.device)
+        discount = torch.as_tensor(discounts, dtype=agent.compute_dtype, device=agent.device)
+
+        self._subsample_batch = (obs, action, reward, discount, next_obs)
+        self._fixed_xy_points = state_points
+        self._fixed_actions = actions_np
+        dataset_name = "Nyström grid" if agent.subsamples is not None else "debug grid"
+        ColorPrint.yellow(
+            f"Using fixed PointMaze {dataset_name} with {n_states} reachable XY states "
+            f"x {agent.n_actions} actions = {n_transitions} state-action landmarks "
+            f"({agent._kernel_status()})."
+        )
+        self.save_fixed_points_plot(agent.n_actions)
+        return self._subsample_batch
+
+    def fixed_actor_batch(self, agent):
+        obs, action, reward, _, next_obs = self.build_subsample_batch(agent)
+        return agent._make_actor_batch(obs, action, next_obs, reward)
+
+    def fixed_encoder_batch(self, agent):
+        actor_batch = self.fixed_actor_batch(agent)
+        size = min(int(agent.batch_size), actor_batch[0].shape[0])
+        index = torch.randperm(actor_batch[0].shape[0], device=agent.device)[:size]
+        return agent._slice_actor_batch(actor_batch, index)
+
+    def encode_subsamples(self, agent):
+        agent._sync_policy_encoder()
+        encoded = agent._encode_actor_transition_batch_with_retries(self.build_subsample_batch(agent))
+        return encoded, encoded.get("reward")
+
+    def save_fixed_points_plot(self, n_actions: int):
+        if self._fixed_xy_points is None:
+            return
+        from agent.utils_debug_visualization import PointMazeNystromDebugVisualizer
+
+        PointMazeNystromDebugVisualizer().save_fixed_points_plot(
+            layout=self.maze_layout(),
+            points=self._fixed_xy_points,
+            n_actions=n_actions,
+        )
 
 class Encoder(nn.Module):
     def __init__(self, obs_shape):
@@ -2076,6 +2456,142 @@ class InternalDatasetFIFOV2:
 #************ KERNELS ************#
 import jax
 import jax.numpy as jnp
+
+
+def pairwise_squared_distance_torch(X, Y):
+    X_norm = torch.sum(X * X, dim=1, keepdim=True)
+    Y_norm = torch.sum(Y * Y, dim=1, keepdim=True).T
+    dist = X_norm + Y_norm - 2.0 * (X @ Y.T)
+    return torch.clamp(dist, min=0.0)
+
+
+def inner_product_kernel_torch(X, Y, bandwidth=None, distance_norm=None):
+    del bandwidth
+    del distance_norm
+    return X @ Y.T
+
+
+def gaussian_kernel_torch(X, Y, bandwidth=1.0, distance_norm="l2"):
+    if distance_norm == "l1":
+        distance = torch.cdist(X, Y, p=1)
+        squared_distance = distance * distance
+    else:
+        squared_distance = pairwise_squared_distance_torch(X, Y)
+    bandwidth = max(float(bandwidth), 1e-12)
+    return torch.exp(-squared_distance / (2.0 * bandwidth * bandwidth))
+
+
+def laplacian_kernel_torch(X, Y, bandwidth=1.0, distance_norm=None):
+    del distance_norm
+    distance = torch.cdist(X, Y, p=1)
+    return torch.exp(-distance / max(float(bandwidth), 1e-12))
+
+
+def dirac_kernel_torch(X, Y, bandwidth=None, distance_norm=None):
+    del bandwidth
+    del distance_norm
+    return torch.all(X[:, None, :] == Y[None, :, :], dim=-1).to(dtype=X.dtype)
+
+
+class KernelFunction:
+    def __init__(
+        self,
+        kernel_type="inner_product",
+        bandwidth=None,
+        bandwidth_percentile=None,
+        bandwidth_fit_norm="l2",
+    ):
+        kernel_type = str(kernel_type or "inner_product").strip().lower()
+        aliases = {
+            "inner": "inner_product",
+            "linear": "inner_product",
+            "dot": "inner_product",
+            "dot_product": "inner_product",
+            "rbf": "gaussian",
+            "gaussian_kernel": "gaussian",
+            "abel": "laplacian",
+            "abel_diag": "laplacian",
+            "laplace": "laplacian",
+        }
+        kernel_type = aliases.get(kernel_type, kernel_type)
+        kernels = {
+            "inner_product": inner_product_kernel_torch,
+            "gaussian": gaussian_kernel_torch,
+            "laplacian": laplacian_kernel_torch,
+            "dirac": dirac_kernel_torch,
+        }
+        if kernel_type not in kernels:
+            choices = ", ".join(sorted(kernels))
+            raise ValueError(f"Unknown kernel_type={kernel_type!r}. Available choices: {choices}")
+
+        self.kernel_type = kernel_type
+        self.bandwidth = None if bandwidth is None else float(bandwidth)
+        self.bandwidth_percentile = None if bandwidth_percentile is None else float(bandwidth_percentile)
+        self.bandwidth_fit_norm = str(bandwidth_fit_norm or "l2").strip().lower()
+        if self.bandwidth_fit_norm not in ("l1", "l2"):
+            raise ValueError("bandwidth_fit_norm must be 'l1' or 'l2'")
+        self.bandwidth_fit_max_pairs = 50_000
+        self._kernel = kernels[kernel_type]
+
+    def __call__(self, X, Y):
+        self.fit_bandwidth(X, Y)
+        bandwidth = 1.0 if self.bandwidth is None else self.bandwidth
+        return self._kernel(X, Y, bandwidth=bandwidth, distance_norm=self.bandwidth_fit_norm)
+
+    def reset_auto_bandwidth(self):
+        if self.bandwidth_percentile is not None:
+            self.bandwidth = None
+
+    def fit_bandwidth(self, X, Y):
+        if self.kernel_type == "gaussian":
+            self._maybe_fit_gaussian_bandwidth(X, Y)
+        return self.bandwidth
+
+    def _maybe_fit_gaussian_bandwidth(self, X, Y):
+        if self.bandwidth is not None or self.bandwidth_percentile is None:
+            return
+        X_detached = X.detach()
+        Y_detached = Y.detach()
+        total_pairs = int(X_detached.shape[0]) * int(Y_detached.shape[0])
+        if total_pairs <= self.bandwidth_fit_max_pairs:
+            if self.bandwidth_fit_norm == "l1":
+                distances = torch.cdist(X_detached, Y_detached, p=1)
+            else:
+                distances = torch.sqrt(torch.clamp(pairwise_squared_distance_torch(X_detached, Y_detached), min=0.0))
+            fit_source = f"all {total_pairs} pairwise distances"
+        else:
+            sample_size = min(self.bandwidth_fit_max_pairs, total_pairs)
+            x_idx = torch.randint(X_detached.shape[0], (sample_size,), device=X_detached.device)
+            y_idx = torch.randint(Y_detached.shape[0], (sample_size,), device=Y_detached.device)
+            ord_value = 1 if self.bandwidth_fit_norm == "l1" else 2
+            distances = torch.linalg.vector_norm(X_detached[x_idx] - Y_detached[y_idx], ord=ord_value, dim=1)
+            fit_source = f"{sample_size} sampled distances from {total_pairs} pairs"
+        distances = distances[distances > 0]
+        if distances.numel() == 0:
+            self.bandwidth = 1.0
+            return
+        percentile = min(max(self.bandwidth_percentile / 100.0, 0.0), 1.0)
+        self.bandwidth = float(torch.quantile(distances.flatten(), percentile).item())
+        print(
+            f"Fitted Gaussian kernel bandwidth={self.bandwidth:.6g} from "
+            f"percentile={self.bandwidth_percentile} using {fit_source} "
+            f"with {self.bandwidth_fit_norm} norm."
+        )
+
+
+def build_kernel_fn(
+    kernel_type="inner_product",
+    bandwidth=None,
+    bandwidth_percentile=None,
+    bandwidth_fit_norm="l2",
+):
+    return KernelFunction(
+        kernel_type=kernel_type,
+        bandwidth=bandwidth,
+        bandwidth_percentile=bandwidth_percentile,
+        bandwidth_fit_norm=bandwidth_fit_norm,
+    )
+
 
 # compute the dirac kernel on batches of states
 @jax.jit    

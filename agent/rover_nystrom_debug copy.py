@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import copy
+from contextlib import contextmanager
 from ctypes.wintypes import PSIZE
 from dis import disco, show_code
 import os
@@ -26,11 +27,6 @@ from PIL import Image
 from sklearn.manifold import TSNE
 import seaborn as sns
 import logging
-from agent.utils import (
-    EncodedActorUpdateData,
-    PointMazeNystromDebugHelper,
-    RawActorUpdateData,
-)
 from agent.utils_debug_visualization import build_debug_visualizer_suite
 # set logging level to info
 import logging
@@ -302,9 +298,7 @@ class DistributionMatcher:
                  gamma: float = 0.9, 
                  svd_truncation: Optional[int] = None,
                  kernel_type: str = "inner_product",
-                 kernel_bandwidth: Optional[float] = None,
-                 kernel_bandwidth_percentile: Optional[float] = None,
-                 kernel_bandwidth_fit_norm: str = "l2",
+                 kernel_gamma: float = 1.0,
                  device: str = "cpu"):
         
         self.gamma = gamma
@@ -312,25 +306,42 @@ class DistributionMatcher:
         self.device = device  
         self.svd_truncation = svd_truncation  
         self.kernel_type = kernel_type
-        self.kernel_bandwidth = kernel_bandwidth
-        self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
-        self.kernel_bandwidth_fit_norm = str(kernel_bandwidth_fit_norm or "l2").strip().lower()
-        self.kernel_fn = utils.build_kernel_fn(
-            kernel_type,
-            bandwidth=self.kernel_bandwidth,
-            bandwidth_percentile=self.kernel_bandwidth_percentile,
-            bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
-        )
-        self.state_kernel_fn = None
+        self.kernel_gamma = kernel_gamma
+        self.kernel_fn = utils.build_kernel_fn(kernel_type, gamma=kernel_gamma)
 
     def kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return self.kernel_fn(X, Y)
 
-    def state_kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        kernel_fn = self.state_kernel_fn if self.state_kernel_fn is not None else self.kernel_fn
-        return kernel_fn(X, Y)
+    def _regularized_solve(
+            self,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            jitter_scale: float = 1e-10,
+        ) -> torch.Tensor:
+        """Solve AX=B robustly when A is singular/ill-conditioned."""
+        eye = torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
+        
+        A  = A + jitter_scale* eye
 
+        X = torch.linalg.solve(A, B)
+        
+        return X 
     
+    def _regularized_solve_memory_efficient(
+            self,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            jitter_scale: float = 1e-10,
+        ) -> torch.Tensor:
+        """Solve AX=B robustly when A is singular/ill-conditioned."""
+        
+
+        idx = torch.arange(A.shape[0], device=A.device)
+        A[idx, idx] += jitter_scale
+
+        X = torch.linalg.solve(A, B)
+        
+        return X 
             
     def compute_nu_pi(
             self, 
@@ -352,10 +363,8 @@ class DistributionMatcher:
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
         A = K + self.lambda_reg * torch.eye(N, device=self.device)
-        # L = torch.linalg.cholesky(A)
-        # BM = torch.cholesky_solve(M, L)
-
-        BM = torch.linalg.solve(A, M) # [n, n]
+        L = torch.linalg.cholesky(A)
+        BM = torch.cholesky_solve(M, L)
         
         # M̃ augmented to be [M 0; 0 1]
         tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
@@ -378,6 +387,79 @@ class DistributionMatcher:
         # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
         return occupancy
 
+    def compute_B_nystrom(self, psi_all_obs_action: torch.Tensor, psi_sub_obs_action: torch.Tensor, svd_truncation: Optional[int] = None) -> torch.Tensor:
+        N = psi_all_obs_action.shape[0]
+        K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
+        K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
+        inv_A_nystrom = self.pseudo_inverse_low_rank_svd(A_nystrom, svd_rank=svd_truncation)
+        return inv_A_nystrom@K_nm.T
+    
+
+    def pseudo_inverse_low_rank_svd(self, A, tol=1e-12, svd_rank=None):
+        assert svd_rank is not None, "svd_rank must be specified for low-rank pseudo-inverse"
+        if svd_rank is None:
+            U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+            # Inverti solo i valori singolari non nulli
+            V= Vh.transpose(-2, -1) 
+
+        else:
+            U, S, V = torch.svd_lowrank(A, q=svd_rank)
+        S_inv = torch.where(S > tol, 1.0 / S, torch.zeros_like(S))
+    
+        S_inv_mat = torch.diag(S_inv)
+        
+        A_pinv = V @ S_inv_mat @ U.transpose(-2, -1)
+        
+        
+        return A_pinv
+
+    def compute_nu_pi_nystrom(
+            self, 
+            phi_sub_next_obs: torch.Tensor, 
+            psi_sub_obs_action: torch.Tensor,
+            psi_all_obs_action: torch.Tensor,
+            M: torch.Tensor,
+            alpha: torch.Tensor,
+            sink_norm: float
+        ) -> torch.Tensor:
+        """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
+       
+        N = psi_all_obs_action.shape[0]
+        subsamples = psi_sub_obs_action.shape[0]
+       
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
+        K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * N* K_mm # [m, m]
+
+        BM = self._regularized_solve(A_nystrom, K_nm.T@M ) # [m, n]
+       
+        # ** COMPUTATION STEP **
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_BM = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
+        tilde_BM[:-1, :-1] = BM
+        tilde_BM[-1, -1] = 1.0
+
+        inv_term = torch.linalg.solve( torch.eye(subsamples+1, device=self.device) - self.gamma * tilde_BM, tilde_alpha)
+        
+        sink_state = torch.zeros((phi_sub_next_obs.shape[1],1), device=self.device, dtype=phi_sub_next_obs.dtype)
+        sink_state[-1] = sink_norm
+
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        upper_left = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
+        tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
+        tilde_phi_sub_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
+        tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        # tilde_phi_sub_next_obs_transposed[-1, -1] = 1.0 # TODO patch 0.1
+
+        occupancy = (1 - self.gamma) *  tilde_phi_sub_next_obs_transposed @ inv_term
+        # print(f"Occupancy sum: {occupancy.sum().item()} and occupancy of sink state: {occupancy[-1].item()}")
+        return occupancy
+    
     def compute_gradient_coefficient(
             self, 
             M: torch.Tensor, 
@@ -420,77 +502,94 @@ class DistributionMatcher:
 
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: BM = A⁻¹M
-        # L = torch.linalg.cholesky(A)
-        # BM = torch.cholesky_solve(M, L)
-        BM = torch.linalg.solve(A, M) # [n, n]
+        L = torch.linalg.cholesky(A)
+        BM = torch.cholesky_solve(M, L)
         tilde_B_tilde_M = torch.zeros(BM.shape[0] + 1, BM.shape[1] + 1, device=BM.device, dtype=BM.dtype)
         tilde_B_tilde_M[:-1, :-1] = BM
         tilde_B_tilde_M[-1, -1] = 1.0
 
         # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
-        # State and state-action similarities can use different Gaussian bandwidths.
-        phi_kernel = self.state_kernel(tilde_phi_all_next_obs, tilde_phi_all_next_obs) # [n+1, n+1]
+        # Using the precomputed terms and solves:
+        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
         I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
-        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃Φ̃ᵀ
-        left_term = torch.linalg.solve(tilde_A.T @ (I_n_plus1 - self.gamma * tilde_B_tilde_M).T, phi_kernel) # [n+1, n+1]
+        symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_all_next_obs)
 
-        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ
-        # inv_term_kernel = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, phi_kernel) # [n+1, n+1]
+        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
         # Solve Ãᵀ x = left_term_without_b using Cholesky
-        # L_T = torch.linalg.cholesky(tilde_A.T)
-        # left_term = torch.cholesky_solve(inv_term_kernel, L_T)
+        L_T = torch.linalg.cholesky(tilde_A.T)
+        left_term = torch.cholesky_solve(symmetric_term, L_T)
 
-        # right term: (I - γ Ã⁻¹M̃)⁻¹ α̃
-        right_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_alpha)
-
-        # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃
+        
+        # Right term: Φ̃ᵀ(I - γB̃M̃)⁻¹ α̃
+        right_term = symmetric_term.T @ tilde_alpha
         gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
       
         return gradient
     
-    #******* NYSTROM********
-    def _regularized_solve_memory_efficient(
-            self,
-            A: torch.Tensor,
-            B: torch.Tensor,
-            jitter_scale: float = 1e-10,
+    def compute_gradient_coefficient_nystrom(
+            self, 
+            M: torch.Tensor, 
+            phi_all_next_obs:torch.Tensor, 
+            phi_sub_next_obs:torch.Tensor,
+            psi_all_obs_action:torch.Tensor, 
+            psi_sub_obs_action:torch.Tensor,
+            alpha:torch.Tensor,
+            sink_norm: float
         ) -> torch.Tensor:
-        """Solve AX=B robustly when A is singular/ill-conditioned."""
-        
-
-        idx = torch.arange(A.shape[0], device=A.device)
-        A[idx, idx] += jitter_scale
-
-        X = torch.linalg.solve(A, B)
-        
-        return X 
-    
-    def compute_B_nystrom(self, psi_all_obs_action: torch.Tensor, psi_sub_obs_action: torch.Tensor, svd_truncation: Optional[int] = None) -> torch.Tensor:
+        """Compute gradient coefficient for policy update."""
+        # Identity matrix
+        I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
         N = psi_all_obs_action.shape[0]
+
+        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
+        sink_state[-1] = sink_norm
+
+        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
+        tilde_phi_sub_next_obs_transposed = torch.zeros((phi_sub_next_obs.shape[1]+1, phi_sub_next_obs.shape[0]+1), device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype)
+        upper_left_sub = phi_sub_next_obs.T - sink_state@torch.ones((1, psi_sub_obs_action.shape[1]), device=psi_sub_obs_action.device, dtype=psi_sub_obs_action.dtype)@psi_sub_obs_action.T
+        tilde_phi_sub_next_obs_transposed[:upper_left_sub.shape[0], :upper_left_sub.shape[1]] = upper_left_sub
+
+        assert sink_state.shape[0] == upper_left_sub.shape[0], "Sink state and upper left matrix row size mismatch"
+
+        tilde_phi_sub_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
+        tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_transposed.T
+
+        # Ã augmented to be [A 0; 0 1]
+        # Symmetric positive definite matrix A = ψψᵀ + λI
         K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
         K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
         A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
-        inv_A_nystrom = self.pseudo_inverse_low_rank_svd(A_nystrom, svd_rank=svd_truncation)
-        return inv_A_nystrom@K_nm.T
-    
+        B = self._regularized_solve(A_nystrom,K_nm.T) # [m, n]
+        tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
+        tilde_B[:-1, :-1] = B
+        tilde_B[-1, -1] = 1.0
 
-    def pseudo_inverse_low_rank_svd(self, A, tol=1e-12, svd_rank=None):
-        assert svd_rank is not None, "svd_rank must be specified for low-rank pseudo-inverse"
-        if svd_rank is None:
-            U, S, Vh = torch.linalg.svd(A, full_matrices=False)
-            # Inverti solo i valori singolari non nulli
-            V= Vh.transpose(-2, -1) 
+        # M̃ augmented to be [M 0; 0 1]
+        tilde_M = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
+        tilde_M[:-1, :-1] = M
+        tilde_M[-1, -1] = 1.0
 
-        else:
-            U, S, V = torch.svd_lowrank(A, q=svd_rank)
-        S_inv = torch.where(S > tol, 1.0 / S, torch.zeros_like(S))
-    
-        S_inv_mat = torch.diag(S_inv)
+        # α̃ augmented to be [α; 1]
+        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
+        tilde_alpha[:-1] = alpha
+
+        # ** COMPUTATION STEP **
+        # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
+        # Using the precomputed terms and solves:
+        # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃ = [Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹]ᵀ
+        tilde_B_tilde_M = tilde_B @ tilde_M
+        I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
+        symmetric_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_phi_sub_next_obs)
+
+        # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃
+        left_term = tilde_B.T @ symmetric_term
+
         
-        A_pinv = V @ S_inv_mat @ U.transpose(-2, -1)
-        
-        
-        return A_pinv
+        # Right term: Φ̃ᵀ(I - γB̃M̃)⁻¹ α̃
+        right_term = symmetric_term.T @ tilde_alpha
+        gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
+      
+        return gradient
 
     def compute_nu_pi_nystrom_memory_efficient(
             self, 
@@ -664,6 +763,9 @@ class DistributionMatcher:
         return gradient
            
 # ============================================================================
+# Distribution Visualizer
+# ============================================================================
+# ============================================================================
 # Exploration Metrics Visualizer
 # ============================================================================
 from pathlib import Path
@@ -825,10 +927,7 @@ class EmpiricalOccupancyTracker:
         counts = np.array(list(self.get_counts().values()))
         probs = counts / counts.sum()
         return -np.sum(probs * np.log(probs + 1e-10))
-
- # ============================================================================
-# Distribution Visualizer
-# ============================================================================   
+    
 class ExplorationVisualizer:
     """Comprehensive exploration metrics tracking and visualization."""
     
@@ -2294,13 +2393,11 @@ class RoverAgent:
                  pmd_backtrack_max_trials: int = 8,
                  compute_dtype: str = "float32",
                  nystrom_synthetic_subsamples: bool = False,
-                 debug_fixed_dataset_updates: bool = False,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
                  kernel_type: str = "inner_product",
-                 kernel_bandwidth: Optional[float] = None,
-                 kernel_bandwidth_percentile: Optional[float] = None,
+                 kernel_gamma: float = 1.0,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  device: str = "cpu",
@@ -2360,24 +2457,17 @@ class RoverAgent:
         self.lambda_reg = lambda_reg
         self.image_channels = 1 if self.grayscale else 3
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
-        self.kernel_bandwidth = kernel_bandwidth
-        self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
-        self.kernel_bandwidth_fit_norm = self.mode
-        self.kernel_fn = utils.build_kernel_fn(
-            self.kernel_type,
-            bandwidth=self.kernel_bandwidth,
-            bandwidth_percentile=self.kernel_bandwidth_percentile,
-            bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
-        )
+        self.kernel_gamma = kernel_gamma
+        self.kernel_fn = utils.build_kernel_fn(self.kernel_type, gamma=self.kernel_gamma)
+        self.nystrom_grid_border_margin = float(nystrom_grid_border_margin)
+        self.nystrom_grid_oversample = float(nystrom_grid_oversample)
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
-        self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates)
-        if self.debug_fixed_dataset_updates:
-            utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed PointMaze Nyström dataset.")
-        self.nystrom_debug = PointMazeNystromDebugHelper(
-            border_margin=nystrom_grid_border_margin,
-            oversample=nystrom_grid_oversample,
-        )
+        self._synthetic_nystrom_subsample_batch = None
+        self._fixed_nystrom_xy_points = None
+        self._fixed_nystrom_actions = None
+        self._synthetic_state_indices_cache = None
+        self._synthetic_state_stride_cache = None
         min_fifo_capacity = max(
             int(self.batch_size_actor),
             int(self.subsamples) if self.subsamples is not None else 0,
@@ -2458,12 +2548,9 @@ class RoverAgent:
             lambda_reg=self.lambda_reg,
             svd_truncation=self.svd_truncation,
             kernel_type=self.kernel_type,
-            kernel_bandwidth=self.kernel_bandwidth,
-            kernel_bandwidth_percentile=self.kernel_bandwidth_percentile,
-            kernel_bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
+            kernel_gamma=self.kernel_gamma,
             device=self.device  
         )
-        self.distribution_matcher.state_kernel_fn = self.kernel_fn
         
         self.W = None #nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
        
@@ -2556,6 +2643,489 @@ class RoverAgent:
                 break
         return env.unwrapped
 
+    def _initial_state_index(self) -> int:
+        if self.env is None or not hasattr(self.env, "state_to_idx"):
+            raise RuntimeError("A discrete environment must be inserted before building synthetic Nyström subsamples.")
+
+        start_position = getattr(self.env, "start_position", None)
+        if start_position is None and hasattr(self.env, "_start_position_param"):
+            start_param = getattr(self.env, "_start_position_param")
+            if start_param is not None:
+                start_position = tuple(start_param)
+
+        if start_position is None and hasattr(self.env, "_set_start_position"):
+            start_position = self.env._set_start_position(None)
+
+        if start_position is None:
+            start_position = self.env.idx_to_state[0]
+
+        start_position = tuple(start_position)
+        if start_position not in self.env.state_to_idx:
+            raise ValueError(f"Initial state {start_position} is not a valid state in the environment.")
+        return self.env.state_to_idx[start_position]
+
+    def _prepare_rendered_state_image(self, image: np.ndarray, render_resolution: int) -> np.ndarray:
+        image = np.asarray(image, dtype=np.uint8)
+
+        if self.grayscale:
+            if image.ndim == 3 and image.shape[2] == 1:
+                image = image[..., 0]
+            elif image.ndim == 3:
+                image = np.asarray(Image.fromarray(image).convert('L'))
+            elif image.ndim != 2:
+                raise ValueError(f"Expected grayscale image to be 2D or HWC, got shape {image.shape}")
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.shape[:2] != (render_resolution, render_resolution):
+            image = np.asarray(
+                Image.fromarray(image).resize(
+                    (render_resolution, render_resolution),
+                    Image.LANCZOS,
+                )
+            )
+
+        if self.grayscale:
+            if image.ndim == 2:
+                image = image[..., None]
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.ndim != 3 or image.shape[2] != self.image_channels:
+            raise ValueError(
+                f"Expected image shape [H, W, {self.image_channels}], got {image.shape}"
+            )
+
+        return image
+
+    def _build_prerendered_state_observations(self) -> torch.Tensor:
+        if self.obs_type != "pixels":
+            raise RuntimeError("Prerendered observations are only used for pixel observations.")
+
+        cached = getattr(self.gridworld_visualizer, "_prerendered_states", None)
+        if cached is not None:
+            return cached.to(self.device)
+
+        required_attrs = ("n_states", "idx_to_state", "render_from_position")
+        if self.env is None or not all(hasattr(self.env, attr) for attr in required_attrs):
+            raise RuntimeError(
+                "Pixel synthetic Nyström subsamples require a discrete env with "
+                "n_states, idx_to_state, and render_from_position."
+            )
+
+        render_resolution = getattr(self.wrapped_env, "render_resolution", self.obs_shape[-1])
+        frame_stack = self.obs_shape[0] // self.image_channels
+        rendered_states = []
+
+        for state_idx in range(self.env.n_states):
+            state = self.env.idx_to_state[state_idx]
+            try:
+                image = self.env.render_from_position(state, show_goal=False)
+            except TypeError:
+                image = self.env.render_from_position(state)
+            image = self._prepare_rendered_state_image(image, render_resolution)
+            image_chw = image.transpose(2, 0, 1).copy()
+            rendered_states.append(np.tile(image_chw, (frame_stack, 1, 1)))
+
+        return torch.from_numpy(np.stack(rendered_states)).float().to(self.device)
+
+    def _build_indexed_state_observations(self) -> torch.Tensor:
+        if self.obs_type == "pixels":
+            return self._build_prerendered_state_observations()
+
+        obs = np.zeros((self.env.n_states, *self.obs_shape), dtype=np.float32)
+        flat = obs.reshape(self.env.n_states, -1)
+        if self.env.n_states > flat.shape[1]:
+            raise ValueError(
+                f"State count {self.env.n_states} does not fit observation shape {self.obs_shape}; "
+                "expected one-hot discrete observations."
+            )
+        flat[np.arange(self.env.n_states), np.arange(self.env.n_states)] = 1.0
+        return torch.from_numpy(obs).to(self.device)
+
+    def _synthetic_excluded_state_indices(self):
+        excluded = self.synthetic_dataset_exclude_states
+        if excluded is None:
+            return set()
+
+        if isinstance(excluded, str):
+            values = [value.strip() for value in excluded.split(",") if value.strip()]
+        elif isinstance(excluded, (list, tuple, set)):
+            values = list(excluded)
+        else:
+            values = [excluded]
+
+        indices = {int(value) for value in values}
+        invalid = [idx for idx in indices if idx < 0 or idx >= self.env.n_states]
+        if invalid:
+            raise ValueError(
+                f"synthetic_dataset_exclude_states contains invalid state indices {invalid}; "
+                f"valid range is [0, {self.env.n_states - 1}]."
+            )
+        return indices
+
+    def _synthetic_state_indices(self):
+        if self._synthetic_state_indices_cache is not None:
+            return self._synthetic_state_indices_cache, self._synthetic_state_stride_cache
+
+        excluded = self._synthetic_excluded_state_indices()
+        candidate_indices = [idx for idx in range(self.env.n_states) if idx not in excluded]
+        if not candidate_indices:
+            raise ValueError("synthetic_dataset_exclude_states removed every state.")
+
+        if self.synthetic_dataset_sub is None:
+            indices = candidate_indices
+            stride = 1
+            self._synthetic_state_indices_cache = indices
+            self._synthetic_state_stride_cache = stride
+            return indices, stride
+
+        if isinstance(self.synthetic_dataset_sub, str):
+            value = self.synthetic_dataset_sub.strip().lower()
+            if value in ("half", "n/2", "0.5"):
+                num_states = max(1, self.env.n_states // 2)
+            else:
+                num_states = int(value)
+        else:
+            num_states = int(self.synthetic_dataset_sub)
+        if num_states <= 0:
+            raise ValueError("synthetic_dataset_sub must be positive or null.")
+        if num_states > len(candidate_indices):
+            raise ValueError(
+                f"synthetic_dataset_sub={num_states} requests more states than available "
+                f"after exclusions ({len(candidate_indices)})."
+            )
+        if num_states == len(candidate_indices):
+            indices = candidate_indices
+            stride = 1
+            self._synthetic_state_indices_cache = indices
+            self._synthetic_state_stride_cache = stride
+            return indices, stride
+
+        stride = max(1, len(candidate_indices) // num_states)
+        indices = candidate_indices[::stride][:num_states]
+        self._synthetic_state_indices_cache = indices
+        self._synthetic_state_stride_cache = stride
+        return indices, stride
+
+    def _iter_env_chain(self):
+        current = self.wrapped_env
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            yield current
+            current = getattr(current, "env", None)
+
+    def _env_method(self, method_name):
+        for current in self._iter_env_chain():
+            method = getattr(current, method_name, None)
+            if callable(method):
+                return method
+        return None
+
+    def _pointmaze_base_and_point_env(self):
+        if self.wrapped_env is None:
+            raise RuntimeError("PointMaze Nyström grid requires insert_env(env) before actor updates.")
+        base_env = getattr(self.wrapped_env, "unwrapped", None)
+        point_env = getattr(base_env, "point_env", None)
+        if base_env is None or point_env is None:
+            raise RuntimeError(
+                "PointMaze Nyström grid requires a PointMaze environment with unwrapped.point_env."
+            )
+        return base_env, point_env
+
+    def _set_pointmaze_state(self, xy, velocity=(0.0, 0.0)):
+        base_env, point_env = self._pointmaze_base_and_point_env()
+        qpos = point_env.data.qpos.copy()
+        qvel = np.zeros_like(point_env.data.qvel)
+        qpos[:2] = np.asarray(xy, dtype=np.float64)
+        qvel[:2] = np.asarray(velocity, dtype=np.float64)
+        point_env.set_state(qpos, qvel)
+        if hasattr(base_env, "update_target_site_pos"):
+            base_env.update_target_site_pos()
+
+    @contextmanager
+    def _preserve_pointmaze_state(self):
+        """Move the simulator around for landmark rendering, then restore training state."""
+        base_env, point_env = self._pointmaze_base_and_point_env()
+        snapshot = {
+            "qpos": point_env.data.qpos.copy(),
+            "qvel": point_env.data.qvel.copy(),
+            "wrappers": [],
+        }
+        for current in self._iter_env_chain():
+            wrapper_state = {}
+            if hasattr(current, "_frames"):
+                wrapper_state["frames"] = [frame.copy() for frame in list(current._frames)]
+            if hasattr(current, "_cached_hidden_render"):
+                cached = current._cached_hidden_render
+                wrapper_state["cached_hidden_render"] = None if cached is None else cached.copy()
+            if wrapper_state:
+                snapshot["wrappers"].append((current, wrapper_state))
+
+        try:
+            yield
+        finally:
+            point_env.set_state(snapshot["qpos"], snapshot["qvel"])
+            if hasattr(base_env, "update_target_site_pos"):
+                base_env.update_target_site_pos()
+
+            for wrapper, wrapper_state in snapshot["wrappers"]:
+                if "frames" in wrapper_state and hasattr(wrapper, "_frames"):
+                    wrapper._frames.clear()
+                    wrapper._frames.extend([frame.copy() for frame in wrapper_state["frames"]])
+                if "cached_hidden_render" in wrapper_state and hasattr(wrapper, "_cached_hidden_render"):
+                    cached = wrapper_state["cached_hidden_render"]
+                    wrapper._cached_hidden_render = None if cached is None else cached.copy()
+
+    def _current_pointmaze_proprio_observation(self) -> np.ndarray:
+        base_env, _ = self._pointmaze_base_and_point_env()
+        point_obs, _ = base_env.point_env._get_obs()
+        raw_obs = base_env._get_obs(point_obs)
+        process_fn = self._env_method("_process_proprio_obs")
+        if callable(process_fn):
+            return np.asarray(process_fn(raw_obs), dtype=np.float32)
+
+        if isinstance(raw_obs, dict):
+            arrays = []
+            for value in raw_obs.values():
+                if isinstance(value, str):
+                    continue
+                arrays.append(np.asarray(value, dtype=np.float32).reshape(-1))
+            return np.concatenate(arrays, dtype=np.float32)
+        return np.asarray(raw_obs, dtype=np.float32)
+
+    def _current_pointmaze_observation(self) -> np.ndarray:
+        if self.obs_type != "pixels":
+            return self._current_pointmaze_proprio_observation().reshape(self.obs_shape)
+
+        render_fn = self._env_method("render_observation")
+        if not callable(render_fn):
+            render_fn = self._env_method("render")
+        if not callable(render_fn):
+            raise RuntimeError("PointMaze pixel Nyström grid requires a render or render_observation method.")
+
+        render_resolution = getattr(self.wrapped_env, "render_resolution", self.obs_shape[-1])
+        frame_stack = self.obs_shape[0] // self.image_channels
+        image = self._prepare_rendered_state_image(render_fn(), render_resolution)
+        image_chw = image.transpose(2, 0, 1).copy()
+        return np.tile(image_chw, (frame_stack, 1, 1))
+
+    def _pointmaze_layout(self):
+        layout_fn = self._env_method("get_debug_maze_layout")
+        layout = layout_fn() if callable(layout_fn) else None
+        layout = layout if isinstance(layout, dict) else self._pointmaze_layout_from_unwrapped_maze()
+        if not isinstance(layout, dict):
+            raise RuntimeError(
+                "PointMaze Nyström grid requires get_debug_maze_layout() or an unwrapped env with maze.maze_map."
+            )
+
+        maze_lower = np.asarray(layout.get("maze_lower"), dtype=np.float32).reshape(-1)
+        maze_upper = np.asarray(layout.get("maze_upper"), dtype=np.float32).reshape(-1)
+        wall_rectangles = np.asarray(layout.get("wall_rectangles"), dtype=np.float32).reshape(-1, 4)
+        if maze_lower.size != 2 or maze_upper.size != 2:
+            raise RuntimeError("PointMaze layout must provide 2D maze_lower and maze_upper bounds.")
+        return {
+            "maze_lower": maze_lower[:2],
+            "maze_upper": maze_upper[:2],
+            "wall_rectangles": wall_rectangles,
+        }
+
+    def _pointmaze_layout_from_unwrapped_maze(self):
+        base_env = getattr(self.wrapped_env, "unwrapped", None)
+        maze = getattr(base_env, "maze", None)
+        if maze is None or not hasattr(maze, "maze_map") or not hasattr(maze, "cell_rowcol_to_xy"):
+            return None
+
+        half_cell = 0.5 * float(getattr(maze, "maze_size_scaling", 1.0))
+        wall_rectangles = []
+        all_rectangles = []
+
+        # Convert each maze cell into an xy rectangle; walls are later masked out.
+        for row_idx, row in enumerate(maze.maze_map):
+            for col_idx, cell in enumerate(row):
+                cell_center = maze.cell_rowcol_to_xy(np.array([row_idx, col_idx], dtype=np.int32))
+                x0 = float(cell_center[0] - half_cell)
+                y0 = float(cell_center[1] - half_cell)
+                rect = np.array([x0, y0, 2.0 * half_cell, 2.0 * half_cell], dtype=np.float32)
+                all_rectangles.append(rect)
+                if cell == 1:
+                    wall_rectangles.append(rect)
+
+        if not all_rectangles:
+            return None
+
+        all_rectangles = np.asarray(all_rectangles, dtype=np.float32)
+        wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+        return {
+            "maze_lower": all_rectangles[:, :2].min(axis=0),
+            "maze_upper": (all_rectangles[:, :2] + all_rectangles[:, 2:4]).max(axis=0),
+            "wall_rectangles": wall_rectangles,
+        }
+
+    @staticmethod
+    def _points_outside_walls(points: np.ndarray, wall_rectangles: np.ndarray, margin: float) -> np.ndarray:
+        if wall_rectangles.size == 0:
+            return np.ones(points.shape[0], dtype=bool)
+
+        wall_lower = wall_rectangles[:, :2] - margin
+        wall_upper = wall_rectangles[:, :2] + wall_rectangles[:, 2:4] + margin
+        in_any_wall = ((points[:, None, :] >= wall_lower) & (points[:, None, :] <= wall_upper)).all(axis=2).any(axis=1)
+        return ~in_any_wall
+
+    @staticmethod
+    def _xy_grid(lower: np.ndarray, upper: np.ndarray, n_x: int, n_y: int) -> np.ndarray:
+        xs = np.linspace(lower[0], upper[0], n_x, dtype=np.float32)
+        ys = np.linspace(lower[1], upper[1], n_y, dtype=np.float32)
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        return np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+    def _fixed_start_xy(self):
+        debug_fn = self._env_method("get_debug_coordinates")
+        debug_info = debug_fn() if callable(debug_fn) else {}
+        start = debug_info.get("fixed_start") if isinstance(debug_info, dict) else None
+        return None if start is None else np.asarray(start, dtype=np.float32).reshape(-1)[:2]
+
+    def _build_pointmaze_grid_points(self, n_points: int) -> np.ndarray:
+        if n_points <= 0:
+            raise ValueError("Nyström PointMaze grid requires a positive number of points.")
+
+        layout = self._pointmaze_layout()
+        margin = max(float(self.nystrom_grid_border_margin), 0.0)
+        lower, upper = layout["maze_lower"] + margin, layout["maze_upper"] - margin
+        if np.any(upper <= lower):  # Tiny mazes should still get border points.
+            lower, upper, margin = layout["maze_lower"], layout["maze_upper"], 0.0
+
+        span = np.maximum(upper - lower, 1e-6)
+        oversample = max(self.nystrom_grid_oversample, 1.0)
+        n_x = max(2, int(np.ceil(np.sqrt(n_points * (span[0] / span[1]) * oversample))))
+        n_y = max(2, int(np.ceil(n_points * oversample / n_x)))
+
+        valid_points = np.empty((0, 2), dtype=np.float32)
+        for _ in range(8):
+            candidates = self._xy_grid(lower, upper, n_x, n_y)
+            valid_points = candidates[self._points_outside_walls(candidates, layout["wall_rectangles"], margin)]
+            if valid_points.shape[0] >= n_points:
+                break
+            n_x, n_y = int(np.ceil(n_x * 1.4)) + 1, int(np.ceil(n_y * 1.4)) + 1
+
+        if valid_points.shape[0] < n_points:
+            raise RuntimeError(
+                f"Could only place {valid_points.shape[0]} reachable PointMaze grid points; "
+                f"requested {n_points}. Try reducing nystrom_grid_border_margin."
+            )
+
+        # Pick evenly across the valid grid so the final set still reaches borders.
+        indices = np.linspace(0, valid_points.shape[0] - 1, n_points)
+        selected = valid_points[np.round(indices).astype(np.int64)]
+
+        start_xy = self._fixed_start_xy()
+        if start_xy is not None:
+            if self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin)[0]:
+                nearest = int(np.argmin(np.sum((selected - start_xy) ** 2, axis=1)))
+                selected[nearest] = selected[0]
+                selected[0] = start_xy
+
+        return selected.astype(np.float32, copy=False)
+
+    def _save_fixed_nystrom_points_plot(self):
+        if self._fixed_nystrom_xy_points is None:
+            return
+
+        save_dir = os.path.join(os.getcwd(), "pointmaze_plots")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, "fixed_nystrom_points.png")
+        layout = self._pointmaze_layout()
+        points = np.asarray(self._fixed_nystrom_xy_points, dtype=np.float32)
+        actions = np.asarray(self._fixed_nystrom_actions, dtype=np.int64)
+
+        fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+        for x0, y0, width, height in layout["wall_rectangles"]:
+            ax.add_patch(Rectangle((x0, y0), width, height, facecolor="black", edgecolor="black", linewidth=0.5))
+        lower = layout["maze_lower"]
+        upper = layout["maze_upper"]
+        ax.add_patch(
+            Rectangle(
+                (lower[0], lower[1]),
+                upper[0] - lower[0],
+                upper[1] - lower[1],
+                fill=False,
+                edgecolor="black",
+                linewidth=1.2,
+            )
+        )
+        scatter = ax.scatter(
+            points[:, 0],
+            points[:, 1],
+            c=actions,
+            s=12,
+            cmap="tab10",
+            linewidths=0.0,
+            alpha=0.9,
+        )
+        ax.scatter(points[0, 0], points[0, 1], marker="*", s=140, c="white", edgecolors="black", linewidths=0.9, zorder=5)
+        ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
+        ax.set_ylim(lower[1] - 0.1, upper[1] + 0.1)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(f"Fixed Nyström PointMaze grid ({points.shape[0]} points)")
+        cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("assigned action")
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Fixed Nyström PointMaze grid plot saved to: {save_path}")
+
+    def _pointmaze_landmark_transition(self, xy, action_idx):
+        self._set_pointmaze_state(xy)
+        obs = self._current_pointmaze_observation()
+        time_step = self.wrapped_env.step(int(action_idx))
+        next_obs = self._current_pointmaze_observation()
+        reward = [float(getattr(time_step, "reward", 0.0))]
+        discount = [float(getattr(time_step, "discount", 1.0))]
+        return obs, next_obs, reward, discount
+
+    def _build_synthetic_nystrom_subsample_batch(self):
+        """Build fixed PointMaze grid landmarks for Nyström actor updates."""
+        if self.subsamples is None:
+            raise ValueError("PointMaze synthetic Nyström grid requires agent.subsamples to be set.")
+
+        if self._synthetic_nystrom_subsample_batch is not None:
+            return self._synthetic_nystrom_subsample_batch
+
+        n_points = int(self.subsamples)
+        xy_points = self._build_pointmaze_grid_points(n_points)
+        actions_np = (np.arange(n_points, dtype=np.int64) % self.n_actions)
+
+        with self._preserve_pointmaze_state():
+            transitions = [
+                self._pointmaze_landmark_transition(xy, action_idx)
+                for xy, action_idx in zip(xy_points, actions_np)
+            ]
+        obs_list, next_obs_list, rewards, discounts = zip(*transitions)
+
+        obs = torch.as_tensor(np.stack(obs_list), dtype=torch.float32, device=self.device)
+        next_obs = torch.as_tensor(np.stack(next_obs_list), dtype=torch.float32, device=self.device)
+        action = torch.as_tensor(actions_np, dtype=torch.long, device=self.device)
+        reward = torch.as_tensor(rewards, dtype=self.compute_dtype, device=self.device)
+        discount = torch.as_tensor(discounts, dtype=self.compute_dtype, device=self.device)
+
+        self._synthetic_nystrom_subsample_batch = (obs, action, reward, discount, next_obs)
+        self._fixed_nystrom_xy_points = xy_points
+        self._fixed_nystrom_actions = actions_np
+        utils.ColorPrint.yellow(
+            f"Using fixed PointMaze Nyström grid with {n_points} reachable XY points "
+            f"(kernel={self.kernel_type}, gamma={self.kernel_gamma})."
+        )
+        self._save_fixed_nystrom_points_plot()
+        return self._synthetic_nystrom_subsample_batch
+
+    def _encode_synthetic_nystrom_subsamples(self):
+        self._sync_policy_encoder()
+        synthetic_batch = self._build_synthetic_nystrom_subsample_batch()
+        encoded = self._encode_actor_transition_batch_with_retries(synthetic_batch)
+        return encoded, encoded.get("reward")
+    
     def insert_env(self, env):
         """
         Insert environment reference for gridworld-specific visualizations.
@@ -2563,7 +3133,11 @@ class RoverAgent:
         """       
         self.wrapped_env = env
         self.env = self._find_discrete_env(env)
-        self.nystrom_debug.attach_env(env)
+        self._synthetic_nystrom_subsample_batch = None
+        self._fixed_nystrom_xy_points = None
+        self._fixed_nystrom_actions = None
+        self._synthetic_state_indices_cache = None
+        self._synthetic_state_stride_cache = None
         
         try:
             self.gridworld_visualizer = self.debug_visualizer.attach_env(env)
@@ -2638,87 +3212,6 @@ class RoverAgent:
 
     def _kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return self.kernel_fn(X, Y)
-
-    def _kernel_status(self, kernel_fn=None) -> str:
-        kernel_fn = self.kernel_fn if kernel_fn is None else kernel_fn
-        bandwidth = getattr(kernel_fn, "bandwidth", None)
-        percentile = getattr(kernel_fn, "bandwidth_percentile", None)
-        fit_norm = getattr(kernel_fn, "bandwidth_fit_norm", None)
-        if bandwidth is None:
-            return f"kernel={self.kernel_type}, bandwidth_percentile={percentile}, distance_norm={fit_norm}"
-        return f"kernel={self.kernel_type}, bandwidth={bandwidth:.6g}, distance_norm={fit_norm}"
-
-    def _reset_actor_kernel_bandwidths(self):
-        # Automatic sigma is fitted once at the start of each actor update.
-        if hasattr(self.kernel_fn, "reset_auto_bandwidth"):
-            self.kernel_fn.reset_auto_bandwidth()
-        action_kernel = self.distribution_matcher.kernel_fn
-        if hasattr(action_kernel, "reset_auto_bandwidth"):
-            action_kernel.reset_auto_bandwidth()
-
-    def _fit_actor_kernel_bandwidths(self, state_X, state_Y, action_X, action_Y):
-        self._reset_actor_kernel_bandwidths()
-        # State and state-action kernels live in separate KernelFunction objects.
-        if hasattr(self.kernel_fn, "fit_bandwidth"):
-            self.kernel_fn.fit_bandwidth(state_X, state_Y)
-        if hasattr(self.distribution_matcher.kernel_fn, "fit_bandwidth"):
-            self.distribution_matcher.kernel_fn.fit_bandwidth(action_X, action_Y)
-
-    @staticmethod
-    def _uniform_tensor_indices(n_items, max_items, device):
-        if n_items <= max_items:
-            return torch.arange(n_items, device=device)
-        return torch.round(torch.linspace(0, n_items - 1, max_items, device=device)).long()
-
-    def _kernel_debug_matrix(self, kernel_fn, X, Y, max_points=300):
-        x_idx = self._uniform_tensor_indices(X.shape[0], max_points, X.device)
-        y_idx = self._uniform_tensor_indices(Y.shape[0], max_points, Y.device)
-        with torch.no_grad():
-            matrix = kernel_fn(X[x_idx], Y[y_idx]).detach().float().cpu().numpy()
-        return matrix
-
-    def _save_actor_kernel_debug_plot(self, step, state_X, state_Y, action_X, action_Y, nystrom=False):
-        if self.kernel_type != "gaussian":
-            return
-
-        save_dir = os.path.join(os.getcwd(), "kernel_debug_plots")
-        os.makedirs(save_dir, exist_ok=True)
-        suffix = "nystrom" if nystrom else "full"
-        save_path = os.path.join(save_dir, f"step_{step}_{suffix}_kernels.png")
-
-        state_matrix = self._kernel_debug_matrix(self.kernel_fn, state_X, state_Y)
-        action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, action_X, action_Y)
-        state_values = state_matrix.reshape(-1)
-        action_values = action_matrix.reshape(-1)
-
-        fig, axes = plt.subplots(2, 2, figsize=(11, 8), constrained_layout=True)
-        panels = [
-            (axes[0, 0], state_matrix, "State / next-state kernel heatmap", self._kernel_status(self.kernel_fn)),
-            (axes[1, 0], action_matrix, "State-action kernel heatmap", self._kernel_status(self.distribution_matcher.kernel_fn)),
-        ]
-        for ax, matrix, title, status in panels:
-            im = ax.imshow(matrix, cmap="viridis", vmin=0.0, vmax=1.0, aspect="auto", interpolation="nearest")
-            ax.set_title(f"{title}\n{status}", fontsize=10)
-            ax.set_xlabel("Y support")
-            ax.set_ylabel("X support")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-        for ax, values, title in [
-            (axes[0, 1], state_values, "State / next-state kernel values"),
-            (axes[1, 1], action_values, "State-action kernel values"),
-        ]:
-            ax.hist(values, bins=70, range=(0.0, 1.0), color="#2563eb", alpha=0.82)
-            ax.axvline(float(np.mean(values)), color="black", linestyle="--", linewidth=1.1, label=f"mean={np.mean(values):.3g}")
-            ax.axvline(float(np.median(values)), color="#dc2626", linestyle=":", linewidth=1.3, label=f"median={np.median(values):.3g}")
-            ax.set_title(title, fontsize=10)
-            ax.set_xlabel("kernel value")
-            ax.set_ylabel("count")
-            ax.legend(fontsize=8)
-
-        fig.suptitle(f"Automatic Gaussian sigma diagnostics at step {step} ({suffix})", fontsize=13)
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Kernel sigma debug plot saved to: {save_path}")
     
     
     def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
@@ -2870,27 +3363,8 @@ class RoverAgent:
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        self._fit_actor_kernel_bandwidths(
-            state_X=self._phi_all_next,
-            state_Y=self._phi_all_next,
-            action_X=self._psi_all,
-            action_Y=self._psi_all,
-        )
         self.H = self._kernel(self._phi_all_obs, self._phi_all_next) # [n, n]
-        self.K = self.distribution_matcher.kernel(self._psi_all, self._psi_all)  # [n, n]
-        print(f"dimensons phi all next: {self._phi_all_next.shape}, psi all: {self._psi_all.shape}, H: {self.H.shape}, K: {self.K.shape}")
-        self._save_actor_kernel_debug_plot(
-            step,
-            state_X=self._phi_all_next,
-            state_Y=self._phi_all_next,
-            action_X=self._psi_all,
-            action_Y=self._psi_all,
-            nystrom=False,
-        )
-        utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
-        utils.ColorPrint.yellow(
-            f"Actor state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
-        )
+        self.K = self._kernel(self._psi_all, self._psi_all)  # [n, n]
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -2925,6 +3399,9 @@ class RoverAgent:
                 sink_norm=sink_norm
             ) 
 
+            # Track gradient norms by reward (only on final iteration)
+            if iteration == self.pmd_steps - 1 and rewards is not None:
+                self._track_gradient_norms(grad_update, rewards, step)
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -2992,11 +3469,6 @@ class RoverAgent:
                 best_loss = actor_loss
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
-            else:
-                # Early stopping if no improvement
-                if self.pmd_eta_mode == "backtracking":
-                    print(f"  Backtracking early stopping at iteration {iteration} with eta {eta_t:.6g} after {trial} trials. Actor loss: {actor_loss:.6g}, best loss: {best_loss:.6g}")
-                    break
 
             if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
@@ -3050,22 +3522,7 @@ class RoverAgent:
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        self._fit_actor_kernel_bandwidths(
-            state_X=self._phi_sub_next,
-            state_Y=self._phi_sub_next,
-            action_X=self._psi_sub,
-            action_Y=self._psi_sub,
-        )
         sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
-        self._save_actor_kernel_debug_plot(
-            step,
-            state_X=self._phi_sub_next,
-            state_Y=self._phi_sub_next,
-            action_X=self._psi_sub,
-            action_Y=self._psi_sub,
-            nystrom=True,
-        )
-        utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -3074,14 +3531,6 @@ class RoverAgent:
         self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
         # M = self.H*(self.E@self.pi.T) # [n, ]
-        B_nystrom = self.distribution_matcher.compute_B_nystrom(
-            psi_all_obs_action=self._psi_all,
-            psi_sub_obs_action=self._psi_sub,
-            svd_truncation=self.svd_truncation
-        )
-        utils.ColorPrint.yellow(
-            f"Nyström state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
-        )
 
         nu_pi = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
                     phi_all_obs=self._phi_all_obs,
@@ -3092,8 +3541,7 @@ class RoverAgent:
                     pi = self.pi,
                     E = self.E,
                     alpha=self._sub_alpha,
-                    sink_norm=sink_norm,
-                    B_nystrom=B_nystrom,
+                    sink_norm=sink_norm 
                 )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
@@ -3102,6 +3550,11 @@ class RoverAgent:
         best_coeff = self.gradient_coeff.clone()
 
         self._adagrad_accum = 0.0
+        B_nystrom = self.distribution_matcher.compute_B_nystrom(
+            psi_all_obs_action=self._psi_all,
+            psi_sub_obs_action=self._psi_sub,
+            svd_truncation=self.svd_truncation
+        )
 
         for iteration in range(self.pmd_steps):
             grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient(
@@ -3119,6 +3572,9 @@ class RoverAgent:
 
             )           
 
+            # Track gradient norms by reward (only on final iteration)
+            # if iteration == self.pmd_steps - 1 and sub_rewards is not None:
+            #     self._track_gradient_norms(grad_update, sub_rewards, step)
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -3167,7 +3623,7 @@ class RoverAgent:
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
                     candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
-
+                    # candidate_M = sub_H * (self.E @ candidate_pi.T)
                     candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
                             phi_all_obs=self._phi_all_obs,
                             phi_sub_next_obs = self._phi_sub_next,
@@ -3211,6 +3667,52 @@ class RoverAgent:
             metrics['sink_norm'] = float(sink_norm)
    
         return metrics
+
+
+    def _track_gradient_norms(self, gradient, rewards, step):
+        """
+        Track gradient norms for samples with different reward values.
+        
+        Args:
+            gradient: [batch_size+1, 1] gradient tensor
+            rewards: [batch_size] reward tensor
+            step: current training step
+        """
+        with torch.no_grad():
+            # Compute per-sample gradient norm (excluding the last augmented dimension)
+            grad_per_sample = gradient[:-1]  # [batch_size, 1]
+            
+            # Group by reward value
+            for reward_val, reward_key in [(1.0, '+1'), (-1.0, '-1'), (0.0, '0')]:
+                mask = (rewards == reward_val)
+                if mask.sum() > 0:
+                    # Get gradients for this reward type
+                    grads_for_reward = grad_per_sample[mask]
+                    
+                    print(f"shapes for reward {reward_key}: grads {grads_for_reward.shape}, rewards {rewards[mask].shape}")
+                    # Compute norms
+                    norms = torch.norm(grads_for_reward.reshape(grads_for_reward.shape[0], -1), dim=1).cpu().numpy()
+                    
+                    # Store individual samples (up to max)
+                    for norm_val in norms:
+                        if len(self.gradient_samples[reward_key]) < self.max_samples_per_reward:
+                            self.gradient_samples[reward_key].append((step, float(norm_val)))
+                        else:
+                            # Replace oldest sample
+                            self.gradient_samples[reward_key].pop(0)
+                            self.gradient_samples[reward_key].append((step, float(norm_val)))
+            
+            # Compute statistics for this step
+            for reward_key in ['+1', '-1', '0']:
+                # Get norms from current samples at this step
+                current_norms = [norm for s, norm in self.gradient_samples[reward_key] if s == step]
+                if len(current_norms) > 0:
+                    mean_norm = np.mean(current_norms)
+                    std_norm = np.std(current_norms) if len(current_norms) > 1 else 0.0
+                    self.gradient_norm_history[reward_key].append((step, mean_norm, std_norm))
+                    
+                    print(f"  Reward {reward_key}: {len(current_norms)} samples, "
+                          f"mean_norm={mean_norm:.6f}, std={std_norm:.6f}")
 
     
     def _cache_features(self, obs, action, next_obs, encoder=None, sub_obs=None, sub_action=None, sub_next_obs=None):
@@ -3514,76 +4016,32 @@ class RoverAgent:
             max_samples,
         )
 
-    def _nystrom_subsample_count(self) -> int:
-        if self.subsamples is None:
-            raise ValueError("Nyström actor update requires agent.subsamples to be set.")
-        count = int(self.subsamples)
-        if count <= 0:
-            raise ValueError("subsamples must be positive when provided")
-        return count
+    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None):
+        if self._update_encoded_actor_fifo(replay_buffer):
+            if self.subsamples is None:
+                encoded_full, rewards = self._sample_encoded_actor_data(
+                    self.batch_size_actor,
+                    include_first=True,
+                )
+                return encoded_full, rewards, None, None
 
-    def _fixed_actor_update_data(self) -> RawActorUpdateData:
-        fixed_batch = self.nystrom_debug.fixed_actor_batch(self)
-        subsample = fixed_batch if self.subsamples is not None else None
-        return RawActorUpdateData(
-            full=fixed_batch,
-            subsample=subsample,
-            source="fixed PointMaze debug dataset",
-        )
+            if self.subsamples <= 0:
+                raise ValueError("subsamples must be positive when provided")
 
-    def _synthetic_actor_subsample_batch(self):
-        return self.nystrom_debug.fixed_actor_batch(self)
+            # Nyström uses the FIFO as the full support and samples only the
+            # landmark/subsample set. The FIFO capacity controls the maximum
+            # retained support size; batch_size_actor is only for non-Nyström.
+            encoded_full, rewards = self._all_encoded_actor_data(include_first=True)
+            if self.nystrom_synthetic_subsamples:
+                encoded_sub, sub_rewards = self._encode_synthetic_nystrom_subsamples()
+            else:
+                encoded_sub, sub_rewards = self._sample_encoded_actor_data(
+                    int(self.subsamples),
+                    include_first=True,
+                )
+            return encoded_full, rewards, encoded_sub, sub_rewards
 
-    def _encoded_fifo_actor_update_data(self, replay_buffer):
-        if not self._update_encoded_actor_fifo(replay_buffer):
-            return None
-
-        if self.subsamples is None:
-            full, rewards = self._sample_encoded_actor_data(
-                self.batch_size_actor,
-                include_first=True,
-            )
-            return EncodedActorUpdateData(
-                full=full,
-                rewards=rewards,
-                source=f"encoded FIFO sample of batch_size_actor={self.batch_size_actor}",
-            )
-
-        # Nyström uses the whole encoded FIFO as support and a smaller landmark set.
-        count = self._nystrom_subsample_count()
-        full, rewards = self._all_encoded_actor_data(include_first=True)
-        if self.nystrom_synthetic_subsamples:
-            subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
-            subsample_source = "fixed PointMaze Nyström landmarks"
-        else:
-            subsample, subsample_rewards = self._sample_encoded_actor_data(
-                count,
-                include_first=True,
-            )
-            subsample_source = f"encoded FIFO Nyström sample of subsamples={count}"
-        return EncodedActorUpdateData(
-            full=full,
-            rewards=rewards,
-            subsample=subsample,
-            subsample_rewards=subsample_rewards,
-            source=f"encoded FIFO full support + {subsample_source}",
-        )
-
-    def _replay_actor_subsample_batch(self, replay_iter, full_batch, replay_buffer):
-        count = self._nystrom_subsample_count()
-        if self.nystrom_synthetic_subsamples:
-            return self._synthetic_actor_subsample_batch()
-        if count >= full_batch[0].shape[0]:
-            return full_batch
-        return self._load_actor_subsample_from_replay_iter(
-            replay_iter,
-            max_samples=count,
-            replay_buffer=replay_buffer,
-            fallback_actor_batch=full_batch,
-        )
-
-    def _replay_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer):
-        full_batch = self._load_actor_batch_from_replay_iter(
+        full_actor_batch = self._load_actor_batch_from_replay_iter(
             replay_iter,
             obs,
             action,
@@ -3592,107 +4050,33 @@ class RoverAgent:
             max_samples=self.batch_size_actor,
             replay_buffer=replay_buffer,
         )
+
         if self.subsamples is None:
-            return RawActorUpdateData(
-                full=full_batch,
-                source=f"replay iterator sample of batch_size_actor={self.batch_size_actor}",
+            return (*full_actor_batch, None, None, None, None)
+
+        if self.subsamples <= 0:
+            raise ValueError("subsamples must be positive when provided")
+
+        if self.nystrom_synthetic_subsamples:
+            synthetic_batch = self._build_synthetic_nystrom_subsample_batch()
+            syn_obs, syn_action, syn_reward, _, syn_next_obs = synthetic_batch
+            subsampled_actor_batch = self._make_actor_batch(
+                syn_obs,
+                syn_action,
+                syn_next_obs,
+                syn_reward,
             )
-        return RawActorUpdateData(
-            full=full_batch,
-            subsample=self._replay_actor_subsample_batch(replay_iter, full_batch, replay_buffer),
-            source=(
-                "replay full support + fixed PointMaze Nyström landmarks"
-                if self.nystrom_synthetic_subsamples
-                else f"replay full support + replay Nyström subsample of subsamples={self.subsamples}"
-            ),
-        )
-
-    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None):
-        """Choose the actor dataset for this step.
-
-        Priority is explicit: fixed debug dataset, encoded FIFO, then raw
-        replay. If subsamples is None, the object carries only the full actor
-        batch and update_actor is used. Otherwise it also carries Nyström data.
-        """
-        if self.debug_fixed_dataset_updates:
-            return self._fixed_actor_update_data()
-
-        encoded_data = self._encoded_fifo_actor_update_data(replay_buffer)
-        if encoded_data is not None:
-            return encoded_data
-
-        return self._replay_actor_update_data(
-            replay_iter,
-            obs,
-            action,
-            next_obs,
-            reward,
-            replay_buffer,
-        )
-
-    def _log_actor_update_data(self, actor_data):
-        if isinstance(actor_data, EncodedActorUpdateData):
-            full_size = self._encoded_batch_size(actor_data.full)
-            subsample_size = (
-                self._encoded_batch_size(actor_data.subsample)
-                if actor_data.subsample is not None else "N/A"
-            )
-            data_kind = "encoded"
+        elif self.subsamples >= full_actor_batch[0].shape[0]:
+            subsampled_actor_batch = full_actor_batch
         else:
-            full_size = actor_data.full[0].shape[0]
-            subsample_size = actor_data.subsample[0].shape[0] if actor_data.subsample is not None else "N/A"
-            data_kind = "raw"
-
-        update_name = "update_actor_nystrom" if self.subsamples is not None else "update_actor"
-
-        utils.ColorPrint.red(
-            f"actor update data: update={update_name}, kind={data_kind}, "
-            f"source={actor_data.source}, full={full_size}, subsampled={subsample_size}"
-        )
-
-    def _update_actor_from_data(self, actor_data, step):
-        self._log_actor_update_data(actor_data)
-
-        if isinstance(actor_data, EncodedActorUpdateData):
-            if self.subsamples is None:
-                return self.update_actor(
-                    step=step,
-                    rewards=actor_data.rewards,
-                    encoded_full=actor_data.full,
-                )
-            return self.update_actor_nystrom(
-                None,
-                None,
-                None,
-                step=step,
-                rewards=actor_data.rewards,
-                sub_rewards=actor_data.subsample_rewards,
-                encoded_full=actor_data.full,
-                encoded_sub=actor_data.subsample,
+            subsampled_actor_batch = self._load_actor_subsample_from_replay_iter(
+                replay_iter,
+                max_samples=int(self.subsamples),
+                replay_buffer=replay_buffer,
+                fallback_actor_batch=full_actor_batch,
             )
 
-        obs, action, next_obs, reward = actor_data.full
-        if self.subsamples is None:
-            return self.update_actor(
-                obs,
-                action,
-                next_obs,
-                step=step,
-                rewards=reward,
-            )
-
-        sub_obs, sub_action, sub_next_obs, sub_reward = actor_data.subsample
-        return self.update_actor_nystrom(
-            obs,
-            action,
-            next_obs,
-            step=step,
-            rewards=reward,
-            sub_obs=sub_obs,
-            sub_action=sub_action,
-            sub_next_obs=sub_next_obs,
-            sub_rewards=sub_reward,
-        )
+        return (*full_actor_batch, *subsampled_actor_batch)
 
     def _build_debug_visualizer_batch(self, obs, max_observations=2000):
         if obs is None:
@@ -3723,6 +4107,166 @@ class RoverAgent:
         mean_probs = np.mean(action_probs, axis=0)  # [n_actions]
         deviation = np.mean(np.abs(mean_probs - uniform_prob))
         return deviation
+    
+    def plot_gradient_norm_by_reward(self, save_dir: str = './gradient_plots'):
+        """
+        Plot gradient norms over time, separated by reward value.
+        
+        Args:
+            save_dir: Directory to save the plot
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Check if we have data
+        has_data = any(len(self.gradient_norm_history[key]) > 0 for key in self.gradient_norm_history)
+        if not has_data:
+            print("No gradient norm history to plot yet")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        fig.suptitle('Gradient Norms by Reward Type', fontsize=16, fontweight='bold')
+        
+        colors = {'+1': 'green', '-1': 'red', '0': 'blue'}
+        labels = {'+1': 'Reward +1', '-1': 'Reward -1', '0': 'Reward 0'}
+        
+        # Plot 1: Mean gradient norms over time
+        ax1 = axes[0, 0]
+        for reward_key in ['+1', '-1', '0']:
+            if len(self.gradient_norm_history[reward_key]) > 0:
+                steps, means, stds = zip(*self.gradient_norm_history[reward_key])
+                ax1.plot(steps, means, color=colors[reward_key], linewidth=2, 
+                        label=labels[reward_key], alpha=0.8)
+                means_arr = np.array(means)
+                stds_arr = np.array(stds)
+                ax1.fill_between(steps, means_arr - stds_arr, means_arr + stds_arr, 
+                                color=colors[reward_key], alpha=0.2)
+        
+        ax1.set_xlabel('Training Steps', fontsize=11)
+        ax1.set_ylabel('Mean Gradient Norm', fontsize=11)
+        ax1.set_title('Mean Gradient Norms Over Time', fontsize=12, fontweight='bold')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Current distribution of gradient norms (latest samples)
+        ax2 = axes[0, 1]
+        current_samples = {k: [norm for _, norm in v[-50:]] for k, v in self.gradient_samples.items() if len(v) > 0}
+        
+        if any(len(samples) > 0 for samples in current_samples.values()):
+            positions = []
+            data_to_plot = []
+            tick_labels = []
+            box_colors = []
+            
+            for i, (reward_key, samples) in enumerate(current_samples.items()):
+                if len(samples) > 0:
+                    positions.append(i)
+                    data_to_plot.append(samples)
+                    tick_labels.append(labels[reward_key])
+                    box_colors.append(colors[reward_key])
+            
+            bp = ax2.boxplot(data_to_plot, positions=positions, patch_artist=True,
+                           widths=0.6, showfliers=True)
+            
+            for patch, color in zip(bp['boxes'], box_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.6)
+            
+            ax2.set_xticks(positions)
+            ax2.set_xticklabels(tick_labels)
+            ax2.set_ylabel('Gradient Norm', fontsize=11)
+            ax2.set_title('Current Gradient Norm Distribution\n(Last 50 samples per reward)', 
+                         fontsize=12, fontweight='bold')
+            ax2.grid(True, alpha=0.3, axis='y')
+        else:
+            ax2.text(0.5, 0.5, 'Not enough data yet', ha='center', va='center', 
+                    transform=ax2.transAxes, fontsize=12)
+        
+        # Plot 3: Sample counts over time
+        ax3 = axes[1, 0]
+        for reward_key in ['+1', '-1', '0']:
+            if len(self.gradient_norm_history[reward_key]) > 0:
+                steps, _, _ = zip(*self.gradient_norm_history[reward_key])
+                # Count cumulative samples at each step
+                cumulative_counts = []
+                for step in steps:
+                    count = len([s for s, _ in self.gradient_samples[reward_key] if s <= step])
+                    cumulative_counts.append(count)
+                
+                ax3.plot(steps, cumulative_counts, color=colors[reward_key], 
+                        linewidth=2, label=labels[reward_key], alpha=0.8)
+        
+        ax3.set_xlabel('Training Steps', fontsize=11)
+        ax3.set_ylabel('Cumulative Sample Count', fontsize=11)
+        ax3.set_title('Sample Collection Progress', fontsize=12, fontweight='bold')
+        ax3.legend(loc='best')
+        ax3.grid(True, alpha=0.3)
+        ax3.axhline(self.max_samples_per_reward, color='black', linestyle='--', 
+                   linewidth=1, alpha=0.5, label=f'Max ({self.max_samples_per_reward})')
+        
+        # Plot 4: Ratio comparison
+        ax4 = axes[1, 1]
+        if len(self.gradient_norm_history['+1']) > 0 and len(self.gradient_norm_history['0']) > 0:
+            # Get aligned steps
+            steps_pos = [s for s, _, _ in self.gradient_norm_history['+1']]
+            steps_zero = [s for s, _, _ in self.gradient_norm_history['0']]
+            steps_neg = [s for s, _, _ in self.gradient_norm_history['-1']]
+            
+            common_steps = sorted(set(steps_pos) & set(steps_zero))
+            
+            if len(common_steps) > 0:
+                ratios_pos_zero = []
+                for step in common_steps:
+                    mean_pos = [m for s, m, _ in self.gradient_norm_history['+1'] if s == step][0]
+                    mean_zero = [m for s, m, _ in self.gradient_norm_history['0'] if s == step][0]
+                    if mean_zero > 1e-10:
+                        ratios_pos_zero.append(mean_pos / mean_zero)
+                    else:
+                        ratios_pos_zero.append(np.nan)
+                
+                ax4.plot(common_steps, ratios_pos_zero, color='purple', linewidth=2, 
+                        label='||∇(r=+1)|| / ||∇(r=0)||', alpha=0.8)
+                ax4.axhline(1.0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+            
+            # Add negative reward ratio if available
+            common_steps_neg = sorted(set(steps_neg) & set(steps_zero))
+            if len(common_steps_neg) > 0:
+                ratios_neg_zero = []
+                for step in common_steps_neg:
+                    mean_neg = [m for s, m, _ in self.gradient_norm_history['-1'] if s == step][0]
+                    mean_zero = [m for s, m, _ in self.gradient_norm_history['0'] if s == step][0]
+                    if mean_zero > 1e-10:
+                        ratios_neg_zero.append(mean_neg / mean_zero)
+                    else:
+                        ratios_neg_zero.append(np.nan)
+                
+                ax4.plot(common_steps_neg, ratios_neg_zero, color='orange', linewidth=2,
+                        label='||∇(r=-1)|| / ||∇(r=0)||', alpha=0.8)
+            
+            ax4.set_xlabel('Training Steps', fontsize=11)
+            ax4.set_ylabel('Gradient Norm Ratio', fontsize=11)
+            ax4.set_title('Relative Gradient Magnitudes', fontsize=12, fontweight='bold')
+            ax4.legend(loc='best')
+            ax4.grid(True, alpha=0.3)
+        else:
+            ax4.text(0.5, 0.5, 'Not enough data for comparison', ha='center', va='center',
+                    transform=ax4.transAxes, fontsize=12)
+        
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, 'gradient_norms_by_reward.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Gradient norm plot saved to: {save_path}")
+        
+        # Print summary statistics
+        print("\n=== Gradient Norm Summary ===")
+        for reward_key in ['+1', '-1', '0']:
+            if len(self.gradient_samples[reward_key]) > 0:
+                norms = [norm for _, norm in self.gradient_samples[reward_key]]
+                print(f"Reward {reward_key:>2}: n={len(norms):3d}, "
+                      f"mean={np.mean(norms):.6f}, std={np.std(norms):.6f}, "
+                      f"min={np.min(norms):.6f}, max={np.max(norms):.6f}")
+
 
     def plot_policy_deviation_history(self, save_dir: str = './policy_plots'):
         """
@@ -3780,49 +4324,9 @@ class RoverAgent:
         else:
             return self.encoder(obs)
 
-    def _debug_visualizer_text(self, step) -> str:
-        return (
-            f"Step: {step}\n"
-            f"γ = {self.discount}\n"
-            f"η = {self.current_eta}\n"
-            f"λ = {self.lambda_reg}\n"
-            f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
-            f"PMD steps = {self.pmd_steps}\n"
-            f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
-        )
-
-    def _run_debug_visualizers(self, metrics, obs, step):
-        if self.debug_visualizer is None:
-            return metrics
-
-        visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
-        metrics.update(
-            self.debug_visualizer.save(
-                step=step,
-                obs_batch=visualizer_obs,
-                z_batch=visualizer_z,
-                param_text=self._debug_visualizer_text(step),
-            )
-        )
-
-        if len(self.current_action_probs) == 0:
-            return metrics
-
-        current_action_probs = np.array(self.current_action_probs)
-        mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
-        mean_probs = np.mean(current_action_probs, axis=0)
-
-        self.policy_deviation_history.append((step, mean_deviation))
-        self.action_probs_history.append((step, mean_probs))
-        self.current_action_probs = []
-
-        metrics['policy_deviation_from_uniform'] = mean_deviation
-        print(
-            f"Policy deviation from uniform: {mean_deviation:.4f} "
-            f"(0=uniform, {(self.n_actions - 1) / self.n_actions:.3f}=deterministic)"
-        )
-        self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
-        return metrics
+    def _sample_batch(self, replay_iter):
+        batch = next(replay_iter)
+        return utils.to_torch(batch, self.device)
 
     def update(self, replay_iter, step, replay_buffer=None):
         metrics = dict()
@@ -3833,20 +4337,19 @@ class RoverAgent:
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch, self.device)
-        if self.debug_fixed_dataset_updates:
-            obs, action, next_obs, reward = self.nystrom_debug.fixed_encoder_batch(self)
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         if self.embeddings:
             metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
-        # Train the encoder/transition model first; PMD starts once T is ready.
-        if not self._is_T_sufficiently_initialized(step):
+        # If T is not sufficiently initialized, skip actor update
+        if self._is_T_sufficiently_initialized(step) is False:   
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
-
-        if step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps:
+        
+        # In ideal mode, we can update actor immediately
+        if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
             actor_update_data = self._get_actor_update_data(
                 replay_iter,
                 obs,
@@ -3855,7 +4358,119 @@ class RoverAgent:
                 reward,
                 replay_buffer=replay_buffer,
             )
-            metrics.update(self._update_actor_from_data(actor_update_data, step))
-            metrics = self._run_debug_visualizers(metrics, obs, step)
+            if isinstance(actor_update_data[0], dict):
+                encoded_full, all_reward_actor, encoded_sub, subsampled_reward_actor = actor_update_data
+                utils.ColorPrint.red(
+                    f"samples for actor update: full {self._encoded_batch_size(encoded_full)}, "
+                    f"subsampled {self._encoded_batch_size(encoded_sub) if encoded_sub is not None else 'N/A'}"
+                )
+            else:
+                (
+                    all_obs_actor,
+                    all_action_actor,
+                    all_next_obs_actor,
+                    all_reward_actor,
+                    subsampled_obs_actor,
+                    subsampled_action_actor,
+                    subsampled_next_obs_actor,
+                    subsampled_reward_actor,
+                ) = actor_update_data
+                encoded_full = None
+                encoded_sub = None
+                utils.ColorPrint.red(
+                    f"samples for actor update: full {all_obs_actor.shape[0]}, "
+                    f"subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}"
+                )
+
+            if self.subsamples is None and encoded_full is not None:
+                metrics.update(
+                    self.update_actor(
+                        step=step,
+                        rewards=all_reward_actor,
+                        encoded_full=encoded_full,
+                    )
+                )
+            elif self.subsamples is None:
+                metrics.update(
+                    self.update_actor(
+                        all_obs_actor,
+                        all_action_actor,
+                        all_next_obs_actor,
+                        step=step,
+                        rewards=all_reward_actor,
+                    )
+                )
+            elif encoded_full is not None:
+                metrics.update(
+                    self.update_actor_nystrom(
+                        None,
+                        None,
+                        None,
+                        step=step,
+                        rewards=all_reward_actor,
+                        sub_rewards=subsampled_reward_actor,
+                        encoded_full=encoded_full,
+                        encoded_sub=encoded_sub,
+                    )
+                )
+            else:
+                metrics.update(
+                    self.update_actor_nystrom(
+                        all_obs_actor,
+                        all_action_actor,
+                        all_next_obs_actor,
+                        step=step,
+                        rewards=all_reward_actor,
+                        sub_obs=subsampled_obs_actor,
+                        sub_action=subsampled_action_actor,
+                        sub_next_obs=subsampled_next_obs_actor,
+                        sub_rewards=subsampled_reward_actor,
+                    )
+                )
+
+
+            if self.debug_visualizer is not None:
+                param_text = (
+                    f"Step: {step}\n"
+                    f"γ = {self.discount}\n"
+                    f"η = {self.current_eta}\n"
+                    f"λ = {self.lambda_reg}\n"
+                    f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
+                    f"PMD steps = {self.pmd_steps}\n"
+                    f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
+                )
+
+            # if  step % 10000 == 0:
+                visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
+                metrics.update(
+                    self.debug_visualizer.save(
+                        step=step,
+                        obs_batch=visualizer_obs,
+                        z_batch=visualizer_z,
+                        param_text=param_text,
+                    )
+                )
+            
+                with torch.no_grad():
+                
+                    if len(self.current_action_probs) == 0:
+                        return metrics
+                    current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
+                    # Compute mean deviation from uniform
+                    mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                    
+                    # Store in history
+                    self.policy_deviation_history.append((step, mean_deviation))
+                    
+                    # Also store the mean action probabilities
+                    mean_probs = np.mean(current_action_probs, axis=0)
+                    self.action_probs_history.append((step, mean_probs))
+                    
+                    # Log to metrics
+                    metrics['policy_deviation_from_uniform'] = mean_deviation
+                    print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
+                    self.current_action_probs = []  # Clear after processing
+                self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+                self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
 
         return metrics

@@ -842,6 +842,26 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
             )
         )
 
+    def _overlay_nystrom_points(self, ax) -> None:
+        debug_helper = getattr(self.agent, "nystrom_debug", None)
+        points = getattr(debug_helper, "fixed_xy_points", None)
+        if points is None:
+            return
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if points.size == 0:
+            return
+        ax.scatter(
+            points[:, 0],
+            points[:, 1],
+            marker=".",
+            s=5,
+            c="#f4a261",
+            alpha=0.42,
+            linewidths=0,
+            zorder=6,
+            label="Nyström points",
+        )
+
     def save(self, step: int) -> None:
         coords = self._sample_policy_rollout(step)
         if coords.size == 0:
@@ -873,6 +893,7 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
+        self._overlay_nystrom_points(ax)
         initial_position = self._get_initial_position()
         if initial_position is not None:
             ax.scatter(
@@ -891,6 +912,64 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"✓ PointMaze coverage plot saved: {save_path}")
+
+
+class PointMazeNystromDebugVisualizer:
+    """Standalone plots for fixed PointMaze Nyström landmarks."""
+
+    def __init__(self, save_dir: str = "pointmaze_plots"):
+        self.save_dir = Path(save_dir)
+
+    def save_fixed_points_plot(self, layout: dict, points: np.ndarray, n_actions: int) -> None:
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = self.save_dir / "fixed_nystrom_points.png"
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+
+        fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+        for x0, y0, width, height in layout["wall_rectangles"]:
+            ax.add_patch(
+                patches.Rectangle(
+                    (x0, y0),
+                    width,
+                    height,
+                    facecolor="black",
+                    edgecolor="black",
+                    linewidth=0.5,
+                )
+            )
+
+        lower = layout["maze_lower"]
+        upper = layout["maze_upper"]
+        ax.add_patch(
+            patches.Rectangle(
+                (lower[0], lower[1]),
+                upper[0] - lower[0],
+                upper[1] - lower[1],
+                fill=False,
+                edgecolor="black",
+                linewidth=1.2,
+            )
+        )
+        ax.scatter(points[:, 0], points[:, 1], s=14, c="#ff7f0e", linewidths=0.0, alpha=0.8)
+        ax.scatter(
+            points[0, 0],
+            points[0, 1],
+            marker="*",
+            s=140,
+            c="white",
+            edgecolors="black",
+            linewidths=0.9,
+            zorder=5,
+        )
+        ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
+        ax.set_ylim(lower[1] - 0.1, upper[1] + 0.1)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(f"Fixed Nyström PointMaze grid ({points.shape[0]} states, all {n_actions} actions each)")
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Fixed Nyström PointMaze grid plot saved to: {save_path}")
 
 
 class RoverDebugVisualizerSuite:
