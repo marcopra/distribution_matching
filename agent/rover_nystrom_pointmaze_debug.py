@@ -11,6 +11,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import utils
 import logging
+from agent.utils import (
+    EncodedActorUpdateData,
+    PointMazeNystromDebugHelper,
+    RawActorUpdateData,
+)
 # set logging level to info
 
 def _resolve_torch_dtype(dtype):
@@ -99,9 +104,16 @@ class RoverAgent:
                  pmd_backtrack_factor: float = 0.5,
                  pmd_backtrack_max_trials: int = 8,
                  compute_dtype: str = "float32",
+                 nystrom_synthetic_subsamples: bool = False,
+                 debug_fixed_dataset_updates: bool = False,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
+                 kernel_type: str = "inner_product",
+                 kernel_bandwidth: Optional[float] = None,
+                 kernel_bandwidth_percentile: Optional[float] = None,
+                 nystrom_grid_border_margin: float = 0.05,
+                 nystrom_grid_oversample: float = 2.0,
                  device: str = "cpu",
                  ):
 
@@ -158,7 +170,25 @@ class RoverAgent:
         self.num_expl_steps = num_expl_steps
         self.lambda_reg = lambda_reg
         self.image_channels = 1 if self.grayscale else 3
+        self.kernel_type = str(kernel_type or "inner_product").strip().lower()
+        self.kernel_bandwidth = kernel_bandwidth
+        self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
+        self.kernel_bandwidth_fit_norm = self.mode
+        self.kernel_fn = utils.build_kernel_fn(
+            self.kernel_type,
+            bandwidth=self.kernel_bandwidth,
+            bandwidth_percentile=self.kernel_bandwidth_percentile,
+            bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
+        )
         self.subsamples = subsamples
+        self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
+        self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates)
+        if self.debug_fixed_dataset_updates:
+            utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed PointMaze Nyström dataset.")
+        self.nystrom_debug = PointMazeNystromDebugHelper(
+            border_margin=nystrom_grid_border_margin,
+            oversample=nystrom_grid_oversample,
+        )
         min_fifo_capacity = max(
             int(self.batch_size_actor),
             int(self.subsamples) if self.subsamples is not None else 0,
@@ -238,8 +268,13 @@ class RoverAgent:
             gamma=self.discount,
             lambda_reg=self.lambda_reg,
             svd_truncation=self.svd_truncation,
+            kernel_type=self.kernel_type,
+            kernel_bandwidth=self.kernel_bandwidth,
+            kernel_bandwidth_percentile=self.kernel_bandwidth_percentile,
+            kernel_bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
             device=self.device  
         )
+        self.distribution_matcher.state_kernel_fn = self.kernel_fn
         
         self.W = None #nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
        
@@ -331,7 +366,7 @@ class RoverAgent:
             else:
                 break
         return env.unwrapped
-    
+
     def insert_env(self, env):
         """
         Insert environment reference for gridworld-specific visualizations.
@@ -339,6 +374,7 @@ class RoverAgent:
         """       
         self.wrapped_env = env
         self.env = self._find_discrete_env(env)
+        self.nystrom_debug.attach_env(env)
         
         try:
             self.gridworld_visualizer = self.debug_visualizer.attach_env(env)
@@ -410,6 +446,90 @@ class RoverAgent:
         """Closed-form PMD policy from logits."""
         logits = self._policy_logits_from_H(H, coeff=coeff)
         return torch.softmax(-logits, dim=1, dtype=logits.dtype)
+
+    def _kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+        return self.kernel_fn(X, Y)
+
+    def _kernel_status(self, kernel_fn=None) -> str:
+        kernel_fn = self.kernel_fn if kernel_fn is None else kernel_fn
+        bandwidth = getattr(kernel_fn, "bandwidth", None)
+        percentile = getattr(kernel_fn, "bandwidth_percentile", None)
+        fit_norm = getattr(kernel_fn, "bandwidth_fit_norm", None)
+        if bandwidth is None:
+            return f"kernel={self.kernel_type}, bandwidth_percentile={percentile}, distance_norm={fit_norm}"
+        return f"kernel={self.kernel_type}, bandwidth={bandwidth:.6g}, distance_norm={fit_norm}"
+
+    def _reset_actor_kernel_bandwidths(self):
+        # Automatic sigma is fitted once at the start of each actor update.
+        if hasattr(self.kernel_fn, "reset_auto_bandwidth"):
+            self.kernel_fn.reset_auto_bandwidth()
+        action_kernel = self.distribution_matcher.kernel_fn
+        if hasattr(action_kernel, "reset_auto_bandwidth"):
+            action_kernel.reset_auto_bandwidth()
+
+    def _fit_actor_kernel_bandwidths(self, state_X, state_Y, action_X, action_Y):
+        self._reset_actor_kernel_bandwidths()
+        # State and state-action kernels live in separate KernelFunction objects.
+        if hasattr(self.kernel_fn, "fit_bandwidth"):
+            self.kernel_fn.fit_bandwidth(state_X, state_Y)
+        if hasattr(self.distribution_matcher.kernel_fn, "fit_bandwidth"):
+            self.distribution_matcher.kernel_fn.fit_bandwidth(action_X, action_Y)
+
+    @staticmethod
+    def _uniform_tensor_indices(n_items, max_items, device):
+        if n_items <= max_items:
+            return torch.arange(n_items, device=device)
+        return torch.round(torch.linspace(0, n_items - 1, max_items, device=device)).long()
+
+    def _kernel_debug_matrix(self, kernel_fn, X, Y, max_points=300):
+        x_idx = self._uniform_tensor_indices(X.shape[0], max_points, X.device)
+        y_idx = self._uniform_tensor_indices(Y.shape[0], max_points, Y.device)
+        with torch.no_grad():
+            matrix = kernel_fn(X[x_idx], Y[y_idx]).detach().float().cpu().numpy()
+        return matrix
+
+    def _save_actor_kernel_debug_plot(self, step, state_X, state_Y, action_X, action_Y, nystrom=False):
+        if self.kernel_type != "gaussian":
+            return
+
+        save_dir = os.path.join(os.getcwd(), "kernel_debug_plots")
+        os.makedirs(save_dir, exist_ok=True)
+        suffix = "nystrom" if nystrom else "full"
+        save_path = os.path.join(save_dir, f"step_{step}_{suffix}_kernels.png")
+
+        state_matrix = self._kernel_debug_matrix(self.kernel_fn, state_X, state_Y)
+        action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, action_X, action_Y)
+        state_values = state_matrix.reshape(-1)
+        action_values = action_matrix.reshape(-1)
+
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8), constrained_layout=True)
+        panels = [
+            (axes[0, 0], state_matrix, "State / next-state kernel heatmap", self._kernel_status(self.kernel_fn)),
+            (axes[1, 0], action_matrix, "State-action kernel heatmap", self._kernel_status(self.distribution_matcher.kernel_fn)),
+        ]
+        for ax, matrix, title, status in panels:
+            im = ax.imshow(matrix, cmap="viridis", vmin=0.0, vmax=1.0, aspect="auto", interpolation="nearest")
+            ax.set_title(f"{title}\n{status}", fontsize=10)
+            ax.set_xlabel("Y support")
+            ax.set_ylabel("X support")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        for ax, values, title in [
+            (axes[0, 1], state_values, "State / next-state kernel values"),
+            (axes[1, 1], action_values, "State-action kernel values"),
+        ]:
+            ax.hist(values, bins=70, range=(0.0, 1.0), color="#2563eb", alpha=0.82)
+            ax.axvline(float(np.mean(values)), color="black", linestyle="--", linewidth=1.1, label=f"mean={np.mean(values):.3g}")
+            ax.axvline(float(np.median(values)), color="#dc2626", linestyle=":", linewidth=1.3, label=f"median={np.median(values):.3g}")
+            ax.set_title(title, fontsize=10)
+            ax.set_xlabel("kernel value")
+            ax.set_ylabel("count")
+            ax.legend(fontsize=8)
+
+        fig.suptitle(f"Automatic Gaussian sigma diagnostics at step {step} ({suffix})", fontsize=13)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Kernel sigma debug plot saved to: {save_path}")
     
     
     def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
@@ -435,7 +555,7 @@ class RoverAgent:
             
             # Add a zero to enc_obs to account for the extra row in H
             enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), device=enc_obs.device)], dim=1)  # [1, feature_dim + 1]
-            H = enc_obs_augmented @ self._phi_all_obs.T  # [1, num_unique]
+            H = self._kernel(enc_obs_augmented, self._phi_all_obs)  # [1, num_unique]
             probs = self._policy_from_H(H)
 
             
@@ -561,8 +681,27 @@ class RoverAgent:
 
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
-        self.K = self._psi_all @ self._psi_all.T  # [n, n]
+        self._fit_actor_kernel_bandwidths(
+            state_X=self._phi_all_next,
+            state_Y=self._phi_all_next,
+            action_X=self._psi_all,
+            action_Y=self._psi_all,
+        )
+        self.H = self._kernel(self._phi_all_obs, self._phi_all_next) # [n, n]
+        self.K = self.distribution_matcher.kernel(self._psi_all, self._psi_all)  # [n, n]
+        print(f"dimensons phi all next: {self._phi_all_next.shape}, psi all: {self._psi_all.shape}, H: {self.H.shape}, K: {self.K.shape}")
+        self._save_actor_kernel_debug_plot(
+            step,
+            state_X=self._phi_all_next,
+            state_Y=self._phi_all_next,
+            action_X=self._psi_all,
+            action_Y=self._psi_all,
+            nystrom=False,
+        )
+        utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
+        utils.ColorPrint.yellow(
+            f"Actor state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
+        )
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -597,9 +736,6 @@ class RoverAgent:
                 sink_norm=sink_norm
             ) 
 
-            # Track gradient norms by reward (only on final iteration)
-            if iteration == self.pmd_steps - 1 and rewards is not None:
-                self._track_gradient_norms(grad_update, rewards, step)
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -667,6 +803,11 @@ class RoverAgent:
                 best_loss = actor_loss
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
+            else:
+                # Early stopping if no improvement
+                if self.pmd_eta_mode == "backtracking":
+                    print(f"  Backtracking early stopping at iteration {iteration} with eta {eta_t:.6g} after {trial} trials. Actor loss: {actor_loss:.6g}, best loss: {best_loss:.6g}")
+                    break
 
             if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
@@ -720,7 +861,22 @@ class RoverAgent:
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
-        sub_H = self._phi_all_obs @ self._phi_sub_next.T # [n, m]
+        self._fit_actor_kernel_bandwidths(
+            state_X=self._phi_sub_next,
+            state_Y=self._phi_sub_next,
+            action_X=self._psi_sub,
+            action_Y=self._psi_sub,
+        )
+        sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
+        self._save_actor_kernel_debug_plot(
+            step,
+            state_X=self._phi_sub_next,
+            state_Y=self._phi_sub_next,
+            action_X=self._psi_sub,
+            action_Y=self._psi_sub,
+            nystrom=True,
+        )
+        utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -729,6 +885,14 @@ class RoverAgent:
         self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
         # M = self.H*(self.E@self.pi.T) # [n, ]
+        B_nystrom = self.distribution_matcher.compute_B_nystrom(
+            psi_all_obs_action=self._psi_all,
+            psi_sub_obs_action=self._psi_sub,
+            svd_truncation=self.svd_truncation
+        )
+        utils.ColorPrint.yellow(
+            f"Nyström state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
+        )
 
         nu_pi = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
                     phi_all_obs=self._phi_all_obs,
@@ -739,7 +903,8 @@ class RoverAgent:
                     pi = self.pi,
                     E = self.E,
                     alpha=self._sub_alpha,
-                    sink_norm=sink_norm 
+                    sink_norm=sink_norm,
+                    B_nystrom=B_nystrom,
                 )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
@@ -748,11 +913,6 @@ class RoverAgent:
         best_coeff = self.gradient_coeff.clone()
 
         self._adagrad_accum = 0.0
-        B_nystrom = self.distribution_matcher.compute_B_nystrom(
-            psi_all_obs_action=self._psi_all,
-            psi_sub_obs_action=self._psi_sub,
-            svd_truncation=self.svd_truncation
-        )
 
         for iteration in range(self.pmd_steps):
             grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient(
@@ -770,9 +930,6 @@ class RoverAgent:
 
             )           
 
-            # Track gradient norms by reward (only on final iteration)
-            # if iteration == self.pmd_steps - 1 and sub_rewards is not None:
-            #     self._track_gradient_norms(grad_update, sub_rewards, step)
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -821,7 +978,7 @@ class RoverAgent:
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
                     candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
-                    # candidate_M = sub_H * (self.E @ candidate_pi.T)
+
                     candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
                             phi_all_obs=self._phi_all_obs,
                             phi_sub_next_obs = self._phi_sub_next,
@@ -865,52 +1022,6 @@ class RoverAgent:
             metrics['sink_norm'] = float(sink_norm)
    
         return metrics
-
-
-    def _track_gradient_norms(self, gradient, rewards, step):
-        """
-        Track gradient norms for samples with different reward values.
-        
-        Args:
-            gradient: [batch_size+1, 1] gradient tensor
-            rewards: [batch_size] reward tensor
-            step: current training step
-        """
-        with torch.no_grad():
-            # Compute per-sample gradient norm (excluding the last augmented dimension)
-            grad_per_sample = gradient[:-1]  # [batch_size, 1]
-            
-            # Group by reward value
-            for reward_val, reward_key in [(1.0, '+1'), (-1.0, '-1'), (0.0, '0')]:
-                mask = (rewards == reward_val)
-                if mask.sum() > 0:
-                    # Get gradients for this reward type
-                    grads_for_reward = grad_per_sample[mask]
-                    
-                    print(f"shapes for reward {reward_key}: grads {grads_for_reward.shape}, rewards {rewards[mask].shape}")
-                    # Compute norms
-                    norms = torch.norm(grads_for_reward.reshape(grads_for_reward.shape[0], -1), dim=1).cpu().numpy()
-                    
-                    # Store individual samples (up to max)
-                    for norm_val in norms:
-                        if len(self.gradient_samples[reward_key]) < self.max_samples_per_reward:
-                            self.gradient_samples[reward_key].append((step, float(norm_val)))
-                        else:
-                            # Replace oldest sample
-                            self.gradient_samples[reward_key].pop(0)
-                            self.gradient_samples[reward_key].append((step, float(norm_val)))
-            
-            # Compute statistics for this step
-            for reward_key in ['+1', '-1', '0']:
-                # Get norms from current samples at this step
-                current_norms = [norm for s, norm in self.gradient_samples[reward_key] if s == step]
-                if len(current_norms) > 0:
-                    mean_norm = np.mean(current_norms)
-                    std_norm = np.std(current_norms) if len(current_norms) > 1 else 0.0
-                    self.gradient_norm_history[reward_key].append((step, mean_norm, std_norm))
-                    
-                    print(f"  Reward {reward_key}: {len(current_norms)} samples, "
-                          f"mean_norm={mean_norm:.6f}, std={std_norm:.6f}")
 
     
     def _cache_features(self, obs, action, next_obs, encoder=None, sub_obs=None, sub_action=None, sub_next_obs=None):
@@ -1214,29 +1325,76 @@ class RoverAgent:
             max_samples,
         )
 
-    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None):
-        if self._update_encoded_actor_fifo(replay_buffer):
-            if self.subsamples is None:
-                encoded_full, rewards = self._sample_encoded_actor_data(
-                    self.batch_size_actor,
-                    include_first=True,
-                )
-                return encoded_full, rewards, None, None
+    def _nystrom_subsample_count(self) -> int:
+        if self.subsamples is None:
+            raise ValueError("Nyström actor update requires agent.subsamples to be set.")
+        count = int(self.subsamples)
+        if count <= 0:
+            raise ValueError("subsamples must be positive when provided")
+        return count
 
-            if self.subsamples <= 0:
-                raise ValueError("subsamples must be positive when provided")
+    def _fixed_actor_update_data(self) -> RawActorUpdateData:
+        fixed_batch = self.nystrom_debug.fixed_actor_batch(self)
+        subsample = fixed_batch if self.subsamples is not None else None
+        return RawActorUpdateData(
+            full=fixed_batch,
+            subsample=subsample,
+            source="fixed PointMaze debug dataset",
+        )
 
-            # Nyström uses the FIFO as the full support and samples only the
-            # landmark/subsample set. The FIFO capacity controls the maximum
-            # retained support size; batch_size_actor is only for non-Nyström.
-            encoded_full, rewards = self._all_encoded_actor_data(include_first=True)
-            encoded_sub, sub_rewards = self._sample_encoded_actor_data(
-                int(self.subsamples),
+    def _synthetic_actor_subsample_batch(self):
+        return self.nystrom_debug.fixed_actor_batch(self)
+
+    def _encoded_fifo_actor_update_data(self, replay_buffer):
+        if not self._update_encoded_actor_fifo(replay_buffer):
+            return None
+
+        if self.subsamples is None:
+            full, rewards = self._sample_encoded_actor_data(
+                self.batch_size_actor,
                 include_first=True,
             )
-            return encoded_full, rewards, encoded_sub, sub_rewards
+            return EncodedActorUpdateData(
+                full=full,
+                rewards=rewards,
+                source=f"encoded FIFO sample of batch_size_actor={self.batch_size_actor}",
+            )
 
-        full_actor_batch = self._load_actor_batch_from_replay_iter(
+        # Nyström uses the whole encoded FIFO as support and a smaller landmark set.
+        count = self._nystrom_subsample_count()
+        full, rewards = self._all_encoded_actor_data(include_first=True)
+        if self.nystrom_synthetic_subsamples:
+            subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
+            subsample_source = "fixed PointMaze Nyström landmarks"
+        else:
+            subsample, subsample_rewards = self._sample_encoded_actor_data(
+                count,
+                include_first=True,
+            )
+            subsample_source = f"encoded FIFO Nyström sample of subsamples={count}"
+        return EncodedActorUpdateData(
+            full=full,
+            rewards=rewards,
+            subsample=subsample,
+            subsample_rewards=subsample_rewards,
+            source=f"encoded FIFO full support + {subsample_source}",
+        )
+
+    def _replay_actor_subsample_batch(self, replay_iter, full_batch, replay_buffer):
+        count = self._nystrom_subsample_count()
+        if self.nystrom_synthetic_subsamples:
+            return self._synthetic_actor_subsample_batch()
+        if count >= full_batch[0].shape[0]:
+            return full_batch
+        return self._load_actor_subsample_from_replay_iter(
+            replay_iter,
+            max_samples=count,
+            replay_buffer=replay_buffer,
+            fallback_actor_batch=full_batch,
+        )
+
+    def _replay_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer):
+        full_batch = self._load_actor_batch_from_replay_iter(
             replay_iter,
             obs,
             action,
@@ -1245,24 +1403,107 @@ class RoverAgent:
             max_samples=self.batch_size_actor,
             replay_buffer=replay_buffer,
         )
-
         if self.subsamples is None:
-            return (*full_actor_batch, None, None, None, None)
+            return RawActorUpdateData(
+                full=full_batch,
+                source=f"replay iterator sample of batch_size_actor={self.batch_size_actor}",
+            )
+        return RawActorUpdateData(
+            full=full_batch,
+            subsample=self._replay_actor_subsample_batch(replay_iter, full_batch, replay_buffer),
+            source=(
+                "replay full support + fixed PointMaze Nyström landmarks"
+                if self.nystrom_synthetic_subsamples
+                else f"replay full support + replay Nyström subsample of subsamples={self.subsamples}"
+            ),
+        )
 
-        if self.subsamples <= 0:
-            raise ValueError("subsamples must be positive when provided")
+    def _get_actor_update_data(self, replay_iter, obs, action, next_obs, reward, replay_buffer=None):
+        """Choose the actor dataset for this step.
 
-        if self.subsamples >= full_actor_batch[0].shape[0]:
-            subsampled_actor_batch = full_actor_batch
+        Priority is explicit: fixed debug dataset, encoded FIFO, then raw
+        replay. If subsamples is None, the object carries only the full actor
+        batch and update_actor is used. Otherwise it also carries Nyström data.
+        """
+        if self.debug_fixed_dataset_updates:
+            return self._fixed_actor_update_data()
+
+        encoded_data = self._encoded_fifo_actor_update_data(replay_buffer)
+        if encoded_data is not None:
+            return encoded_data
+
+        return self._replay_actor_update_data(
+            replay_iter,
+            obs,
+            action,
+            next_obs,
+            reward,
+            replay_buffer,
+        )
+
+    def _log_actor_update_data(self, actor_data):
+        if isinstance(actor_data, EncodedActorUpdateData):
+            full_size = self._encoded_batch_size(actor_data.full)
+            subsample_size = (
+                self._encoded_batch_size(actor_data.subsample)
+                if actor_data.subsample is not None else "N/A"
+            )
+            data_kind = "encoded"
         else:
-            subsampled_actor_batch = self._load_actor_subsample_from_replay_iter(
-                replay_iter,
-                max_samples=int(self.subsamples),
-                replay_buffer=replay_buffer,
-                fallback_actor_batch=full_actor_batch,
+            full_size = actor_data.full[0].shape[0]
+            subsample_size = actor_data.subsample[0].shape[0] if actor_data.subsample is not None else "N/A"
+            data_kind = "raw"
+
+        update_name = "update_actor_nystrom" if self.subsamples is not None else "update_actor"
+
+        utils.ColorPrint.red(
+            f"actor update data: update={update_name}, kind={data_kind}, "
+            f"source={actor_data.source}, full={full_size}, subsampled={subsample_size}"
+        )
+
+    def _update_actor_from_data(self, actor_data, step):
+        self._log_actor_update_data(actor_data)
+
+        if isinstance(actor_data, EncodedActorUpdateData):
+            if self.subsamples is None:
+                return self.update_actor(
+                    step=step,
+                    rewards=actor_data.rewards,
+                    encoded_full=actor_data.full,
+                )
+            return self.update_actor_nystrom(
+                None,
+                None,
+                None,
+                step=step,
+                rewards=actor_data.rewards,
+                sub_rewards=actor_data.subsample_rewards,
+                encoded_full=actor_data.full,
+                encoded_sub=actor_data.subsample,
             )
 
-        return (*full_actor_batch, *subsampled_actor_batch)
+        obs, action, next_obs, reward = actor_data.full
+        if self.subsamples is None:
+            return self.update_actor(
+                obs,
+                action,
+                next_obs,
+                step=step,
+                rewards=reward,
+            )
+
+        sub_obs, sub_action, sub_next_obs, sub_reward = actor_data.subsample
+        return self.update_actor_nystrom(
+            obs,
+            action,
+            next_obs,
+            step=step,
+            rewards=reward,
+            sub_obs=sub_obs,
+            sub_action=sub_action,
+            sub_next_obs=sub_next_obs,
+            sub_rewards=sub_reward,
+        )
 
     def _build_debug_visualizer_batch(self, obs, max_observations=2000):
         if obs is None:
@@ -1293,166 +1534,6 @@ class RoverAgent:
         mean_probs = np.mean(action_probs, axis=0)  # [n_actions]
         deviation = np.mean(np.abs(mean_probs - uniform_prob))
         return deviation
-    
-    def plot_gradient_norm_by_reward(self, save_dir: str = './gradient_plots'):
-        """
-        Plot gradient norms over time, separated by reward value.
-        
-        Args:
-            save_dir: Directory to save the plot
-        """
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Check if we have data
-        has_data = any(len(self.gradient_norm_history[key]) > 0 for key in self.gradient_norm_history)
-        if not has_data:
-            print("No gradient norm history to plot yet")
-            return
-        
-        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-        fig.suptitle('Gradient Norms by Reward Type', fontsize=16, fontweight='bold')
-        
-        colors = {'+1': 'green', '-1': 'red', '0': 'blue'}
-        labels = {'+1': 'Reward +1', '-1': 'Reward -1', '0': 'Reward 0'}
-        
-        # Plot 1: Mean gradient norms over time
-        ax1 = axes[0, 0]
-        for reward_key in ['+1', '-1', '0']:
-            if len(self.gradient_norm_history[reward_key]) > 0:
-                steps, means, stds = zip(*self.gradient_norm_history[reward_key])
-                ax1.plot(steps, means, color=colors[reward_key], linewidth=2, 
-                        label=labels[reward_key], alpha=0.8)
-                means_arr = np.array(means)
-                stds_arr = np.array(stds)
-                ax1.fill_between(steps, means_arr - stds_arr, means_arr + stds_arr, 
-                                color=colors[reward_key], alpha=0.2)
-        
-        ax1.set_xlabel('Training Steps', fontsize=11)
-        ax1.set_ylabel('Mean Gradient Norm', fontsize=11)
-        ax1.set_title('Mean Gradient Norms Over Time', fontsize=12, fontweight='bold')
-        ax1.legend(loc='best')
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Current distribution of gradient norms (latest samples)
-        ax2 = axes[0, 1]
-        current_samples = {k: [norm for _, norm in v[-50:]] for k, v in self.gradient_samples.items() if len(v) > 0}
-        
-        if any(len(samples) > 0 for samples in current_samples.values()):
-            positions = []
-            data_to_plot = []
-            tick_labels = []
-            box_colors = []
-            
-            for i, (reward_key, samples) in enumerate(current_samples.items()):
-                if len(samples) > 0:
-                    positions.append(i)
-                    data_to_plot.append(samples)
-                    tick_labels.append(labels[reward_key])
-                    box_colors.append(colors[reward_key])
-            
-            bp = ax2.boxplot(data_to_plot, positions=positions, patch_artist=True,
-                           widths=0.6, showfliers=True)
-            
-            for patch, color in zip(bp['boxes'], box_colors):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.6)
-            
-            ax2.set_xticks(positions)
-            ax2.set_xticklabels(tick_labels)
-            ax2.set_ylabel('Gradient Norm', fontsize=11)
-            ax2.set_title('Current Gradient Norm Distribution\n(Last 50 samples per reward)', 
-                         fontsize=12, fontweight='bold')
-            ax2.grid(True, alpha=0.3, axis='y')
-        else:
-            ax2.text(0.5, 0.5, 'Not enough data yet', ha='center', va='center', 
-                    transform=ax2.transAxes, fontsize=12)
-        
-        # Plot 3: Sample counts over time
-        ax3 = axes[1, 0]
-        for reward_key in ['+1', '-1', '0']:
-            if len(self.gradient_norm_history[reward_key]) > 0:
-                steps, _, _ = zip(*self.gradient_norm_history[reward_key])
-                # Count cumulative samples at each step
-                cumulative_counts = []
-                for step in steps:
-                    count = len([s for s, _ in self.gradient_samples[reward_key] if s <= step])
-                    cumulative_counts.append(count)
-                
-                ax3.plot(steps, cumulative_counts, color=colors[reward_key], 
-                        linewidth=2, label=labels[reward_key], alpha=0.8)
-        
-        ax3.set_xlabel('Training Steps', fontsize=11)
-        ax3.set_ylabel('Cumulative Sample Count', fontsize=11)
-        ax3.set_title('Sample Collection Progress', fontsize=12, fontweight='bold')
-        ax3.legend(loc='best')
-        ax3.grid(True, alpha=0.3)
-        ax3.axhline(self.max_samples_per_reward, color='black', linestyle='--', 
-                   linewidth=1, alpha=0.5, label=f'Max ({self.max_samples_per_reward})')
-        
-        # Plot 4: Ratio comparison
-        ax4 = axes[1, 1]
-        if len(self.gradient_norm_history['+1']) > 0 and len(self.gradient_norm_history['0']) > 0:
-            # Get aligned steps
-            steps_pos = [s for s, _, _ in self.gradient_norm_history['+1']]
-            steps_zero = [s for s, _, _ in self.gradient_norm_history['0']]
-            steps_neg = [s for s, _, _ in self.gradient_norm_history['-1']]
-            
-            common_steps = sorted(set(steps_pos) & set(steps_zero))
-            
-            if len(common_steps) > 0:
-                ratios_pos_zero = []
-                for step in common_steps:
-                    mean_pos = [m for s, m, _ in self.gradient_norm_history['+1'] if s == step][0]
-                    mean_zero = [m for s, m, _ in self.gradient_norm_history['0'] if s == step][0]
-                    if mean_zero > 1e-10:
-                        ratios_pos_zero.append(mean_pos / mean_zero)
-                    else:
-                        ratios_pos_zero.append(np.nan)
-                
-                ax4.plot(common_steps, ratios_pos_zero, color='purple', linewidth=2, 
-                        label='||∇(r=+1)|| / ||∇(r=0)||', alpha=0.8)
-                ax4.axhline(1.0, color='black', linestyle='--', linewidth=1, alpha=0.5)
-            
-            # Add negative reward ratio if available
-            common_steps_neg = sorted(set(steps_neg) & set(steps_zero))
-            if len(common_steps_neg) > 0:
-                ratios_neg_zero = []
-                for step in common_steps_neg:
-                    mean_neg = [m for s, m, _ in self.gradient_norm_history['-1'] if s == step][0]
-                    mean_zero = [m for s, m, _ in self.gradient_norm_history['0'] if s == step][0]
-                    if mean_zero > 1e-10:
-                        ratios_neg_zero.append(mean_neg / mean_zero)
-                    else:
-                        ratios_neg_zero.append(np.nan)
-                
-                ax4.plot(common_steps_neg, ratios_neg_zero, color='orange', linewidth=2,
-                        label='||∇(r=-1)|| / ||∇(r=0)||', alpha=0.8)
-            
-            ax4.set_xlabel('Training Steps', fontsize=11)
-            ax4.set_ylabel('Gradient Norm Ratio', fontsize=11)
-            ax4.set_title('Relative Gradient Magnitudes', fontsize=12, fontweight='bold')
-            ax4.legend(loc='best')
-            ax4.grid(True, alpha=0.3)
-        else:
-            ax4.text(0.5, 0.5, 'Not enough data for comparison', ha='center', va='center',
-                    transform=ax4.transAxes, fontsize=12)
-        
-        plt.tight_layout()
-        save_path = os.path.join(save_dir, 'gradient_norms_by_reward.png')
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Gradient norm plot saved to: {save_path}")
-        
-        # Print summary statistics
-        print("\n=== Gradient Norm Summary ===")
-        for reward_key in ['+1', '-1', '0']:
-            if len(self.gradient_samples[reward_key]) > 0:
-                norms = [norm for _, norm in self.gradient_samples[reward_key]]
-                print(f"Reward {reward_key:>2}: n={len(norms):3d}, "
-                      f"mean={np.mean(norms):.6f}, std={np.std(norms):.6f}, "
-                      f"min={np.min(norms):.6f}, max={np.max(norms):.6f}")
-
 
     def plot_policy_deviation_history(self, save_dir: str = './policy_plots'):
         """
@@ -1510,9 +1591,49 @@ class RoverAgent:
         else:
             return self.encoder(obs)
 
-    def _sample_batch(self, replay_iter):
-        batch = next(replay_iter)
-        return utils.to_torch(batch, self.device)
+    def _debug_visualizer_text(self, step) -> str:
+        return (
+            f"Step: {step}\n"
+            f"γ = {self.discount}\n"
+            f"η = {self.current_eta}\n"
+            f"λ = {self.lambda_reg}\n"
+            f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
+            f"PMD steps = {self.pmd_steps}\n"
+            f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
+        )
+
+    def _run_debug_visualizers(self, metrics, obs, step):
+        if self.debug_visualizer is None:
+            return metrics
+
+        visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
+        metrics.update(
+            self.debug_visualizer.save(
+                step=step,
+                obs_batch=visualizer_obs,
+                z_batch=visualizer_z,
+                param_text=self._debug_visualizer_text(step),
+            )
+        )
+
+        if len(self.current_action_probs) == 0:
+            return metrics
+
+        current_action_probs = np.array(self.current_action_probs)
+        mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+        mean_probs = np.mean(current_action_probs, axis=0)
+
+        self.policy_deviation_history.append((step, mean_deviation))
+        self.action_probs_history.append((step, mean_probs))
+        self.current_action_probs = []
+
+        metrics['policy_deviation_from_uniform'] = mean_deviation
+        print(
+            f"Policy deviation from uniform: {mean_deviation:.4f} "
+            f"(0=uniform, {(self.n_actions - 1) / self.n_actions:.3f}=deterministic)"
+        )
+        self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+        return metrics
 
     def update(self, replay_iter, step, replay_buffer=None):
         metrics = dict()
@@ -1523,19 +1644,20 @@ class RoverAgent:
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch, self.device)
+        if self.debug_fixed_dataset_updates:
+            obs, action, next_obs, reward = self.nystrom_debug.fixed_encoder_batch(self)
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         if self.embeddings:
             metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
-        # If T is not sufficiently initialized, skip actor update
-        if self._is_T_sufficiently_initialized(step) is False:   
+        # Train the encoder/transition model first; PMD starts once T is ready.
+        if not self._is_T_sufficiently_initialized(step):
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
-        
-        # In ideal mode, we can update actor immediately
-        if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
+
+        if step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps:
             actor_update_data = self._get_actor_update_data(
                 replay_iter,
                 obs,
@@ -1544,119 +1666,7 @@ class RoverAgent:
                 reward,
                 replay_buffer=replay_buffer,
             )
-            if isinstance(actor_update_data[0], dict):
-                encoded_full, all_reward_actor, encoded_sub, subsampled_reward_actor = actor_update_data
-                utils.ColorPrint.red(
-                    f"samples for actor update: full {self._encoded_batch_size(encoded_full)}, "
-                    f"subsampled {self._encoded_batch_size(encoded_sub) if encoded_sub is not None else 'N/A'}"
-                )
-            else:
-                (
-                    all_obs_actor,
-                    all_action_actor,
-                    all_next_obs_actor,
-                    all_reward_actor,
-                    subsampled_obs_actor,
-                    subsampled_action_actor,
-                    subsampled_next_obs_actor,
-                    subsampled_reward_actor,
-                ) = actor_update_data
-                encoded_full = None
-                encoded_sub = None
-                utils.ColorPrint.red(
-                    f"samples for actor update: full {all_obs_actor.shape[0]}, "
-                    f"subsampled {subsampled_obs_actor.shape[0] if subsampled_obs_actor is not None else 'N/A'}"
-                )
-
-            if self.subsamples is None and encoded_full is not None:
-                metrics.update(
-                    self.update_actor(
-                        step=step,
-                        rewards=all_reward_actor,
-                        encoded_full=encoded_full,
-                    )
-                )
-            elif self.subsamples is None:
-                metrics.update(
-                    self.update_actor(
-                        all_obs_actor,
-                        all_action_actor,
-                        all_next_obs_actor,
-                        step=step,
-                        rewards=all_reward_actor,
-                    )
-                )
-            elif encoded_full is not None:
-                metrics.update(
-                    self.update_actor_nystrom(
-                        None,
-                        None,
-                        None,
-                        step=step,
-                        rewards=all_reward_actor,
-                        sub_rewards=subsampled_reward_actor,
-                        encoded_full=encoded_full,
-                        encoded_sub=encoded_sub,
-                    )
-                )
-            else:
-                metrics.update(
-                    self.update_actor_nystrom(
-                        all_obs_actor,
-                        all_action_actor,
-                        all_next_obs_actor,
-                        step=step,
-                        rewards=all_reward_actor,
-                        sub_obs=subsampled_obs_actor,
-                        sub_action=subsampled_action_actor,
-                        sub_next_obs=subsampled_next_obs_actor,
-                        sub_rewards=subsampled_reward_actor,
-                    )
-                )
-
-
-        if self.debug_visualizer is not None:
-            param_text = (
-                f"Step: {step}\n"
-                f"γ = {self.discount}\n"
-                f"η = {self.current_eta}\n"
-                f"λ = {self.lambda_reg}\n"
-                f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
-                f"PMD steps = {self.pmd_steps}\n"
-                f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
-            )
-
-        if  step % 10000 == 0:
-            visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
-            metrics.update(
-                self.debug_visualizer.save(
-                    step=step,
-                    obs_batch=visualizer_obs,
-                    z_batch=visualizer_z,
-                    param_text=param_text,
-                )
-            )
-        
-            with torch.no_grad():
-            
-                if len(self.current_action_probs) == 0:
-                    return metrics
-                current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
-                # Compute mean deviation from uniform
-                mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
-                
-                # Store in history
-                self.policy_deviation_history.append((step, mean_deviation))
-                
-                # Also store the mean action probabilities
-                mean_probs = np.mean(current_action_probs, axis=0)
-                self.action_probs_history.append((step, mean_probs))
-                
-                # Log to metrics
-                metrics['policy_deviation_from_uniform'] = mean_deviation
-                print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
-                self.current_action_probs = []  # Clear after processing
-            self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
-            self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
+            metrics.update(self._update_actor_from_data(actor_update_data, step))
+            metrics = self._run_debug_visualizers(metrics, obs, step)
 
         return metrics

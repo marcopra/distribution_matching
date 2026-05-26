@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import utils
+from PIL import Image
 import logging
 # set logging level to info
 
@@ -99,6 +100,10 @@ class RoverAgent:
                  pmd_backtrack_factor: float = 0.5,
                  pmd_backtrack_max_trials: int = 8,
                  compute_dtype: str = "float32",
+                 nystrom_synthetic_subsamples: bool = False,
+                 synthetic_dataset_sub: Optional[object] = None,
+                 syntethic_dataset_sub: Optional[object] = None,
+                 synthetic_dataset_exclude_states: Optional[object] = None,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
@@ -159,6 +164,16 @@ class RoverAgent:
         self.lambda_reg = lambda_reg
         self.image_channels = 1 if self.grayscale else 3
         self.subsamples = subsamples
+        self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
+        if synthetic_dataset_sub is not None and syntethic_dataset_sub is not None:
+            raise ValueError("Use only one of synthetic_dataset_sub or syntethic_dataset_sub.")
+        self.synthetic_dataset_sub = synthetic_dataset_sub
+        if syntethic_dataset_sub is not None:
+            self.synthetic_dataset_sub = syntethic_dataset_sub
+        self.synthetic_dataset_exclude_states = synthetic_dataset_exclude_states
+        self._synthetic_nystrom_subsample_batch = None
+        self._synthetic_state_indices_cache = None
+        self._synthetic_state_stride_cache = None
         min_fifo_capacity = max(
             int(self.batch_size_actor),
             int(self.subsamples) if self.subsamples is not None else 0,
@@ -331,6 +346,252 @@ class RoverAgent:
             else:
                 break
         return env.unwrapped
+
+    def _initial_state_index(self) -> int:
+        if self.env is None or not hasattr(self.env, "state_to_idx"):
+            raise RuntimeError("A discrete environment must be inserted before building synthetic Nyström subsamples.")
+
+        start_position = getattr(self.env, "start_position", None)
+        if start_position is None and hasattr(self.env, "_start_position_param"):
+            start_param = getattr(self.env, "_start_position_param")
+            if start_param is not None:
+                start_position = tuple(start_param)
+
+        if start_position is None and hasattr(self.env, "_set_start_position"):
+            start_position = self.env._set_start_position(None)
+
+        if start_position is None:
+            start_position = self.env.idx_to_state[0]
+
+        start_position = tuple(start_position)
+        if start_position not in self.env.state_to_idx:
+            raise ValueError(f"Initial state {start_position} is not a valid state in the environment.")
+        return self.env.state_to_idx[start_position]
+
+    def _prepare_rendered_state_image(self, image: np.ndarray, render_resolution: int) -> np.ndarray:
+        image = np.asarray(image, dtype=np.uint8)
+
+        if self.grayscale:
+            if image.ndim == 3 and image.shape[2] == 1:
+                image = image[..., 0]
+            elif image.ndim == 3:
+                image = np.asarray(Image.fromarray(image).convert('L'))
+            elif image.ndim != 2:
+                raise ValueError(f"Expected grayscale image to be 2D or HWC, got shape {image.shape}")
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.shape[:2] != (render_resolution, render_resolution):
+            image = np.asarray(
+                Image.fromarray(image).resize(
+                    (render_resolution, render_resolution),
+                    Image.LANCZOS,
+                )
+            )
+
+        if self.grayscale:
+            if image.ndim == 2:
+                image = image[..., None]
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.ndim != 3 or image.shape[2] != self.image_channels:
+            raise ValueError(
+                f"Expected image shape [H, W, {self.image_channels}], got {image.shape}"
+            )
+
+        return image
+
+    def _build_prerendered_state_observations(self) -> torch.Tensor:
+        if self.obs_type != "pixels":
+            raise RuntimeError("Prerendered observations are only used for pixel observations.")
+
+        cached = getattr(self.gridworld_visualizer, "_prerendered_states", None)
+        if cached is not None:
+            return cached.to(self.device)
+
+        required_attrs = ("n_states", "idx_to_state", "render_from_position")
+        if self.env is None or not all(hasattr(self.env, attr) for attr in required_attrs):
+            raise RuntimeError(
+                "Pixel synthetic Nyström subsamples require a discrete env with "
+                "n_states, idx_to_state, and render_from_position."
+            )
+
+        render_resolution = getattr(self.wrapped_env, "render_resolution", self.obs_shape[-1])
+        frame_stack = self.obs_shape[0] // self.image_channels
+        rendered_states = []
+
+        for state_idx in range(self.env.n_states):
+            state = self.env.idx_to_state[state_idx]
+            try:
+                image = self.env.render_from_position(state, show_goal=False)
+            except TypeError:
+                image = self.env.render_from_position(state)
+            image = self._prepare_rendered_state_image(image, render_resolution)
+            image_chw = image.transpose(2, 0, 1).copy()
+            rendered_states.append(np.tile(image_chw, (frame_stack, 1, 1)))
+
+        return torch.from_numpy(np.stack(rendered_states)).float().to(self.device)
+
+    def _build_indexed_state_observations(self) -> torch.Tensor:
+        if self.obs_type == "pixels":
+            return self._build_prerendered_state_observations()
+
+        obs = np.zeros((self.env.n_states, *self.obs_shape), dtype=np.float32)
+        flat = obs.reshape(self.env.n_states, -1)
+        if self.env.n_states > flat.shape[1]:
+            raise ValueError(
+                f"State count {self.env.n_states} does not fit observation shape {self.obs_shape}; "
+                "expected one-hot discrete observations."
+            )
+        flat[np.arange(self.env.n_states), np.arange(self.env.n_states)] = 1.0
+        return torch.from_numpy(obs).to(self.device)
+
+    def _synthetic_excluded_state_indices(self):
+        excluded = self.synthetic_dataset_exclude_states
+        if excluded is None:
+            return set()
+
+        if isinstance(excluded, str):
+            values = [value.strip() for value in excluded.split(",") if value.strip()]
+        elif isinstance(excluded, (list, tuple, set)):
+            values = list(excluded)
+        else:
+            values = [excluded]
+
+        indices = {int(value) for value in values}
+        invalid = [idx for idx in indices if idx < 0 or idx >= self.env.n_states]
+        if invalid:
+            raise ValueError(
+                f"synthetic_dataset_exclude_states contains invalid state indices {invalid}; "
+                f"valid range is [0, {self.env.n_states - 1}]."
+            )
+        return indices
+
+    def _synthetic_state_indices(self):
+        if self._synthetic_state_indices_cache is not None:
+            return self._synthetic_state_indices_cache, self._synthetic_state_stride_cache
+
+        excluded = self._synthetic_excluded_state_indices()
+        candidate_indices = [idx for idx in range(self.env.n_states) if idx not in excluded]
+        if not candidate_indices:
+            raise ValueError("synthetic_dataset_exclude_states removed every state.")
+
+        if self.synthetic_dataset_sub is None:
+            indices = candidate_indices
+            stride = 1
+            self._synthetic_state_indices_cache = indices
+            self._synthetic_state_stride_cache = stride
+            return indices, stride
+
+        if isinstance(self.synthetic_dataset_sub, str):
+            value = self.synthetic_dataset_sub.strip().lower()
+            if value in ("half", "n/2", "0.5"):
+                num_states = max(1, self.env.n_states // 2)
+            else:
+                num_states = int(value)
+        else:
+            num_states = int(self.synthetic_dataset_sub)
+        if num_states <= 0:
+            raise ValueError("synthetic_dataset_sub must be positive or null.")
+        if num_states > len(candidate_indices):
+            raise ValueError(
+                f"synthetic_dataset_sub={num_states} requests more states than available "
+                f"after exclusions ({len(candidate_indices)})."
+            )
+        if num_states == len(candidate_indices):
+            indices = candidate_indices
+            stride = 1
+            self._synthetic_state_indices_cache = indices
+            self._synthetic_state_stride_cache = stride
+            return indices, stride
+
+        stride = max(1, len(candidate_indices) // num_states)
+        indices = candidate_indices[::stride][:num_states]
+        self._synthetic_state_indices_cache = indices
+        self._synthetic_state_stride_cache = stride
+        return indices, stride
+
+    def _build_synthetic_nystrom_subsample_batch(self):
+        """Build one landmark transition for every state-action pair."""
+        required_attrs = (
+            "n_states",
+            "idx_to_state",
+            "state_to_idx",
+            "step_from",
+        )
+        if self.env is None or not all(hasattr(self.env, attr) for attr in required_attrs):
+            raise RuntimeError(
+                "Synthetic Nyström subsamples require a discrete env with "
+                "n_states, idx_to_state, state_to_idx, and step_from."
+            )
+
+        if self._synthetic_nystrom_subsample_batch is not None:
+            return self._synthetic_nystrom_subsample_batch
+
+        state_observations = self._build_indexed_state_observations()
+        initial_state_idx = self._initial_state_index()
+        state_indices, state_stride = self._synthetic_state_indices()
+        transitions = []
+        first_transition_idx = None
+
+        for state_idx in state_indices:
+            state = self.env.idx_to_state[state_idx]
+            for action_idx in range(self.n_actions):
+                next_state = self.env.step_from(state, action_idx)
+                next_state_idx = self.env.state_to_idx[next_state]
+                transition = (state_idx, action_idx, next_state_idx)
+                if first_transition_idx is None and next_state_idx == initial_state_idx:
+                    first_transition_idx = len(transitions)
+                transitions.append(transition)
+
+        if first_transition_idx is None:
+            utils.ColorPrint.yellow(
+                "Synthetic Nyström subset has no transition whose next state is the initial state; "
+                "using the first synthetic transition for alpha[0]."
+            )
+        else:
+            transitions.insert(0, transitions.pop(first_transition_idx))
+
+        obs_indices = torch.as_tensor([s for s, _, _ in transitions], dtype=torch.long, device=self.device)
+        action = torch.as_tensor([a for _, a, _ in transitions], dtype=torch.long, device=self.device)
+        next_obs_indices = torch.as_tensor([ns for _, _, ns in transitions], dtype=torch.long, device=self.device)
+        obs = state_observations.index_select(0, obs_indices)
+        next_obs = state_observations.index_select(0, next_obs_indices)
+
+        rewards = []
+        discounts = []
+        for _, _, next_state_idx in transitions:
+            if hasattr(self.env, "compute_reward_from_observation"):
+                reward_value = self.env.compute_reward_from_observation(next_state_idx)
+            else:
+                reward_value = 0.0
+            next_state = self.env.idx_to_state[next_state_idx]
+            is_terminal = next_state == getattr(self.env, "goal_position", None)
+            rewards.append([reward_value])
+            discounts.append([0.0 if is_terminal else 1.0])
+
+        reward = torch.as_tensor(rewards, dtype=self.compute_dtype, device=self.device)
+        discount = torch.as_tensor(discounts, dtype=self.compute_dtype, device=self.device)
+
+        self._synthetic_nystrom_subsample_batch = (obs, action, reward, discount, next_obs)
+        if self.synthetic_dataset_sub is None or len(state_indices) == self.env.n_states:
+            utils.ColorPrint.yellow(
+                f"Using synthetic Nyström subsamples with all transitions: "
+                f"{len(transitions)} = {len(state_indices)} states x {self.n_actions} actions."
+            )
+        else:
+            utils.ColorPrint.yellow(
+                f"Using synthetic Nyström subsamples with stride {state_stride}: "
+                f"{len(transitions)} = {len(state_indices)}/{self.env.n_states} states x {self.n_actions} actions."
+            )
+        return self._synthetic_nystrom_subsample_batch
+
+    def _encode_synthetic_nystrom_subsamples(self):
+        self._sync_policy_encoder()
+        synthetic_batch = self._build_synthetic_nystrom_subsample_batch()
+        encoded = self._encode_actor_transition_batch_with_retries(synthetic_batch)
+        return encoded, encoded.get("reward")
     
     def insert_env(self, env):
         """
@@ -339,6 +600,9 @@ class RoverAgent:
         """       
         self.wrapped_env = env
         self.env = self._find_discrete_env(env)
+        self._synthetic_nystrom_subsample_batch = None
+        self._synthetic_state_indices_cache = None
+        self._synthetic_state_stride_cache = None
         
         try:
             self.gridworld_visualizer = self.debug_visualizer.attach_env(env)
@@ -1230,10 +1494,13 @@ class RoverAgent:
             # landmark/subsample set. The FIFO capacity controls the maximum
             # retained support size; batch_size_actor is only for non-Nyström.
             encoded_full, rewards = self._all_encoded_actor_data(include_first=True)
-            encoded_sub, sub_rewards = self._sample_encoded_actor_data(
-                int(self.subsamples),
-                include_first=True,
-            )
+            if self.nystrom_synthetic_subsamples:
+                encoded_sub, sub_rewards = self._encode_synthetic_nystrom_subsamples()
+            else:
+                encoded_sub, sub_rewards = self._sample_encoded_actor_data(
+                    int(self.subsamples),
+                    include_first=True,
+                )
             return encoded_full, rewards, encoded_sub, sub_rewards
 
         full_actor_batch = self._load_actor_batch_from_replay_iter(
@@ -1252,7 +1519,16 @@ class RoverAgent:
         if self.subsamples <= 0:
             raise ValueError("subsamples must be positive when provided")
 
-        if self.subsamples >= full_actor_batch[0].shape[0]:
+        if self.nystrom_synthetic_subsamples:
+            synthetic_batch = self._build_synthetic_nystrom_subsample_batch()
+            syn_obs, syn_action, syn_reward, _, syn_next_obs = synthetic_batch
+            subsampled_actor_batch = self._make_actor_batch(
+                syn_obs,
+                syn_action,
+                syn_next_obs,
+                syn_reward,
+            )
+        elif self.subsamples >= full_actor_batch[0].shape[0]:
             subsampled_actor_batch = full_actor_batch
         else:
             subsampled_actor_batch = self._load_actor_subsample_from_replay_iter(
@@ -1615,48 +1891,48 @@ class RoverAgent:
                 )
 
 
-        if self.debug_visualizer is not None:
-            param_text = (
-                f"Step: {step}\n"
-                f"γ = {self.discount}\n"
-                f"η = {self.current_eta}\n"
-                f"λ = {self.lambda_reg}\n"
-                f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
-                f"PMD steps = {self.pmd_steps}\n"
-                f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
-            )
-
-        if  step % 10000 == 0:
-            visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
-            metrics.update(
-                self.debug_visualizer.save(
-                    step=step,
-                    obs_batch=visualizer_obs,
-                    z_batch=visualizer_z,
-                    param_text=param_text,
+            if self.debug_visualizer is not None:
+                param_text = (
+                    f"Step: {step}\n"
+                    f"γ = {self.discount}\n"
+                    f"η = {self.current_eta}\n"
+                    f"λ = {self.lambda_reg}\n"
+                    f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
+                    f"PMD steps = {self.pmd_steps}\n"
+                    f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
                 )
-            )
-        
-            with torch.no_grad():
+
+            # if  step % 10000 == 0:
+                visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
+                metrics.update(
+                    self.debug_visualizer.save(
+                        step=step,
+                        obs_batch=visualizer_obs,
+                        z_batch=visualizer_z,
+                        param_text=param_text,
+                    )
+                )
             
-                if len(self.current_action_probs) == 0:
-                    return metrics
-                current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
-                # Compute mean deviation from uniform
-                mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                with torch.no_grad():
                 
-                # Store in history
-                self.policy_deviation_history.append((step, mean_deviation))
-                
-                # Also store the mean action probabilities
-                mean_probs = np.mean(current_action_probs, axis=0)
-                self.action_probs_history.append((step, mean_probs))
-                
-                # Log to metrics
-                metrics['policy_deviation_from_uniform'] = mean_deviation
-                print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
-                self.current_action_probs = []  # Clear after processing
-            self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
-            self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
+                    if len(self.current_action_probs) == 0:
+                        return metrics
+                    current_action_probs = np.array(self.current_action_probs)  # [num_recorded, n_actions]
+                    # Compute mean deviation from uniform
+                    mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
+                    
+                    # Store in history
+                    self.policy_deviation_history.append((step, mean_deviation))
+                    
+                    # Also store the mean action probabilities
+                    mean_probs = np.mean(current_action_probs, axis=0)
+                    self.action_probs_history.append((step, mean_probs))
+                    
+                    # Log to metrics
+                    metrics['policy_deviation_from_uniform'] = mean_deviation
+                    print(f"Policy deviation from uniform: {mean_deviation:.4f} (0=uniform, {(self.n_actions-1)/self.n_actions:.3f}=deterministic)")
+                    self.current_action_probs = []  # Clear after processing
+                self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+                self.plot_gradient_norm_by_reward(save_dir=os.path.join(os.getcwd(), 'gradient_plots'))
 
         return metrics

@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_debug
+  - /agent: rover_nystrom_pointmaze_debug
   - /env: pointmaze/pointmaze_umaze_goal_1
   # - override hydra/launcher: submitit_local
 
