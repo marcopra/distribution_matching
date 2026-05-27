@@ -440,7 +440,7 @@ class ExplorationVisualizer:
         
         # Subsample
         if len(z) > max_points:
-            idx = np.random.choice(len(z), max_points, replace=False)
+            idx = np.round(np.linspace(0, len(z) - 1, max_points)).astype(np.int64)
             z = z[idx]
         
         # Dimensionality reduction
@@ -465,13 +465,13 @@ class ExplorationVisualizer:
         scatter = ax.scatter(
             z_2d[:, 0], 
             z_2d[:, 1], 
-            c=np.arange(len(z_2d)),  # Color by order (temporal)
+            c=np.arange(len(z_2d)),  # Color by the order supplied to t-SNE.
             cmap='viridis',
             alpha=0.6,
             s=20
         )
         
-        plt.colorbar(scatter, ax=ax, label='Temporal Order')
+        plt.colorbar(scatter, ax=ax, label='Input / positional order')
         ax.set_title(title, fontsize=14)
         ax.set_xlabel(f'{method.upper()} 1')
         ax.set_ylabel(f'{method.upper()} 2')

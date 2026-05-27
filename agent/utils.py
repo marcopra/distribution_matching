@@ -104,6 +104,10 @@ class PointMazeNystromDebugHelper:
                 return method
         return None
 
+    def _has_point_env(self):
+        base_env = getattr(self.wrapped_env, "unwrapped", None)
+        return base_env is not None and getattr(base_env, "point_env", None) is not None
+
     def _base_and_point_env(self):
         if self.wrapped_env is None:
             raise RuntimeError("PointMaze Nyström grid requires insert_env(env) before actor updates.")
@@ -212,6 +216,28 @@ class PointMazeNystromDebugHelper:
         image_chw = image.transpose(2, 0, 1).copy()
         return np.tile(image_chw, (frame_stack, 1, 1))
 
+    def _observation_from_xy(self, agent, xy) -> np.ndarray:
+        xy = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
+        if agent.obs_type != "pixels":
+            return xy.reshape(agent.obs_shape)
+
+        render_from_position = self._env_method("render_from_position")
+        if not callable(render_from_position):
+            raise RuntimeError(
+                "Fixed continuous Nyström dataset requires render_from_position(position, show_goal=False)."
+            )
+
+        try:
+            image = render_from_position(xy, show_goal=False)
+        except TypeError:
+            image = render_from_position(xy)
+
+        render_resolution = getattr(self.wrapped_env, "render_resolution", agent.obs_shape[-1])
+        frame_stack = agent.obs_shape[0] // agent.image_channels
+        image = self._prepare_rendered_image(agent, image, render_resolution)
+        image_chw = image.transpose(2, 0, 1).copy()
+        return np.tile(image_chw, (frame_stack, 1, 1))
+
     def maze_layout(self):
         layout_fn = self._env_method("get_debug_maze_layout")
         layout = layout_fn() if callable(layout_fn) else None
@@ -287,6 +313,19 @@ class PointMazeNystromDebugHelper:
             raise ValueError("Nyström PointMaze grid requires a positive number of points.")
 
         layout = self.maze_layout()
+        raw_lower = layout["maze_lower"].astype(np.float32, copy=False)
+        raw_upper = layout["maze_upper"].astype(np.float32, copy=False)
+        raw_span = raw_upper - raw_lower
+        if abs(float(raw_span[1])) <= 1e-6:
+            margin = max(self.border_margin, 0.0)
+            x_lower = float(raw_lower[0] + margin)
+            x_upper = float(raw_upper[0] - margin)
+            if x_upper <= x_lower:
+                x_lower, x_upper = float(raw_lower[0]), float(raw_upper[0])
+            xs = np.linspace(x_lower, x_upper, n_points, dtype=np.float32)
+            selected = np.column_stack([xs, np.full(n_points, raw_lower[1], dtype=np.float32)])
+            return selected.astype(np.float32, copy=False)
+
         margin = max(self.border_margin, 0.0)
         lower, upper = layout["maze_lower"] + margin, layout["maze_upper"] - margin
         if np.any(upper <= lower):
@@ -321,6 +360,23 @@ class PointMazeNystromDebugHelper:
         return selected.astype(np.float32, copy=False)
 
     def _landmark_transition(self, agent, xy, action_idx):
+        if not self._has_point_env():
+            step_from_position = self._env_method("step_from_position")
+            if not callable(step_from_position):
+                raise RuntimeError(
+                    "Fixed continuous Nyström dataset requires step_from_position(position, action)."
+                )
+
+            obs = self._observation_from_xy(agent, xy)
+            next_position, reward_value, terminated, truncated, _ = step_from_position(
+                np.asarray(xy, dtype=np.float32),
+                int(action_idx),
+            )
+            next_obs = self._observation_from_xy(agent, next_position)
+            reward = [float(reward_value)]
+            discount = [0.0 if bool(terminated or truncated) else 1.0]
+            return obs, next_obs, reward, discount
+
         self._set_state(xy)
         obs = self._observation(agent)
         time_step = self.wrapped_env.step(int(action_idx))
@@ -336,7 +392,7 @@ class PointMazeNystromDebugHelper:
         n_transitions = int(agent.subsamples if agent.subsamples is not None else agent.batch_size_actor)
         if n_transitions % agent.n_actions != 0:
             raise ValueError(
-                f"PointMaze fixed debug dataset size={n_transitions} must be divisible by "
+                f"Fixed continuous debug dataset size={n_transitions} must be divisible by "
                 f"n_actions={agent.n_actions} so each sampled state can include all actions. "
                 "Set agent.subsamples or agent.batch_size_actor accordingly."
             )
@@ -346,7 +402,13 @@ class PointMazeNystromDebugHelper:
         xy_points = np.repeat(state_points, agent.n_actions, axis=0)
         actions_np = np.tile(np.arange(agent.n_actions, dtype=np.int64), n_states)
 
-        with self._preserve_state():
+        if self._has_point_env():
+            with self._preserve_state():
+                transitions = [
+                    self._landmark_transition(agent, xy, action_idx)
+                    for xy, action_idx in zip(xy_points, actions_np)
+                ]
+        else:
             transitions = [
                 self._landmark_transition(agent, xy, action_idx)
                 for xy, action_idx in zip(xy_points, actions_np)
@@ -364,7 +426,7 @@ class PointMazeNystromDebugHelper:
         self._fixed_actions = actions_np
         dataset_name = "Nyström grid" if agent.subsamples is not None else "debug grid"
         ColorPrint.yellow(
-            f"Using fixed PointMaze {dataset_name} with {n_states} reachable XY states "
+            f"Using fixed continuous {dataset_name} with {n_states} reachable XY states "
             f"x {agent.n_actions} actions = {n_transitions} state-action landmarks "
             f"({agent._kernel_status()})."
         )
@@ -378,7 +440,22 @@ class PointMazeNystromDebugHelper:
     def fixed_encoder_batch(self, agent):
         actor_batch = self.fixed_actor_batch(agent)
         size = min(int(agent.batch_size), actor_batch[0].shape[0])
-        index = torch.randperm(actor_batch[0].shape[0], device=agent.device)[:size]
+        total_size = actor_batch[0].shape[0]
+        n_actions = int(getattr(agent, "n_actions", 1))
+        if size == total_size:
+            index = torch.arange(total_size, device=agent.device)
+        elif n_actions > 0 and total_size % n_actions == 0 and size % n_actions == 0:
+            n_states = total_size // n_actions
+            n_selected_states = size // n_actions
+            state_index = torch.round(
+                torch.linspace(0, n_states - 1, n_selected_states, device=agent.device)
+            ).long()
+            action_offsets = torch.arange(n_actions, device=agent.device)
+            index = (state_index[:, None] * n_actions + action_offsets[None, :]).reshape(-1)
+        else:
+            index = torch.round(
+                torch.linspace(0, total_size - 1, size, device=agent.device)
+            ).long()
         return agent._slice_actor_batch(actor_batch, index)
 
     def encode_subsamples(self, agent):

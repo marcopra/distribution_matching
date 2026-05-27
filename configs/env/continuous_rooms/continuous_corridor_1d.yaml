@@ -1,0 +1,25 @@
+# @package _global_
+
+env:
+  name: "ContinuousCorridor-v0"
+  corridor_length: 10.0
+  corridor_width: 1.0
+  horizon: 30
+  render_mode: rgb_array
+  show_coordinates: false
+
+  # Direct velocity-style displacement for each discrete action.
+  max_velocity: 0.3
+  goal_threshold: 0.15
+  wall_thickness: 0.3
+  agent_radius: 0.15
+
+  # null means the corridor center. A scalar x value is also accepted.
+  start_position: null
+
+  # null means the right valid boundary on the corridor centerline.
+  goal_position: null
+
+  dense_reward: false
+  wall_penalty: 0.0
+  render_resolution: 512

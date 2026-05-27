@@ -8,7 +8,9 @@ from .domains import (
     FetchCoverageVisualizer,
     GridworldVisualizerAdapter,
     PointMazeCoverageVisualizer,
+    XYCoverageVisualizer,
     _find_discrete_env,
+    _has_debug_xy_env,
     _is_fetch_env,
     _is_point_maze_env,
 )
@@ -35,6 +37,16 @@ class RoverDebugVisualizerSuite:
             self.domain_visualizer = FetchCoverageVisualizer(self.agent, env, rollout_steps=500, bins=10)
         elif _is_point_maze_env(env):
             self.domain_visualizer = PointMazeCoverageVisualizer(self.agent, env, rollout_steps=10000, bins=20)
+        elif _has_debug_xy_env(env):
+            self.domain_visualizer = XYCoverageVisualizer(
+                self.agent,
+                env,
+                save_dir="continuous_xy_plots",
+                rollout_steps=1000,
+                bins=40,
+                title_prefix="Continuous XY",
+                policy_eval_points=10,
+            )
         else:
             self.domain_visualizer = None
         return self.domain_visualizer

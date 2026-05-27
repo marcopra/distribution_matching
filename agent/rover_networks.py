@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 import utils
 
-
 class Encoder(nn.Module):
     def __init__(self, obs_shape, hidden_dim, feature_dim):
         super(Encoder, self).__init__()

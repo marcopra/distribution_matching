@@ -12,6 +12,7 @@ from PIL import Image
 import utils
 from env.atari_domain import is_atari_env, pop_atari_kwargs, wrap_atari_pixels
 from env.continuous_rooms import (
+    ContinuousCorridorEnv,
     ContinuousFourRoomsEnv,
     ContinuousMultipleRoomsEnv,
     ContinuousSingleRoomEnv,

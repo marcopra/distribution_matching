@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib import patches
 import numpy as np
+from PIL import Image
 
 
 def _get_env_id(reference) -> str:
@@ -72,6 +73,10 @@ def _get_env_method(env, method_name: str):
         current = getattr(current, "env", None)
 
     return None
+
+
+def _has_debug_xy_env(reference) -> bool:
+    return callable(_get_env_method(reference, "get_debug_coordinates"))
 
 
 def _as_xy(value) -> Optional[np.ndarray]:
@@ -735,12 +740,23 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
         save_path = self.save_dir / f"step_{step}.png"
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"✓ Fetch coverage plot saved: {save_path}")
+        print(f"✓ Fetch coverage plot saved: {os.getcwd()}/{save_path}")
 
 
-class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
-    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 10000, bins: int = 36):
+class XYCoverageVisualizer(ContinuousCoverageVisualizer):
+    def __init__(
+        self,
+        agent,
+        env,
+        save_dir: str = "continuous_xy_plots",
+        rollout_steps: int = 1000,
+        bins: int = 36,
+        title_prefix: str = "Continuous XY",
+        policy_eval_points: int = 10,
+    ):
         super().__init__(agent, env, save_dir=save_dir, rollout_steps=rollout_steps, bins=bins)
+        self.title_prefix = title_prefix
+        self.policy_eval_points = int(policy_eval_points)
 
     def _extract_coordinates(self, time_step) -> Optional[np.ndarray]:
         method = _get_env_method(self.env, "get_debug_coordinates")
@@ -779,9 +795,6 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
             current = getattr(current, "env", None)
 
         return None
-
-    def _use_env_plot_bounds(self) -> bool:
-        return False
 
     def _get_maze_layout(self):
         method = _get_env_method(self.env, "get_debug_maze_layout")
@@ -862,6 +875,119 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
             label="Nyström points",
         )
 
+    def _policy_probe_points(self) -> Optional[np.ndarray]:
+        n_points = int(self.policy_eval_points)
+        if n_points <= 0:
+            return None
+
+        layout = self._get_maze_layout()
+        if layout is not None:
+            lower = np.asarray(layout["maze_lower"], dtype=np.float32).reshape(-1)
+            upper = np.asarray(layout["maze_upper"], dtype=np.float32).reshape(-1)
+        else:
+            bounds = self._get_env_plot_bounds()
+            if bounds is None:
+                return None
+            lower, upper = bounds
+
+        if lower.size < 2 or upper.size < 2:
+            return None
+
+        xs = np.linspace(float(lower[0]), float(upper[0]), n_points, dtype=np.float32)
+        if abs(float(upper[1] - lower[1])) <= 1e-6:
+            ys = np.full(n_points, float(lower[1]), dtype=np.float32)
+        else:
+            ys = np.full(n_points, 0.5 * float(lower[1] + upper[1]), dtype=np.float32)
+        return np.column_stack([xs, ys]).astype(np.float32, copy=False)
+
+    def _format_policy_probe_observation(self, image: np.ndarray) -> np.ndarray:
+        image = np.asarray(image, dtype=np.uint8)
+        obs_shape = tuple(getattr(self.agent, "obs_shape", ()))
+        grayscale = bool(getattr(self.agent, "grayscale", False))
+        image_channels = int(getattr(self.agent, "image_channels", 1 if grayscale else 3))
+        target_hw = obs_shape[-2:] if len(obs_shape) == 3 else image.shape[:2]
+
+        if grayscale:
+            if image.ndim == 3 and image.shape[2] == 1:
+                image = image[..., 0]
+            elif image.ndim == 3:
+                image = np.asarray(Image.fromarray(image).convert("L"))
+        elif image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.shape[:2] != tuple(target_hw):
+            image = np.asarray(Image.fromarray(image).resize((int(target_hw[1]), int(target_hw[0])), Image.LANCZOS))
+
+        if grayscale and image.ndim == 2:
+            image = image[..., None]
+        elif not grayscale and image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=2)
+
+        if image.ndim != 3 or image.shape[2] != image_channels:
+            raise ValueError(f"Expected policy probe image with {image_channels} channels, got {image.shape}")
+
+        image_chw = image.transpose(2, 0, 1).copy()
+        if len(obs_shape) == 3 and image_chw.shape[0] != obs_shape[0]:
+            frame_stack = obs_shape[0] // image_channels
+            image_chw = np.tile(image_chw, (frame_stack, 1, 1))
+        return image_chw
+
+    def _observation_for_policy_probe_point(self, xy: np.ndarray) -> np.ndarray:
+        if getattr(self.agent, "obs_type", None) != "pixels":
+            return np.asarray(xy, dtype=np.float32).reshape(getattr(self.agent, "obs_shape", (2,)))
+
+        render_from_position = _get_env_method(self.env, "render_from_position")
+        if not callable(render_from_position):
+            raise RuntimeError("Policy action-probability probes require render_from_position(position).")
+
+        try:
+            image = render_from_position(np.asarray(xy, dtype=np.float32), show_goal=False)
+        except TypeError:
+            image = render_from_position(np.asarray(xy, dtype=np.float32))
+        return self._format_policy_probe_observation(image)
+
+    def _save_policy_action_probability_plot(self, step: int) -> None:
+        points = self._policy_probe_points()
+        if points is None or points.size == 0:
+            return
+
+        probabilities = []
+        for xy in points:
+            obs = self._observation_for_policy_probe_point(xy)
+            probs = np.asarray(self.agent.compute_action_probs(obs), dtype=np.float64).reshape(-1)
+            probs = np.clip(probs, 0.0, None)
+            probs = probs / max(probs.sum(), 1e-12)
+            probabilities.append(probs)
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
+        x_values = points[:, 0]
+        for action_idx in range(probabilities.shape[1]):
+            ax.plot(
+                x_values,
+                probabilities[:, action_idx],
+                marker="o",
+                linewidth=1.8,
+                markersize=4,
+                label=f"action {action_idx}",
+            )
+
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_xlabel("x position")
+        ax.set_ylabel("policy probability")
+        ax.set_title(
+            f"{self.title_prefix} policy action probabilities at step {step}\n"
+            f"{points.shape[0]} evenly spaced probe points"
+        )
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=9)
+
+        save_path = self.save_dir / f"step_{step}_action_probs.png"
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✓ {self.title_prefix} policy action-probability plot saved: {save_path}")
+
     def save(self, step: int) -> None:
         coords = self._sample_policy_rollout(step)
         if coords.size == 0:
@@ -889,7 +1015,7 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title(f"PointMaze XY coverage at step {step} (n samples: {coords.shape[0]})")
+        ax.set_title(f"{self.title_prefix} rollout coverage at step {step} (n samples: {coords.shape[0]})")
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
@@ -911,11 +1037,28 @@ class PointMazeCoverageVisualizer(ContinuousCoverageVisualizer):
         save_path = self.save_dir / f"step_{step}.png"
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"✓ PointMaze coverage plot saved: {save_path}")
+        print(f"✓ {self.title_prefix} rollout coverage plot saved: {os.getcwd()}/{save_path}")
+        self._save_policy_action_probability_plot(step)
+
+
+class PointMazeCoverageVisualizer(XYCoverageVisualizer):
+    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 10000, bins: int = 36):
+        super().__init__(
+            agent,
+            env,
+            save_dir=save_dir,
+            rollout_steps=rollout_steps,
+            bins=bins,
+            title_prefix="PointMaze XY",
+            policy_eval_points=0,
+        )
+
+    def _use_env_plot_bounds(self) -> bool:
+        return False
 
 
 class PointMazeNystromDebugVisualizer:
-    """Standalone plots for fixed PointMaze Nyström landmarks."""
+    """Standalone plots for fixed continuous Nyström landmarks."""
 
     def __init__(self, save_dir: str = "pointmaze_plots"):
         self.save_dir = Path(save_dir)
@@ -950,7 +1093,7 @@ class PointMazeNystromDebugVisualizer:
                 linewidth=1.2,
             )
         )
-        ax.scatter(points[:, 0], points[:, 1], s=14, c="#ff7f0e", linewidths=0.0, alpha=0.8)
+        ax.scatter(points[:, 0], points[:, 1], s=7, c="#ff7f0e", linewidths=0.0, alpha=1.0)
         ax.scatter(
             points[0, 0],
             points[0, 1],
@@ -966,7 +1109,7 @@ class PointMazeNystromDebugVisualizer:
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title(f"Fixed Nyström PointMaze grid ({points.shape[0]} states, all {n_actions} actions each)")
+        ax.set_title(f"Fixed Nyström continuous grid ({points.shape[0]} states, all {n_actions} actions each)")
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Fixed Nyström PointMaze grid plot saved to: {save_path}")
+        print(f"Fixed Nyström continuous grid plot saved to: {save_path}")

@@ -178,13 +178,13 @@ class RoverAgent:
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
             bandwidth_percentile=self.kernel_bandwidth_percentile,
-            bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
+            # bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
         )
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
         self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates)
         if self.debug_fixed_dataset_updates:
-            utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed PointMaze Nyström dataset.")
+            utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed continuous Nyström dataset.")
         self.nystrom_debug = PointMazeNystromDebugHelper(
             border_margin=nystrom_grid_border_margin,
             oversample=nystrom_grid_oversample,
@@ -274,6 +274,7 @@ class RoverAgent:
             kernel_bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
             device=self.device  
         )
+        # TODO: sistemare gestione del kernel- Per ora in distribution_matching c'è lo state-action kernel, while qui c'è lo state kernel
         self.distribution_matcher.state_kernel_fn = self.kernel_fn
         
         self.W = None #nn.Parameter(torch.rand(feature_dim, feature_dim).to(self.device))
@@ -467,13 +468,13 @@ class RoverAgent:
         if hasattr(action_kernel, "reset_auto_bandwidth"):
             action_kernel.reset_auto_bandwidth()
 
-    def _fit_actor_kernel_bandwidths(self, state_X, state_Y, action_X, action_Y):
+    def _fit_actor_kernel_bandwidths(self, state_X, state_Y, state_action_X, state_action_Y):
         self._reset_actor_kernel_bandwidths()
         # State and state-action kernels live in separate KernelFunction objects.
         if hasattr(self.kernel_fn, "fit_bandwidth"):
             self.kernel_fn.fit_bandwidth(state_X, state_Y)
         if hasattr(self.distribution_matcher.kernel_fn, "fit_bandwidth"):
-            self.distribution_matcher.kernel_fn.fit_bandwidth(action_X, action_Y)
+            self.distribution_matcher.kernel_fn.fit_bandwidth(state_action_X, state_action_Y)
 
     @staticmethod
     def _uniform_tensor_indices(n_items, max_items, device):
@@ -488,7 +489,23 @@ class RoverAgent:
             matrix = kernel_fn(X[x_idx], Y[y_idx]).detach().float().cpu().numpy()
         return matrix
 
-    def _save_actor_kernel_debug_plot(self, step, state_X, state_Y, action_X, action_Y, nystrom=False):
+    @staticmethod
+    def _unique_rows(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.numel() == 0:
+            return tensor
+        rows = tensor.detach().cpu().reshape(tensor.shape[0], -1).numpy()
+        seen = set()
+        keep_indices = []
+        for idx, row in enumerate(rows):
+            key = row.tobytes()
+            if key in seen:
+                continue
+            seen.add(key)
+            keep_indices.append(idx)
+        index = torch.as_tensor(keep_indices, dtype=torch.long, device=tensor.device)
+        return tensor.index_select(0, index)
+
+    def _save_actor_kernel_debug_plot(self, step, state_X, state_Y, state_action_X, state_action_Y, nystrom=False):
         if self.kernel_type != "gaussian":
             return
 
@@ -497,8 +514,9 @@ class RoverAgent:
         suffix = "nystrom" if nystrom else "full"
         save_path = os.path.join(save_dir, f"step_{step}_{suffix}_kernels.png")
 
+        # Plot unique next-state points to avoid action-repeated rows in the state kernel.
         state_matrix = self._kernel_debug_matrix(self.kernel_fn, state_X, state_Y)
-        action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, action_X, action_Y)
+        action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, state_action_X, state_action_Y)
         state_values = state_matrix.reshape(-1)
         action_values = action_matrix.reshape(-1)
 
@@ -673,6 +691,8 @@ class RoverAgent:
         """Update policy using Projected Mirror Descent."""
         metrics = dict()
 
+        # raise ValueError("Debugging: check obs values before encoding")
+
         if encoded_full is None:
             self._sync_policy_encoder()
             self._cache_features(obs, action, next_obs, encoder=self.policy_encoder)
@@ -684,18 +704,18 @@ class RoverAgent:
         self._fit_actor_kernel_bandwidths(
             state_X=self._phi_all_next,
             state_Y=self._phi_all_next,
-            action_X=self._psi_all,
-            action_Y=self._psi_all,
+            state_action_X=self._psi_all,
+            state_action_Y=self._psi_all,
         )
         self.H = self._kernel(self._phi_all_obs, self._phi_all_next) # [n, n]
         self.K = self.distribution_matcher.kernel(self._psi_all, self._psi_all)  # [n, n]
         print(f"dimensons phi all next: {self._phi_all_next.shape}, psi all: {self._psi_all.shape}, H: {self.H.shape}, K: {self.K.shape}")
         self._save_actor_kernel_debug_plot(
             step,
-            state_X=self._phi_all_next,
-            state_Y=self._phi_all_next,
-            action_X=self._psi_all,
-            action_Y=self._psi_all,
+            state_X=self._unique_rows(self._phi_all_obs),
+            state_Y=self._unique_rows(self._phi_all_obs),
+            state_action_X=self._psi_all,
+            state_action_Y=self._psi_all,
             nystrom=False,
         )
         utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
@@ -803,11 +823,11 @@ class RoverAgent:
                 best_loss = actor_loss
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
-            else:
-                # Early stopping if no improvement
-                if self.pmd_eta_mode == "backtracking":
-                    print(f"  Backtracking early stopping at iteration {iteration} with eta {eta_t:.6g} after {trial} trials. Actor loss: {actor_loss:.6g}, best loss: {best_loss:.6g}")
-                    break
+            # else:
+            #     # Early stopping if no improvement
+            #     if self.pmd_eta_mode == "backtracking":
+            #         print(f"  Backtracking early stopping at iteration {iteration} with eta {eta_t:.6g} after {trial} trials. Actor loss: {actor_loss:.6g}, best loss: {best_loss:.6g}")
+            #         break
 
             if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
@@ -1029,7 +1049,8 @@ class RoverAgent:
         encoder = self.encoder if encoder is None else encoder
        
         with torch.no_grad():
-    
+            
+            print(f"encoding obs shape: {obs.shape}, next_obs shape: {next_obs.shape}")
             self._phi_all_obs = self._encode_with_module(encoder, obs, project=True)
             self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True)
 
@@ -1611,7 +1632,7 @@ class RoverAgent:
             self.debug_visualizer.save(
                 step=step,
                 obs_batch=visualizer_obs,
-                z_batch=visualizer_z,
+                z_batch=self._unique_rows(visualizer_z),
                 param_text=self._debug_visualizer_text(step),
             )
         )
