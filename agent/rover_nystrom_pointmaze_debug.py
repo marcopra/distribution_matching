@@ -173,12 +173,10 @@ class RoverAgent:
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
-        self.kernel_bandwidth_fit_norm = self.mode
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
             bandwidth_percentile=self.kernel_bandwidth_percentile,
-            # bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
         )
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
@@ -271,7 +269,6 @@ class RoverAgent:
             kernel_type=self.kernel_type,
             kernel_bandwidth=self.kernel_bandwidth,
             kernel_bandwidth_percentile=self.kernel_bandwidth_percentile,
-            kernel_bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
             device=self.device  
         )
         # TODO: sistemare gestione del kernel- Per ora in distribution_matching c'è lo state-action kernel, while qui c'è lo state kernel
@@ -455,10 +452,9 @@ class RoverAgent:
         kernel_fn = self.kernel_fn if kernel_fn is None else kernel_fn
         bandwidth = getattr(kernel_fn, "bandwidth", None)
         percentile = getattr(kernel_fn, "bandwidth_percentile", None)
-        fit_norm = getattr(kernel_fn, "bandwidth_fit_norm", None)
         if bandwidth is None:
-            return f"kernel={self.kernel_type}, bandwidth_percentile={percentile}, distance_norm={fit_norm}"
-        return f"kernel={self.kernel_type}, bandwidth={bandwidth:.6g}, distance_norm={fit_norm}"
+            return f"kernel={self.kernel_type}, bandwidth_percentile={percentile}"
+        return f"kernel={self.kernel_type}, bandwidth={bandwidth:.6g}"
 
     def _reset_actor_kernel_bandwidths(self):
         # Automatic sigma is fitted once at the start of each actor update.
@@ -505,7 +501,17 @@ class RoverAgent:
         index = torch.as_tensor(keep_indices, dtype=torch.long, device=tensor.device)
         return tensor.index_select(0, index)
 
-    def _save_actor_kernel_debug_plot(self, step, state_X, state_Y, state_action_X, state_action_Y, nystrom=False):
+    def _save_actor_kernel_debug_plot(
+            self,
+            step,
+            state_X,
+            state_Y,
+            state_action_X,
+            state_action_Y,
+            state_action_X_actions=None,
+            state_action_Y_actions=None,
+            nystrom=False
+        ):
         if self.kernel_type != "gaussian":
             return
 
@@ -516,7 +522,20 @@ class RoverAgent:
 
         # Plot unique next-state points to avoid action-repeated rows in the state kernel.
         state_matrix = self._kernel_debug_matrix(self.kernel_fn, state_X, state_Y)
-        action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, state_action_X, state_action_Y)
+        if state_action_X_actions is None or state_action_Y_actions is None:
+            action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, state_action_X, state_action_Y)
+        else:
+            x_idx = self._uniform_tensor_indices(state_action_X.shape[0], 300, state_action_X.device)
+            y_idx = self._uniform_tensor_indices(state_action_Y.shape[0], 300, state_action_Y.device)
+            x_actions = state_action_X_actions.to(device=state_action_X.device)
+            y_actions = state_action_Y_actions.to(device=state_action_Y.device)
+            with torch.no_grad():
+                action_matrix = self.distribution_matcher.state_action_kernel(
+                    state_action_X[x_idx],
+                    state_action_Y[y_idx],
+                    x_actions[x_idx],
+                    y_actions[y_idx],
+                ).detach().float().cpu().numpy()
         state_values = state_matrix.reshape(-1)
         action_values = action_matrix.reshape(-1)
 
@@ -704,18 +723,25 @@ class RoverAgent:
         self._fit_actor_kernel_bandwidths(
             state_X=self._phi_all_next,
             state_Y=self._phi_all_next,
-            state_action_X=self._psi_all,
-            state_action_Y=self._psi_all,
+            state_action_X=self._phi_all_obs,
+            state_action_Y=self._phi_all_obs,
         )
         self.H = self._kernel(self._phi_all_obs, self._phi_all_next) # [n, n]
-        self.K = self.distribution_matcher.kernel(self._psi_all, self._psi_all)  # [n, n]
+        self.K = self.distribution_matcher.state_action_kernel(
+            self._phi_all_obs,
+            self._phi_all_obs,
+            self._all_actions,
+            self._all_actions,
+        )  # [n, n]
         print(f"dimensons phi all next: {self._phi_all_next.shape}, psi all: {self._psi_all.shape}, H: {self.H.shape}, K: {self.K.shape}")
         self._save_actor_kernel_debug_plot(
             step,
             state_X=self._unique_rows(self._phi_all_obs),
             state_Y=self._unique_rows(self._phi_all_obs),
-            state_action_X=self._psi_all,
-            state_action_Y=self._psi_all,
+            state_action_X=self._phi_all_obs,
+            state_action_Y=self._phi_all_obs,
+            state_action_X_actions=self._all_actions,
+            state_action_Y_actions=self._all_actions,
             nystrom=False,
         )
         utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
@@ -753,9 +779,9 @@ class RoverAgent:
                 phi_all_next_obs = self._phi_all_next, 
                 psi_all_obs_action = self._psi_all, 
                 alpha = self._alpha,
-                sink_norm=sink_norm
+                sink_norm=sink_norm,
+                K=self.K
             ) 
-
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -829,7 +855,7 @@ class RoverAgent:
             #         print(f"  Backtracking early stopping at iteration {iteration} with eta {eta_t:.6g} after {trial} trials. Actor loss: {actor_loss:.6g}, best loss: {best_loss:.6g}")
             #         break
 
-            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
+            if iteration % 1 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
 
         if self.pmd_best_iterate:
@@ -884,16 +910,18 @@ class RoverAgent:
         self._fit_actor_kernel_bandwidths(
             state_X=self._phi_sub_next,
             state_Y=self._phi_sub_next,
-            action_X=self._psi_sub,
-            action_Y=self._psi_sub,
+            state_action_X=self._phi_sub_obs,
+            state_action_Y=self._phi_sub_obs,
         )
         sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
         self._save_actor_kernel_debug_plot(
             step,
             state_X=self._phi_sub_next,
             state_Y=self._phi_sub_next,
-            action_X=self._psi_sub,
-            action_Y=self._psi_sub,
+            state_action_X=self._phi_sub_obs,
+            state_action_Y=self._phi_sub_obs,
+            state_action_X_actions=self._sub_actions,
+            state_action_Y_actions=self._sub_actions,
             nystrom=True,
         )
         utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
@@ -908,7 +936,11 @@ class RoverAgent:
         B_nystrom = self.distribution_matcher.compute_B_nystrom(
             psi_all_obs_action=self._psi_all,
             psi_sub_obs_action=self._psi_sub,
-            svd_truncation=self.svd_truncation
+            svd_truncation=self.svd_truncation,
+            phi_all_obs=self._phi_all_obs,
+            phi_sub_obs=self._phi_sub_obs,
+            all_actions=self._all_actions,
+            sub_actions=self._sub_actions,
         )
         utils.ColorPrint.yellow(
             f"Nyström state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
@@ -925,6 +957,9 @@ class RoverAgent:
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm,
                     B_nystrom=B_nystrom,
+                    phi_sub_obs=self._phi_sub_obs,
+                    all_actions=self._all_actions,
+                    sub_actions=self._sub_actions,
                 )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
@@ -946,10 +981,11 @@ class RoverAgent:
                 E=self.E,
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm,
-                B_nystrom=B_nystrom
-
+                B_nystrom=B_nystrom,
+                phi_sub_obs=self._phi_sub_obs,
+                all_actions=self._all_actions,
+                sub_actions=self._sub_actions,
             )           
-
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -963,7 +999,6 @@ class RoverAgent:
                 eta_t = base_eta / np.sqrt(self._adagrad_accum + self.pmd_adagrad_eps)
                 eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
             elif self.pmd_eta_mode == "adadiff":
-        
                 # Infinite norm for mirror descent
                 grad_norm_sq = float(torch.max(grad_update * grad_update - prev_gradient_coeff*prev_gradient_coeff).item())
                 self._adagrad_accum += grad_norm_sq
@@ -985,7 +1020,10 @@ class RoverAgent:
                     E = self.E,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm,
-                    B_nystrom=B_nystrom 
+                    B_nystrom=B_nystrom,
+                    phi_sub_obs=self._phi_sub_obs,
+                    all_actions=self._all_actions,
+                    sub_actions=self._sub_actions,
                 )
             
             candidate_loss = torch.linalg.norm(candidate_nu) ** 2
@@ -1009,7 +1047,10 @@ class RoverAgent:
                             E = self.E,
                             alpha=self._sub_alpha,
                             sink_norm=sink_norm,
-                            B_nystrom=B_nystrom
+                            B_nystrom=B_nystrom,
+                            phi_sub_obs=self._phi_sub_obs,
+                            all_actions=self._all_actions,
+                            sub_actions=self._sub_actions,
                         )                    
                     candidate_loss = torch.linalg.norm(candidate_nu) ** 2
                     trial += 1
@@ -1689,5 +1730,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-
+        exit(0)
         return metrics

@@ -17,7 +17,6 @@ class DistributionMatcher:
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_percentile: Optional[float] = None,
-                 kernel_bandwidth_fit_norm: str = "l2",
                  device: str = "cpu"):
         
         self.gamma = gamma
@@ -27,12 +26,10 @@ class DistributionMatcher:
         self.kernel_type = kernel_type
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
-        self.kernel_bandwidth_fit_norm = str(kernel_bandwidth_fit_norm or "l2").strip().lower()
         self.kernel_fn = utils.build_kernel_fn(
             kernel_type,
             bandwidth=self.kernel_bandwidth,
             bandwidth_percentile=self.kernel_bandwidth_percentile,
-            bandwidth_fit_norm=self.kernel_bandwidth_fit_norm,
         )
         self.state_kernel_fn = None
 
@@ -42,6 +39,29 @@ class DistributionMatcher:
     def state_kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         kernel_fn = self.state_kernel_fn if self.state_kernel_fn is not None else self.kernel_fn
         return kernel_fn(X, Y)
+
+    def state_action_kernel(
+            self,
+            X_states: torch.Tensor,
+            Y_states: torch.Tensor,
+            X_actions: torch.Tensor,
+            Y_actions: torch.Tensor
+        ) -> torch.Tensor:
+        """Compute k((s,a),(s',a')) = k_s(s,s') 1[a = a'] for discrete actions."""
+        K = self.kernel_fn(X_states, Y_states)
+        if X_actions.ndim > 1 and Y_actions.ndim > 1:
+            X_actions = X_actions.to(device=K.device, dtype=K.dtype).reshape(K.shape[0], -1)
+            Y_actions = Y_actions.to(device=K.device, dtype=K.dtype).reshape(K.shape[1], -1)
+            action_mask = X_actions @ Y_actions.T
+        else:
+            if X_actions.ndim > 1:
+                X_actions = torch.argmax(X_actions, dim=-1)
+            if Y_actions.ndim > 1:
+                Y_actions = torch.argmax(Y_actions, dim=-1)
+            X_actions = X_actions.to(device=K.device).reshape(-1)
+            Y_actions = Y_actions.to(device=K.device).reshape(-1)
+            action_mask = X_actions[:, None] == Y_actions[None, :]
+        return K * action_mask.to(dtype=K.dtype)
 
     
             
@@ -97,7 +117,8 @@ class DistributionMatcher:
             phi_all_next_obs:torch.Tensor, 
             psi_all_obs_action:torch.Tensor, 
             alpha:torch.Tensor,
-            sink_norm: float
+            sink_norm: float,
+            K: Optional[torch.Tensor] = None
         ) -> torch.Tensor:
         """Compute gradient coefficient for policy update."""
         # Identity matrix
@@ -117,7 +138,8 @@ class DistributionMatcher:
 
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
-        A = self.kernel(psi_all_obs_action, psi_all_obs_action) + self.lambda_reg * I_n_plus1
+        K = self.kernel(psi_all_obs_action, psi_all_obs_action) if K is None else K
+        A = K + self.lambda_reg * I_n_plus1
         tilde_A = torch.zeros(A.shape[0] + 1, A.shape[1] + 1, device=A.device, dtype=A.dtype)
         tilde_A[:-1, :-1] = A
         tilde_A[-1, -1] = 1.0
@@ -145,7 +167,7 @@ class DistributionMatcher:
         phi_kernel = self.state_kernel(tilde_phi_all_next_obs, tilde_phi_all_next_obs) # [n+1, n+1]
         I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃Φ̃ᵀ
-        left_term = torch.linalg.solve(tilde_A.T @ (I_n_plus1 - self.gamma * tilde_B_tilde_M).T, phi_kernel) # [n+1, n+1]
+        left_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T@tilde_A.T, phi_kernel) # [n+1, n+1]
 
         # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ
         # inv_term_kernel = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, phi_kernel) # [n+1, n+1]
@@ -154,12 +176,14 @@ class DistributionMatcher:
         # left_term = torch.cholesky_solve(inv_term_kernel, L_T)
 
         # right term: (I - γ Ã⁻¹M̃)⁻¹ α̃
-        right_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, tilde_alpha)
+        right_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M), tilde_alpha)
 
         # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃
         gradient = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term @ right_term
       
         return gradient
+    
+
     
     #******* NYSTROM********
     def _regularized_solve_memory_efficient(
@@ -178,10 +202,23 @@ class DistributionMatcher:
         
         return X 
     
-    def compute_B_nystrom(self, psi_all_obs_action: torch.Tensor, psi_sub_obs_action: torch.Tensor, svd_truncation: Optional[int] = None) -> torch.Tensor:
+    def compute_B_nystrom(
+            self,
+            psi_all_obs_action: torch.Tensor,
+            psi_sub_obs_action: torch.Tensor,
+            svd_truncation: Optional[int] = None,
+            phi_all_obs: Optional[torch.Tensor] = None,
+            phi_sub_obs: Optional[torch.Tensor] = None,
+            all_actions: Optional[torch.Tensor] = None,
+            sub_actions: Optional[torch.Tensor] = None
+        ) -> torch.Tensor:
         N = psi_all_obs_action.shape[0]
-        K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
-        K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
+        if phi_all_obs is not None and phi_sub_obs is not None and all_actions is not None and sub_actions is not None:
+            K_nm = self.state_action_kernel(phi_all_obs, phi_sub_obs, all_actions, sub_actions)
+            K_mm = self.state_action_kernel(phi_sub_obs, phi_sub_obs, sub_actions, sub_actions)
+        else:
+            K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
+            K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
         A_nystrom = K_nm.T@K_nm + self.lambda_reg * N * K_mm# [m, m]
         inv_A_nystrom = self.pseudo_inverse_low_rank_svd(A_nystrom, svd_rank=svd_truncation)
         return inv_A_nystrom@K_nm.T
@@ -206,9 +243,9 @@ class DistributionMatcher:
         return A_pinv
 
     def compute_nu_pi_nystrom_memory_efficient(
-            self, 
+            self,
             phi_all_obs: torch.Tensor,
-            phi_sub_next_obs: torch.Tensor, 
+            phi_sub_next_obs: torch.Tensor,
             psi_sub_obs_action: torch.Tensor,
             psi_all_obs_action: torch.Tensor,
             H: torch.Tensor,
@@ -216,7 +253,10 @@ class DistributionMatcher:
             E: torch.Tensor,
             alpha: torch.Tensor,
             sink_norm: float,
-            B_nystrom: Optional[torch.Tensor] = None
+            B_nystrom: Optional[torch.Tensor] = None,
+            phi_sub_obs: Optional[torch.Tensor] = None,
+            all_actions: Optional[torch.Tensor] = None,
+            sub_actions: Optional[torch.Tensor] = None
         ) -> torch.Tensor:
         """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
         N = psi_all_obs_action.shape[0]
@@ -241,7 +281,15 @@ class DistributionMatcher:
             BM = B_nystrom @ M
         else:
             # Nyström matrices
-            B =self.compute_B_nystrom(psi_all_obs_action, psi_sub_obs_action, svd_truncation=self.svd_truncation)
+            B = self.compute_B_nystrom(
+                psi_all_obs_action,
+                psi_sub_obs_action,
+                svd_truncation=self.svd_truncation,
+                phi_all_obs=phi_all_obs,
+                phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
+                all_actions=all_actions,
+                sub_actions=sub_actions,
+            )
             BM = B @ M
 
 
@@ -298,7 +346,10 @@ class DistributionMatcher:
             E: torch.Tensor,
             alpha:torch.Tensor,
             sink_norm: float,
-            B_nystrom: Optional[torch.Tensor] = None
+            B_nystrom: Optional[torch.Tensor] = None,
+            phi_sub_obs: Optional[torch.Tensor] = None,
+            all_actions: Optional[torch.Tensor] = None,
+            sub_actions: Optional[torch.Tensor] = None
         ) -> torch.Tensor:
         """Compute gradient coefficient for policy update."""
         # Identity matrix
@@ -332,7 +383,15 @@ class DistributionMatcher:
             BM = B_nystrom @ M
         else:
             # Nyström matrices
-            B =self.compute_B_nystrom(psi_all_obs_action, psi_sub_obs_action, svd_truncation=self.svd_truncation)        
+            B = self.compute_B_nystrom(
+                psi_all_obs_action,
+                psi_sub_obs_action,
+                svd_truncation=self.svd_truncation,
+                phi_all_obs=phi_all_obs,
+                phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
+                all_actions=all_actions,
+                sub_actions=sub_actions,
+            )
             BM = B @ M
     
 

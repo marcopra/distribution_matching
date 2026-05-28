@@ -562,7 +562,12 @@ class RoverAgent:
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
         self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
-        self.K = self._psi_all @ self._psi_all.T  # [n, n]
+        self.K = self.distribution_matcher.state_action_kernel(
+            self._phi_all_obs,
+            self._phi_all_obs,
+            self._all_actions,
+            self._all_actions,
+        )  # [n, n]
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -594,7 +599,8 @@ class RoverAgent:
                 phi_all_next_obs = self._phi_all_next, 
                 psi_all_obs_action = self._psi_all, 
                 alpha = self._alpha,
-                sink_norm=sink_norm
+                sink_norm=sink_norm,
+                K=self.K
             ) 
 
             # Track gradient norms by reward (only on final iteration)
@@ -739,7 +745,10 @@ class RoverAgent:
                     pi = self.pi,
                     E = self.E,
                     alpha=self._sub_alpha,
-                    sink_norm=sink_norm 
+                    sink_norm=sink_norm,
+                    phi_sub_obs=self._phi_sub_obs,
+                    all_actions=self._all_actions,
+                    sub_actions=self._sub_actions,
                 )
         actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
@@ -751,7 +760,11 @@ class RoverAgent:
         B_nystrom = self.distribution_matcher.compute_B_nystrom(
             psi_all_obs_action=self._psi_all,
             psi_sub_obs_action=self._psi_sub,
-            svd_truncation=self.svd_truncation
+            svd_truncation=self.svd_truncation,
+            phi_all_obs=self._phi_all_obs,
+            phi_sub_obs=self._phi_sub_obs,
+            all_actions=self._all_actions,
+            sub_actions=self._sub_actions,
         )
 
         for iteration in range(self.pmd_steps):
@@ -766,7 +779,10 @@ class RoverAgent:
                 E=self.E,
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm,
-                B_nystrom=B_nystrom
+                B_nystrom=B_nystrom,
+                phi_sub_obs=self._phi_sub_obs,
+                all_actions=self._all_actions,
+                sub_actions=self._sub_actions,
 
             )           
 
@@ -808,7 +824,10 @@ class RoverAgent:
                     E = self.E,
                     alpha=self._sub_alpha,
                     sink_norm=sink_norm,
-                    B_nystrom=B_nystrom 
+                    B_nystrom=B_nystrom,
+                    phi_sub_obs=self._phi_sub_obs,
+                    all_actions=self._all_actions,
+                    sub_actions=self._sub_actions,
                 )
             
             candidate_loss = torch.linalg.norm(candidate_nu) ** 2
@@ -832,7 +851,10 @@ class RoverAgent:
                             E = self.E,
                             alpha=self._sub_alpha,
                             sink_norm=sink_norm,
-                            B_nystrom=B_nystrom
+                            B_nystrom=B_nystrom,
+                            phi_sub_obs=self._phi_sub_obs,
+                            all_actions=self._all_actions,
+                            sub_actions=self._sub_actions,
                         )                    
                     candidate_loss = torch.linalg.norm(candidate_nu) ** 2
                     trial += 1

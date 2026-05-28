@@ -499,7 +499,12 @@ class RoverAgent:
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
         self.H = self._phi_all_obs @ self._phi_all_next.T # [n, n]
-        self.K = self._psi_all @ self._psi_all.T  # [n, n]
+        self.K = self.distribution_matcher.state_action_kernel(
+            self._phi_all_obs,
+            self._phi_all_obs,
+            self._all_actions,
+            self._all_actions,
+        )  # [n, n]
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
         self.current_eta = base_eta
@@ -531,7 +536,8 @@ class RoverAgent:
                 phi_all_next_obs = self._phi_all_next, 
                 psi_all_obs_action = self._psi_all, 
                 alpha = self._alpha,
-                sink_norm=sink_norm
+                sink_norm=sink_norm,
+                K=self.K
             ) 
 
             # Track gradient norms by reward (only on final iteration)
@@ -678,6 +684,7 @@ class RoverAgent:
 
             action = action #.cpu()
             self._psi_all = self._encode_state_action(self._phi_all_obs, action) #.cpu()
+            self._all_actions = action.long().reshape(-1).detach().cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device)  # [n, 1]
     

@@ -100,9 +100,10 @@ class ContinuousCorridorEnvTest(unittest.TestCase):
         self.assertEqual(tuple(discount.shape), (6, 1))
         self.assertEqual(torch.bincount(action, minlength=2).tolist(), [3, 3])
         min_x, max_x = env._valid_x_bounds()
-        np.testing.assert_allclose(helper.fixed_xy_points[0], [min_x, env._center_y()], atol=1e-6)
+        np.testing.assert_allclose(helper.fixed_xy_points[0], env._center_position(), atol=1e-6)
+        np.testing.assert_allclose(helper.fixed_xy_points[1], [min_x, env._center_y()], atol=1e-6)
         np.testing.assert_allclose(helper.fixed_xy_points[-1], [max_x, env._center_y()], atol=1e-6)
-        self.assertTrue(np.all(np.diff(helper.fixed_xy_points[:, 0]) > 0.0))
+        self.assertTrue(np.all(np.diff(helper.fixed_xy_points[1:, 0]) > 0.0))
 
 
 if __name__ == "__main__":

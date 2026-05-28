@@ -22,7 +22,7 @@ update_actor_after_critic_steps: 0
 
 # train settings
 num_train_frames: 2_000_000
-num_seed_frames: 2000
+num_seed_frames: 200
 
 # eval
 eval_every_frames: 10000
@@ -41,18 +41,20 @@ update_encoder: true
   
 agent:
   feature_dim: 256
-  lr_actor: 0.5
+  lr_actor: 10
   pmd_steps: 50
   update_every_steps: 1
   pmd_eta_mode: backtracking
   svd_truncation: 2500
   compute_dtype: float32
-  sink_schedule: 10
+  sink_schedule: 1
   debug_fixed_dataset_updates: true
-  kernel_bandwidth_percentile: 8.0
+  kernel_bandwidth_percentile: 5.0
   subsamples: null
-  lambda_reg: 1e-10
+  lambda_reg: 1e-2
   batch_size_actor: 200
+  update_actor_every_steps: 1
+  T_init_steps: 0
 
 
 # misc

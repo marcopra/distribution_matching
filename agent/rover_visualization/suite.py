@@ -45,7 +45,7 @@ class RoverDebugVisualizerSuite:
                 rollout_steps=1000,
                 bins=40,
                 title_prefix="Continuous XY",
-                policy_eval_points=10,
+                policy_eval_points=100,
             )
         else:
             self.domain_visualizer = None
