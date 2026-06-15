@@ -744,6 +744,14 @@ class FetchCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class XYCoverageVisualizer(ContinuousCoverageVisualizer):
+    ACTION_COLORS = ("#2563eb", "#dc2626", "#16a34a", "#ca8a04", "#7c3aed", "#0891b2")
+    POINTMAZE_ACTION_VECTORS = {
+        0: np.array([1.0, 0.0], dtype=np.float32),
+        1: np.array([-1.0, 0.0], dtype=np.float32),
+        2: np.array([0.0, 1.0], dtype=np.float32),
+        3: np.array([0.0, -1.0], dtype=np.float32),
+    }
+
     def __init__(
         self,
         agent,
@@ -900,6 +908,30 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
             ys = np.full(n_points, 0.5 * float(lower[1] + upper[1]), dtype=np.float32)
         return np.column_stack([xs, ys]).astype(np.float32, copy=False)
 
+    def _policy_probe_scale(self, points: np.ndarray) -> float:
+        layout = self._get_maze_layout()
+        if layout is not None:
+            span = np.asarray(layout["maze_upper"] - layout["maze_lower"], dtype=np.float32)
+        else:
+            bounds = self._get_env_plot_bounds()
+            if bounds is None:
+                span = np.ptp(points, axis=0)
+            else:
+                lower, upper = bounds
+                span = np.asarray(upper - lower, dtype=np.float32)
+
+        finite_span = span[np.isfinite(span) & (span > 1e-6)]
+        base_scale = float(np.min(finite_span)) if finite_span.size else 1.0
+
+        if points.shape[0] > 1:
+            deltas = points[:, None, :] - points[None, :, :]
+            distances = np.linalg.norm(deltas, axis=2)
+            distances = distances[distances > 1e-6]
+            if distances.size:
+                base_scale = min(base_scale, float(np.min(distances)) * 1.35)
+
+        return max(base_scale * 0.45, 0.08)
+
     def _format_policy_probe_observation(self, image: np.ndarray) -> np.ndarray:
         image = np.asarray(image, dtype=np.uint8)
         obs_shape = tuple(getattr(self.agent, "obs_shape", ()))
@@ -933,6 +965,11 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         return image_chw
 
     def _observation_for_policy_probe_point(self, xy: np.ndarray) -> np.ndarray:
+        debug_helper = getattr(self.agent, "nystrom_debug", None)
+        observation_from_xy = getattr(debug_helper, "observation_from_xy", None)
+        if callable(observation_from_xy):
+            return observation_from_xy(self.agent, xy)
+
         if getattr(self.agent, "obs_type", None) != "pixels":
             return np.asarray(xy, dtype=np.float32).reshape(getattr(self.agent, "obs_shape", (2,)))
 
@@ -945,6 +982,110 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         except TypeError:
             image = render_from_position(np.asarray(xy, dtype=np.float32))
         return self._format_policy_probe_observation(image)
+
+    def _set_policy_axis_limits(self, ax, points: np.ndarray) -> None:
+        layout = self._get_maze_layout()
+        if layout is not None:
+            lower = np.asarray(layout["maze_lower"], dtype=np.float32)
+            upper = np.asarray(layout["maze_upper"], dtype=np.float32)
+        else:
+            lower = points.min(axis=0)
+            upper = points.max(axis=0)
+        lower, upper = self._expand_bounds(lower, upper, relative_margin=0.04, minimum_margin=0.15)
+        ax.set_xlim(lower[0], upper[0])
+        ax.set_ylim(lower[1], upper[1])
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+
+    def _plot_policy_probe_bars(
+        self,
+        ax,
+        points: np.ndarray,
+        probabilities: np.ndarray,
+        scale: float,
+        highlight_index: Optional[int] = None,
+    ) -> None:
+        n_actions = probabilities.shape[1]
+        colors = self.ACTION_COLORS
+        bar_spacing = scale / max(n_actions, 1)
+        bar_width = bar_spacing * 0.78
+        max_bar_height = scale * 0.78
+        box_height = scale * 0.92
+        box_width = scale * 1.08
+
+        for point_idx, (point, probs) in enumerate(zip(points, probabilities)):
+            x, y = float(point[0]), float(point[1])
+            is_highlighted = highlight_index is not None and point_idx == int(highlight_index)
+            ax.add_patch(
+                patches.Rectangle(
+                    (x - box_width / 2.0, y - box_height / 2.0),
+                    box_width,
+                    box_height,
+                    facecolor="white",
+                    edgecolor="#111827" if is_highlighted else "#4b5563",
+                    linewidth=2.4 if is_highlighted else 0.45,
+                    alpha=0.92 if is_highlighted else 0.78,
+                    zorder=4 if is_highlighted else 1,
+                )
+            )
+            start_x = x - 0.5 * bar_spacing * (n_actions - 1)
+            bottom_y = y - box_height / 2.0 + scale * 0.08
+            for action_idx, prob in enumerate(probs):
+                bar_height = float(prob) * max_bar_height
+                bar_x = start_x + action_idx * bar_spacing
+                ax.add_patch(
+                    patches.Rectangle(
+                        (bar_x - bar_width / 2.0, bottom_y),
+                        bar_width,
+                        bar_height,
+                        facecolor=colors[action_idx % len(colors)],
+                        edgecolor="none",
+                        alpha=0.95,
+                        zorder=5 if is_highlighted else 2,
+                    )
+                )
+
+    def _plot_policy_probe_arrows(self, ax, points: np.ndarray, probabilities: np.ndarray, scale: float) -> None:
+        arrow_length = scale * 0.58
+        for point, probs in zip(points, probabilities):
+            action_idx = int(np.argmax(probs))
+            vector = self.POINTMAZE_ACTION_VECTORS.get(action_idx)
+            if vector is None:
+                continue
+            color = self.ACTION_COLORS[action_idx % len(self.ACTION_COLORS)]
+            dx, dy = (vector * arrow_length).astype(float)
+            ax.arrow(
+                float(point[0]) - 0.5 * dx,
+                float(point[1]) - 0.5 * dy,
+                dx,
+                dy,
+                width=scale * 0.035,
+                head_width=scale * 0.22,
+                head_length=scale * 0.18,
+                length_includes_head=True,
+                facecolor=color,
+                edgecolor=color,
+                alpha=0.95,
+                zorder=2,
+            )
+
+    def _add_policy_action_legend(self, ax, n_actions: int) -> None:
+        labels = {
+            0: "0: right (+x)",
+            1: "1: left (-x)",
+            2: "2: up (+y)",
+            3: "3: down (-y)",
+        }
+        handles = [
+            patches.Patch(
+                facecolor=self.ACTION_COLORS[action_idx % len(self.ACTION_COLORS)],
+                edgecolor="none",
+                label=labels.get(action_idx, f"action {action_idx}"),
+            )
+            for action_idx in range(n_actions)
+        ]
+        ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9)
 
     def _save_policy_action_probability_plot(self, step: int) -> None:
         points = self._policy_probe_points()
@@ -970,6 +1111,7 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
                 marker="o",
                 linewidth=1.8,
                 markersize=4,
+                color=self.ACTION_COLORS[action_idx % len(self.ACTION_COLORS)],
                 label=f"action {action_idx}",
             )
 
@@ -1042,7 +1184,15 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class PointMazeCoverageVisualizer(XYCoverageVisualizer):
-    def __init__(self, agent, env, save_dir: str = "pointmaze_plots", rollout_steps: int = 10000, bins: int = 36):
+    def __init__(
+        self,
+        agent,
+        env,
+        save_dir: str = "pointmaze_plots",
+        rollout_steps: int = 10000,
+        bins: int = 36,
+        policy_eval_points: int = 128,
+    ):
         super().__init__(
             agent,
             env,
@@ -1050,11 +1200,67 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             rollout_steps=rollout_steps,
             bins=bins,
             title_prefix="PointMaze XY",
-            policy_eval_points=0,
+            policy_eval_points=policy_eval_points,
         )
 
     def _use_env_plot_bounds(self) -> bool:
         return False
+
+    def _policy_probe_points(self) -> Optional[np.ndarray]:
+        n_points = int(self.policy_eval_points)
+        if n_points <= 0:
+            return None
+
+        debug_helper = getattr(self.agent, "nystrom_debug", None)
+        build_grid_points = getattr(debug_helper, "build_grid_points", None)
+        if callable(build_grid_points):
+            return np.asarray(build_grid_points(n_points), dtype=np.float32).reshape(-1, 2)
+
+        return super()._policy_probe_points()
+
+    def _save_policy_action_probability_plot(self, step: int) -> None:
+        points = self._policy_probe_points()
+        if points is None or points.size == 0:
+            return
+
+        probabilities = []
+        for xy in points:
+            obs = self._observation_for_policy_probe_point(xy)
+            probs = np.asarray(self.agent.compute_action_probs(obs), dtype=np.float64).reshape(-1)
+            probs = np.clip(probs, 0.0, None)
+            probs = probs / max(probs.sum(), 1e-12)
+            probabilities.append(probs)
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5.4), constrained_layout=True)
+        scale = self._policy_probe_scale(points)
+        for ax, title in zip(
+            axes,
+            (
+                "Policy probabilities by XY probe",
+                "Most probable action by XY probe",
+            ),
+        ):
+            self._overlay_maze_walls(ax)
+            self._set_policy_axis_limits(ax, points)
+            ax.set_title(title)
+            ax.grid(True, alpha=0.18, linewidth=0.5)
+
+        self._plot_policy_probe_bars(axes[0], points, probabilities, scale, highlight_index=0)
+        self._plot_policy_probe_arrows(axes[1], points, probabilities, scale)
+        self._add_policy_action_legend(axes[0], probabilities.shape[1])
+        self._add_policy_action_legend(axes[1], probabilities.shape[1])
+        fig.suptitle(
+            f"{self.title_prefix} policy action probabilities at step {step} "
+            f"({points.shape[0]} feasible probe points)",
+            fontsize=13,
+        )
+
+        save_path = self.save_dir / f"step_{step}_action_probs.png"
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✓ {self.title_prefix} policy action-probability plot saved: {save_path}")
 
 
 class PointMazeNystromDebugVisualizer:

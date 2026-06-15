@@ -7,6 +7,7 @@ import gymnasium_robotics
 import numpy as np
 from dm_env import StepType, specs
 from gymnasium import spaces
+from gymnasium.spaces import utils as spaces_utils
 from PIL import Image
 
 import utils
@@ -132,10 +133,11 @@ class ExtendedTimeStep(NamedTuple):
             return tuple.__getitem__(self, attr)
 
 class DiscreteObservationWrapper(gym.Wrapper):
-    """Wrapper that converts discrete observations to one-hot encoding."""
+    """Wrapper that converts discrete observations to one-hot, and flattens dict states."""
     
     def __init__(self, env):
         super().__init__(env)
+        self._flatten_observation = False
         if isinstance(env.observation_space, spaces.Discrete):
             self.n_states = env.observation_space.n
             # TODO non penso ci siano problemi perchè dopo uso floa32
@@ -147,13 +149,24 @@ class DiscreteObservationWrapper(gym.Wrapper):
             )
         else:
             self.is_discrete = False
+            if getattr(env.observation_space, "shape", None) is None:
+                self._flatten_observation = True
+                flat_space = spaces_utils.flatten_space(env.observation_space)
+                self.observation_space = spaces.Box(
+                    low=np.asarray(flat_space.low, dtype=np.float32),
+                    high=np.asarray(flat_space.high, dtype=np.float32),
+                    shape=flat_space.shape,
+                    dtype=np.float32,
+                )
     
     def _obs_to_onehot(self, obs):
-        """Convert discrete observation to one-hot."""
+        """Convert discrete observation to one-hot or flatten structured observations."""
         if self.is_discrete:
             onehot = np.zeros(self.n_states, dtype=np.float32)
             onehot[obs] = 1.0
             return onehot
+        if self._flatten_observation:
+            return spaces_utils.flatten(self.env.observation_space, obs).astype(np.float32, copy=False)
         return obs
     
     def reset(self, **kwargs):
@@ -289,15 +302,20 @@ class ActionRepeatWrapper(gym.Wrapper):
         else:
             step_type = StepType.MID
 
-        # For Atari (or other envs where obs is already pixels), use obs directly
-        if self.obs_type == 'pixels' and isinstance(obs, np.ndarray) and obs.ndim == 3:
-            pixel_obs = obs
-            image_obs = obs
-        else:
-            pixel_obs = self._render_pixels(include_goal=False)
-            image_obs = self._render_pixels(include_goal=True)
-
         proprio_obs = self._process_proprio_obs(obs)
+        # Only render pixels for pixel observations. State-only PointMaze runs should
+        # not require an OpenGL context just to build ExtendedTimeStep fields.
+        if self.obs_type == 'pixels':
+            if isinstance(obs, np.ndarray) and obs.ndim == 3:
+                pixel_obs = obs
+                image_obs = obs
+            else:
+                pixel_obs = self._render_pixels(include_goal=False)
+                image_obs = self._render_pixels(include_goal=True)
+        else:
+            pixel_obs = None
+            image_obs = None
+
         info = self._augment_info(info, montezuma_room_id)
         return ExtendedTimeStep(
             step_type=step_type,
@@ -314,14 +332,19 @@ class ActionRepeatWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         montezuma_room_id = self._reset_montezuma_tracking()
-        # For Atari (or other envs where obs is already pixels), use obs directly
-        if self.obs_type == 'pixels' and isinstance(obs, np.ndarray) and obs.ndim == 3:
-            pixel_obs = obs
-            image_obs = obs
-        else:
-            pixel_obs = self._render_pixels(include_goal=False)
-            image_obs = self._render_pixels(include_goal=True)
         proprio_obs = self._process_proprio_obs(obs)
+        # For Atari (or other envs where obs is already pixels), use obs directly.
+        if self.obs_type == 'pixels':
+            if isinstance(obs, np.ndarray) and obs.ndim == 3:
+                pixel_obs = obs
+                image_obs = obs
+            else:
+                pixel_obs = self._render_pixels(include_goal=False)
+                image_obs = self._render_pixels(include_goal=True)
+        else:
+            pixel_obs = None
+            image_obs = None
+
         info = self._augment_info(info, montezuma_room_id)
         # Convert gym reset to dm_env format
         return ExtendedTimeStep(

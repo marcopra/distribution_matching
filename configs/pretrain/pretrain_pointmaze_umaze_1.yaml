@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover
+  - /agent: rover_nystrom_pointmaze_debug
   - /env: pointmaze/pointmaze_umaze_goal_1
   # - override hydra/launcher: submitit_local
 
@@ -10,7 +10,7 @@ reward_free: true
 # task settings
 domain: gym
 task_name: ${env.name}
-obs_type: pixels
+obs_type: states
 frame_stack: 1
 action_repeat: 1
 discount: 0.99
@@ -22,7 +22,7 @@ update_actor_after_critic_steps: 0
 
 # train settings
 num_train_frames: 2_000_000
-num_seed_frames: 2000
+num_seed_frames: 500
 
 # eval
 eval_every_frames: 10000
@@ -39,6 +39,25 @@ batch_size: ${agent.batch_size}
 nstep: ${agent.nstep}
 update_encoder: true
   
+agent:
+  feature_dim: 256
+  embeddings: false
+  lr_actor: 10
+  pmd_steps: 10
+  update_every_steps: 1
+  pmd_eta_mode: backtracking
+  svd_truncation: 2500
+  compute_dtype: float64
+  sink_schedule: 1
+  debug_fixed_dataset_updates: true
+  state_kernel_bandwidth_percentile: 3.0
+  state_action_kernel_bandwidth_percentile: 3.0
+  subsamples: null
+  lambda_reg: 1e-3
+  batch_size_actor: 4000
+  update_actor_every_steps: 1
+  T_init_steps: 0
+
 
 # misc
 seed: 1

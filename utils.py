@@ -134,7 +134,7 @@ class KernelFunction:
         self.kernel_type = kernel_type
         self.bandwidth = None if bandwidth is None else float(bandwidth)
         self.bandwidth_percentile = None if bandwidth_percentile is None else float(bandwidth_percentile)
-        self.bandwidth_fit_max_pairs = 200_000
+        self.bandwidth_fit_max_pairs = 16_000_000
         self._kernel = kernels[kernel_type]
 
     def __call__(self, X, Y):

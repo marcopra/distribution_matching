@@ -163,6 +163,10 @@ class PointMazeNystromDebugHelper:
         base_env, _ = self._base_and_point_env()
         point_obs, _ = base_env.point_env._get_obs()
         raw_obs = base_env._get_obs(point_obs)
+        xy_obs_fn = self._env_method("_xy_observation")
+        if callable(xy_obs_fn):
+            return np.asarray(xy_obs_fn(raw_obs), dtype=np.float32)
+
         process_fn = self._env_method("_process_proprio_obs")
         if callable(process_fn):
             return np.asarray(process_fn(raw_obs), dtype=np.float32)
@@ -237,6 +241,16 @@ class PointMazeNystromDebugHelper:
         image = self._prepare_rendered_image(agent, image, render_resolution)
         image_chw = image.transpose(2, 0, 1).copy()
         return np.tile(image_chw, (frame_stack, 1, 1))
+
+    def observation_from_xy(self, agent, xy) -> np.ndarray:
+        """Return the full agent observation for a PointMaze XY probe."""
+        xy = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
+        if not self._has_point_env():
+            return self._observation_from_xy(agent, xy)
+
+        with self._preserve_state():
+            self._set_state(xy)
+            return self._observation(agent)
 
     def maze_layout(self):
         layout_fn = self._env_method("get_debug_maze_layout")
@@ -392,6 +406,13 @@ class PointMazeNystromDebugHelper:
         discount = [float(getattr(time_step, "discount", 1.0))]
         return obs, next_obs, reward, discount
 
+    def _synthetic_transition_to_xy(self, agent, source_xy, target_xy):
+        source_xy = np.asarray(source_xy, dtype=np.float32).reshape(-1)[:2]
+        target_xy = np.asarray(target_xy, dtype=np.float32).reshape(-1)[:2]
+        obs = self.observation_from_xy(agent, source_xy)
+        next_obs = self.observation_from_xy(agent, target_xy)
+        return obs, next_obs, [0.0], [1.0]
+
     def build_subsample_batch(self, agent):
         if self._subsample_batch is not None:
             return self._subsample_batch
@@ -420,6 +441,9 @@ class PointMazeNystromDebugHelper:
                 self._landmark_transition(agent, xy, action_idx)
                 for xy, action_idx in zip(xy_points, actions_np)
             ]
+        if transitions:
+            source_xy = state_points[1] if state_points.shape[0] > 1 else state_points[0]
+            transitions[0] = self._synthetic_transition_to_xy(agent, source_xy, state_points[0])
         obs_list, next_obs_list, rewards, discounts = zip(*transitions)
 
         obs = torch.as_tensor(np.stack(obs_list), dtype=torch.float32, device=agent.device)

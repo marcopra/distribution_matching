@@ -112,6 +112,8 @@ class RoverAgent:
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_percentile: Optional[float] = None,
+                 state_kernel_bandwidth_percentile: Optional[float] = None,
+                 state_action_kernel_bandwidth_percentile: Optional[float] = None,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  device: str = "cpu",
@@ -173,10 +175,20 @@ class RoverAgent:
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
+        self.state_kernel_bandwidth_percentile = (
+            kernel_bandwidth_percentile
+            if state_kernel_bandwidth_percentile is None
+            else state_kernel_bandwidth_percentile
+        )
+        self.state_action_kernel_bandwidth_percentile = (
+            kernel_bandwidth_percentile
+            if state_action_kernel_bandwidth_percentile is None
+            else state_action_kernel_bandwidth_percentile
+        )
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
-            bandwidth_percentile=self.kernel_bandwidth_percentile,
+            bandwidth_percentile=self.state_kernel_bandwidth_percentile,
         )
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
@@ -269,6 +281,7 @@ class RoverAgent:
             kernel_type=self.kernel_type,
             kernel_bandwidth=self.kernel_bandwidth,
             kernel_bandwidth_percentile=self.kernel_bandwidth_percentile,
+            state_action_kernel_bandwidth_percentile=self.state_action_kernel_bandwidth_percentile,
             device=self.device  
         )
         # TODO: sistemare gestione del kernel- Per ora in distribution_matching c'è lo state-action kernel, while qui c'è lo state kernel
@@ -1730,5 +1743,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        exit(0)
+        exit()
         return metrics

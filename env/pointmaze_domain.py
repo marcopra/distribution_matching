@@ -310,6 +310,39 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
         return getattr(self.env, name)
 
 
+class PointMazeXYObservationWrapper(gym.Wrapper):
+    """Expose only the agent XY position from PointMaze state observations."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(2,),
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _xy_observation(obs):
+        if isinstance(obs, dict):
+            obs = obs.get("observation")
+        obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+        if obs.size < 2:
+            raise ValueError(f"PointMaze XY observation requires at least 2 values, got shape {obs.shape}")
+        return obs[:2].copy()
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self._xy_observation(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self._xy_observation(obs), reward, terminated, truncated, info
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
 def wrap_point_maze_env(env, pointmaze_kwargs):
     pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
     goal_position = pointmaze_kwargs.pop("goal_position", None)
@@ -322,6 +355,7 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     direct_velocity_actions = bool(pointmaze_kwargs.pop("direct_velocity_actions", False))
     max_velocity = pointmaze_kwargs.pop("max_velocity", 1.0)
     preserve_target_velocity = bool(pointmaze_kwargs.pop("preserve_target_velocity", True))
+    only_xy_position = bool(pointmaze_kwargs.pop("only_xy_position", False))
 
     if goal_position is None:
         raise ValueError("PointMaze environments require pointmaze.goal_position to keep the goal fixed")
@@ -357,10 +391,15 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     else:
         action_description = "continuous force actions"
 
+    if only_xy_position:
+        env = PointMazeXYObservationWrapper(env)
+
     warning = (
         "Warning: PointMaze environment uses fixed goal and initial position, "
         f"{action_description}, dense reward, and goal-hidden pixel observations."
     )
+    if only_xy_position:
+        warning += " State observations are masked to agent XY position only."
     if getattr(env.unwrapped, "continuing_task", False):
         warning += " continuing_task=True keeps the episode from terminating at success."
     utils.ColorPrint.yellow(warning)

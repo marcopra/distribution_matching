@@ -5,7 +5,8 @@ from typing import Optional
 import torch
 
 import utils
-
+import matplotlib.pyplot as plt
+ 
 
 class DistributionMatcher:
     """Handles mathematical operations for distribution matching via PMD."""
@@ -17,6 +18,7 @@ class DistributionMatcher:
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_percentile: Optional[float] = None,
+                 state_action_kernel_bandwidth_percentile: Optional[float] = None,
                  device: str = "cpu"):
         
         self.gamma = gamma
@@ -25,11 +27,16 @@ class DistributionMatcher:
         self.svd_truncation = svd_truncation  
         self.kernel_type = kernel_type
         self.kernel_bandwidth = kernel_bandwidth
-        self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
+        self.kernel_bandwidth_percentile = (
+            kernel_bandwidth_percentile
+            if state_action_kernel_bandwidth_percentile is None
+            else state_action_kernel_bandwidth_percentile
+        )
+        self.state_action_kernel_bandwidth_percentile = self.kernel_bandwidth_percentile
         self.kernel_fn = utils.build_kernel_fn(
             kernel_type,
             bandwidth=self.kernel_bandwidth,
-            bandwidth_percentile=self.kernel_bandwidth_percentile,
+            bandwidth_percentile=self.state_action_kernel_bandwidth_percentile,
         )
         self.state_kernel_fn = None
 
@@ -183,8 +190,6 @@ class DistributionMatcher:
       
         return gradient
     
-
-    
     #******* NYSTROM********
     def _regularized_solve_memory_efficient(
             self,
@@ -238,6 +243,17 @@ class DistributionMatcher:
         S_inv_mat = torch.diag(S_inv)
         
         A_pinv = V @ S_inv_mat @ U.transpose(-2, -1)
+
+        #save plot of singular values
+        # plt.figure()
+        # plt.plot(S.cpu().numpy(), marker='o')
+        # plt.yscale('log')
+        # plt.title('Singular Values of A')
+        # plt.xlabel('Index')
+        # plt.ylabel('Singular Value (log scale)')
+        # plt.grid()
+        # plt.savefig('singular_values.png')
+        # exit(0)
         
         
         return A_pinv

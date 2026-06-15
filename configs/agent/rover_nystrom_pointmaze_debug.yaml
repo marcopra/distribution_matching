@@ -20,7 +20,8 @@ encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 kernel_type: gaussian # [inner_product, gaussian, laplacian, dirac]
 kernel_bandwidth: null # fixed Gaussian bandwidth; overrides percentile fitting when set
-kernel_bandwidth_percentile: 5.0 # try 10.0 or 15.0
+state_kernel_bandwidth_percentile: 5.0 # try 10.0 or 15.0
+state_action_kernel_bandwidth_percentile: 5.0 # try 10.0 or 15.0
 nystrom_grid_border_margin: 0.01
 nystrom_grid_oversample: 2.0
 nstep: 1
