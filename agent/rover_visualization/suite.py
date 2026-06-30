@@ -63,14 +63,14 @@ class RoverDebugVisualizerSuite:
             self.exploration_visualizer.plot_all(step, param_text=param_text)
 
             
-            try:
-                self.exploration_visualizer.plot_tsne(
-                    z_batch,
-                    step,
-                    method="tsne",
-                )
-            except Exception as exc:
-                print(f"⚠ Could not generate t-SNE plot at step {step}: {exc}")
+            # try:
+            #     self.exploration_visualizer.plot_tsne(
+            #         z_batch,
+            #         step,
+            #         method="tsne",
+            #     )
+            # except Exception as exc:
+            #     print(f"⚠ Could not generate t-SNE plot at step {step}: {exc}")
 
         if self.domain_visualizer is not None:
             try:

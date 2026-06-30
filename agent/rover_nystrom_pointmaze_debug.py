@@ -9,6 +9,7 @@ from typing import Optional
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import patches
 import utils
 import logging
 from agent.utils import (
@@ -106,14 +107,13 @@ class RoverAgent:
                  compute_dtype: str = "float32",
                  nystrom_synthetic_subsamples: bool = False,
                  debug_fixed_dataset_updates: bool = False,
+                 nystrom_gradient_debug: bool = False,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_percentile: Optional[float] = None,
-                 state_kernel_bandwidth_percentile: Optional[float] = None,
-                 state_action_kernel_bandwidth_percentile: Optional[float] = None,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  device: str = "cpu",
@@ -175,26 +175,25 @@ class RoverAgent:
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
-        self.state_kernel_bandwidth_percentile = (
-            kernel_bandwidth_percentile
-            if state_kernel_bandwidth_percentile is None
-            else state_kernel_bandwidth_percentile
-        )
-        self.state_action_kernel_bandwidth_percentile = (
-            kernel_bandwidth_percentile
-            if state_action_kernel_bandwidth_percentile is None
-            else state_action_kernel_bandwidth_percentile
-        )
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
-            bandwidth_percentile=self.state_kernel_bandwidth_percentile,
+            bandwidth_percentile=self.kernel_bandwidth_percentile,
         )
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
         self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates)
+        self.nystrom_gradient_debug = bool(nystrom_gradient_debug)
+        if self.nystrom_gradient_debug and self.subsamples != self.batch_size_actor:
+            utils.ColorPrint.yellow(
+                "nystrom_gradient_debug forces agent.subsamples = agent.batch_size_actor "
+                "so full and Nyström supports are identical."
+            )
+            self.subsamples = self.batch_size_actor
         if self.debug_fixed_dataset_updates:
             utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed continuous Nyström dataset.")
+        if self.nystrom_gradient_debug:
+            utils.ColorPrint.yellow("DEBUG: comparing full vs Nyström gradients; updates use full/reference gradient.")
         self.nystrom_debug = PointMazeNystromDebugHelper(
             border_margin=nystrom_grid_border_margin,
             oversample=nystrom_grid_oversample,
@@ -281,7 +280,6 @@ class RoverAgent:
             kernel_type=self.kernel_type,
             kernel_bandwidth=self.kernel_bandwidth,
             kernel_bandwidth_percentile=self.kernel_bandwidth_percentile,
-            state_action_kernel_bandwidth_percentile=self.state_action_kernel_bandwidth_percentile,
             device=self.device  
         )
         # TODO: sistemare gestione del kernel- Per ora in distribution_matching c'è lo state-action kernel, while qui c'è lo state kernel
@@ -885,6 +883,220 @@ class RoverAgent:
    
         return metrics
 
+    def _nystrom_gradient_debug_full_terms(self, coeff, sink_norm, H_ref, K_ref):
+        pi_ref = self._policy_from_H(H_ref.T, coeff=coeff)
+        M_ref = H_ref * (self.E @ pi_ref.T)
+        nu_ref = self.distribution_matcher.compute_nu_pi(
+            phi_all_next_obs=self._phi_all_next,
+            psi_all_obs_action=self._psi_all,
+            K=K_ref,
+            M=M_ref,
+            alpha=self._alpha,
+            sink_norm=sink_norm,
+        )
+        loss_ref = torch.linalg.norm(nu_ref) ** 2
+        grad_ref = self.distribution_matcher.compute_gradient_coefficient(
+            M_ref,
+            phi_all_next_obs=self._phi_all_next,
+            psi_all_obs_action=self._psi_all,
+            alpha=self._alpha,
+            sink_norm=sink_norm,
+            K=K_ref,
+        )
+        return pi_ref, nu_ref, loss_ref, grad_ref
+
+    def _nystrom_gradient_debug_nystrom_terms(self, coeff, sink_norm, sub_H, B_nystrom):
+        pi_nys = self._policy_from_H(sub_H.T, coeff=coeff)
+        nu_nys = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+            phi_all_obs=self._phi_all_obs,
+            phi_sub_next_obs=self._phi_sub_next,
+            psi_sub_obs_action=self._psi_sub,
+            psi_all_obs_action=self._psi_all,
+            H=sub_H,
+            pi=pi_nys,
+            E=self.E,
+            alpha=self._sub_alpha,
+            sink_norm=sink_norm,
+            B_nystrom=B_nystrom,
+            phi_sub_obs=self._phi_sub_obs,
+            all_actions=self._all_actions,
+            sub_actions=self._sub_actions,
+        )
+        loss_nys = torch.linalg.norm(nu_nys) ** 2
+        grad_nys = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient(
+            phi_all_obs=self._phi_all_obs,
+            phi_all_next_obs=self._phi_all_next,
+            phi_sub_next_obs=self._phi_sub_next,
+            psi_all_obs_action=self._psi_all,
+            psi_sub_obs_action=self._psi_sub,
+            H=sub_H,
+            pi=pi_nys,
+            E=self.E,
+            alpha=self._sub_alpha,
+            sink_norm=sink_norm,
+            B_nystrom=B_nystrom,
+            phi_sub_obs=self._phi_sub_obs,
+            all_actions=self._all_actions,
+            sub_actions=self._sub_actions,
+        )
+        return pi_nys, nu_nys, loss_nys, grad_nys
+
+    @staticmethod
+    def _relative_norm_diff(reference, candidate):
+        diff = torch.linalg.norm(reference - candidate)
+        denom = torch.linalg.norm(reference).clamp_min(1e-12)
+        return diff, diff / denom
+
+    def _print_nystrom_gradient_debug_row(
+            self,
+            iteration,
+            loss_ref,
+            loss_nys,
+            grad_ref,
+            grad_nys,
+            nu_ref,
+            nu_nys,
+        ):
+        grad_abs, grad_rel = self._relative_norm_diff(grad_ref, grad_nys)
+        nu_abs, nu_rel = self._relative_norm_diff(nu_ref, nu_nys)
+        loss_abs = torch.abs(loss_ref - loss_nys)
+        loss_rel = loss_abs / torch.abs(loss_ref).clamp_min(1e-12)
+        print(
+            "NYSTROM_GRAD_DEBUG "
+            f"iter={iteration} "
+            f"loss_ref={float(loss_ref):.8g} loss_nys={float(loss_nys):.8g} "
+            f"loss_abs={float(loss_abs):.3e} loss_rel={float(loss_rel):.3e} "
+            f"grad_ref_norm={float(torch.linalg.norm(grad_ref)):.8g} "
+            f"grad_nys_norm={float(torch.linalg.norm(grad_nys)):.8g} "
+            f"grad_abs={float(grad_abs):.3e} grad_rel={float(grad_rel):.3e} "
+            f"nu_abs={float(nu_abs):.3e} nu_rel={float(nu_rel):.3e}"
+        )
+
+    def _update_actor_nystrom_gradient_debug(self, step, sink_norm, sub_H, B_nystrom, base_eta):
+        metrics = dict()
+        utils.ColorPrint.yellow("NYSTROM_GRAD_DEBUG active: applying full/reference gradient, not Nyström gradient.")
+
+        H_ref = self._kernel(self._phi_all_obs, self._phi_all_next)
+        K_ref = self.distribution_matcher.state_action_kernel(
+            self._phi_all_obs,
+            self._phi_all_obs,
+            self._all_actions,
+            self._all_actions,
+        )
+
+        self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0] + 1, 1), device=self.device)
+        prev_gradient_coeff = self.gradient_coeff.clone()
+        pi_ref, nu_ref, actor_loss, grad_ref = self._nystrom_gradient_debug_full_terms(
+            self.gradient_coeff,
+            sink_norm,
+            H_ref,
+            K_ref,
+        )
+        _, nu_nys, loss_nys, grad_nys = self._nystrom_gradient_debug_nystrom_terms(
+            self.gradient_coeff,
+            sink_norm,
+            sub_H,
+            B_nystrom,
+        )
+        self.pi = pi_ref
+        best_loss = actor_loss
+        best_pi = self.pi.clone()
+        best_coeff = self.gradient_coeff.clone()
+        self._adagrad_accum = 0.0
+        self._print_nystrom_gradient_debug_row(-1, actor_loss, loss_nys, grad_ref, grad_nys, nu_ref, nu_nys)
+
+        for iteration in range(self.pmd_steps):
+            grad_update = grad_ref
+            if self.pmd_grad_clip_norm > 0:
+                grad_norm = torch.linalg.norm(grad_update)
+                if grad_norm > self.pmd_grad_clip_norm:
+                    grad_update = grad_update * (self.pmd_grad_clip_norm / (grad_norm + 1e-12))
+
+            if self.pmd_eta_mode == "adagrad":
+                grad_norm_sq = float(torch.max(grad_update * grad_update).item())
+                self._adagrad_accum += grad_norm_sq
+                eta_t = base_eta / np.sqrt(self._adagrad_accum + self.pmd_adagrad_eps)
+                eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
+            elif self.pmd_eta_mode == "adadiff":
+                grad_norm_sq = float(torch.max(grad_update * grad_update - prev_gradient_coeff * prev_gradient_coeff).item())
+                self._adagrad_accum += grad_norm_sq
+                eta_t = base_eta / np.sqrt(self._adagrad_accum + self.pmd_adagrad_eps)
+                eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
+            else:
+                eta_t = base_eta
+
+            candidate_coeff = self.gradient_coeff + eta_t * grad_update
+            candidate_pi, candidate_nu_ref, candidate_loss_ref, candidate_grad_ref = self._nystrom_gradient_debug_full_terms(
+                candidate_coeff,
+                sink_norm,
+                H_ref,
+                K_ref,
+            )
+            _, candidate_nu_nys, candidate_loss_nys, candidate_grad_nys = self._nystrom_gradient_debug_nystrom_terms(
+                candidate_coeff,
+                sink_norm,
+                sub_H,
+                B_nystrom,
+            )
+
+            if self.pmd_eta_mode == "backtracking":
+                trial_eta = eta_t
+                trial = 0
+                while candidate_loss_ref > actor_loss and trial < self.pmd_backtrack_max_trials:
+                    trial_eta *= self.pmd_backtrack_factor
+                    trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
+                    candidate_coeff = self.gradient_coeff + trial_eta * grad_update
+                    candidate_pi, candidate_nu_ref, candidate_loss_ref, candidate_grad_ref = self._nystrom_gradient_debug_full_terms(
+                        candidate_coeff,
+                        sink_norm,
+                        H_ref,
+                        K_ref,
+                    )
+                    _, candidate_nu_nys, candidate_loss_nys, candidate_grad_nys = self._nystrom_gradient_debug_nystrom_terms(
+                        candidate_coeff,
+                        sink_norm,
+                        sub_H,
+                        B_nystrom,
+                    )
+                    trial += 1
+                eta_t = trial_eta
+
+            self.current_eta = eta_t
+            self.gradient_coeff = candidate_coeff
+            prev_gradient_coeff = grad_update.clone()
+            self.pi = candidate_pi
+            actor_loss = candidate_loss_ref
+            grad_ref = candidate_grad_ref
+            nu_ref = candidate_nu_ref
+
+            if actor_loss < best_loss:
+                best_loss = actor_loss
+                best_pi = self.pi.clone()
+                best_coeff = self.gradient_coeff.clone()
+
+            self._print_nystrom_gradient_debug_row(
+                iteration,
+                candidate_loss_ref,
+                candidate_loss_nys,
+                candidate_grad_ref,
+                candidate_grad_nys,
+                candidate_nu_ref,
+                candidate_nu_nys,
+            )
+            print(f"  PMD Iteration {iteration}, Actor loss(ref): {actor_loss}, eta: {self.current_eta:.6g}")
+
+        if self.pmd_best_iterate:
+            self.pi = best_pi
+            self.gradient_coeff = best_coeff
+            actor_loss = best_loss
+
+        if self.use_tb or self.use_wandb:
+            metrics['actor_loss'] = actor_loss
+            metrics['actor_eta'] = float(self.current_eta)
+            metrics['actor_best_loss'] = float(best_loss)
+            metrics['sink_norm'] = float(sink_norm)
+        return metrics
+
     def update_actor_nystrom(self,
                              full_obs,
                              full_action,
@@ -945,19 +1157,40 @@ class RoverAgent:
         sink_norm = utils.schedule(self.sink_schedule, step)
         self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
 
-        # M = self.H*(self.E@self.pi.T) # [n, ]
-        B_nystrom = self.distribution_matcher.compute_B_nystrom(
-            psi_all_obs_action=self._psi_all,
-            psi_sub_obs_action=self._psi_sub,
-            svd_truncation=self.svd_truncation,
-            phi_all_obs=self._phi_all_obs,
-            phi_sub_obs=self._phi_sub_obs,
-            all_actions=self._all_actions,
-            sub_actions=self._sub_actions,
+        K_sub_sub = self.distribution_matcher.state_action_kernel(
+            self._phi_sub_obs,
+            self._phi_sub_obs,
+            self._sub_actions,
+            self._sub_actions,
+        )  # [m, m]
+        K_all_sub = self.distribution_matcher.state_action_kernel(
+            self._phi_all_obs,
+            self._phi_sub_obs,
+            self._all_actions,
+            self._sub_actions,
+        )  # [n, m]
+
+
+        B_nystrom, U_r = self.distribution_matcher.compute_B_and_projections(
+            K_nm=K_all_sub,
+            K_mm=K_sub_sub,
+            components=self.svd_truncation
         )
+
+        del K_sub_sub, K_all_sub
+        
+
         utils.ColorPrint.yellow(
             f"Nyström state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
         )
+        if self.nystrom_gradient_debug:
+            return self._update_actor_nystrom_gradient_debug(
+                step=step,
+                sink_norm=sink_norm,
+                sub_H=sub_H,
+                B_nystrom=B_nystrom,
+                base_eta=base_eta,
+            )
 
         nu_pi = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
                     phi_all_obs=self._phi_all_obs,
@@ -983,11 +1216,8 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient(
-                phi_all_obs=self._phi_all_obs,
-                phi_all_next_obs = self._phi_all_next,
+            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
                 phi_sub_next_obs = self._phi_sub_next,
-                psi_all_obs_action = self._psi_all,
                 psi_sub_obs_action = self._psi_sub,
                 H = sub_H,
                 pi=self.pi,
@@ -995,9 +1225,7 @@ class RoverAgent:
                 alpha = self._sub_alpha,
                 sink_norm=sink_norm,
                 B_nystrom=B_nystrom,
-                phi_sub_obs=self._phi_sub_obs,
-                all_actions=self._all_actions,
-                sub_actions=self._sub_actions,
+                eig_vecs_r=U_r,
             )           
 
             if self.pmd_grad_clip_norm > 0:
@@ -1080,7 +1308,7 @@ class RoverAgent:
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
 
-            if iteration % 10 == 0 or iteration == self.pmd_steps - 1:
+            if iteration % 1 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
 
         if self.pmd_best_iterate:
@@ -1409,12 +1637,120 @@ class RoverAgent:
         return count
 
     def _fixed_actor_update_data(self) -> RawActorUpdateData:
-        fixed_batch = self.nystrom_debug.fixed_actor_batch(self)
-        subsample = fixed_batch if self.subsamples is not None else None
+        fixed_batch = self.nystrom_debug.fixed_actor_batch(self, n_transitions=int(self.batch_size_actor))
+        subsample = (
+            self.nystrom_debug.fixed_actor_batch(self, n_transitions=self._nystrom_subsample_count())
+            if self.subsamples is not None else None
+        )
         return RawActorUpdateData(
             full=fixed_batch,
             subsample=subsample,
             source="fixed PointMaze debug dataset",
+        )
+
+    def _xy_points_from_actor_batch(self, actor_batch, expected_size=None):
+        if actor_batch is None:
+            return None
+        if (
+            self.debug_fixed_dataset_updates
+            and expected_size is not None
+            and hasattr(self.nystrom_debug, "fixed_xy_points_for_size")
+        ):
+            fixed_points = self.nystrom_debug.fixed_xy_points_for_size(int(expected_size))
+            if fixed_points is not None:
+                return np.asarray(fixed_points, dtype=np.float32).reshape(-1, 2)
+        obs = actor_batch[0]
+        if obs is None or obs.ndim < 2 or obs.shape[1] < 2:
+            return None
+        if self.obs_type == "pixels":
+            return None
+        obs_np = obs.detach().float().cpu().numpy().reshape(obs.shape[0], -1)
+        points = obs_np[:, :2]
+        if points.shape[0] == 0 or not np.isfinite(points).all():
+            return None
+        return points.astype(np.float32, copy=False)
+
+    def _save_pointmaze_actor_dataset_plot(self, step, points, filename, title):
+        if points is None:
+            return
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if points.size == 0:
+            return
+
+        save_dir = os.path.join(os.getcwd(), "pointmaze_plots")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, filename)
+
+        fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+        try:
+            layout = self.nystrom_debug.maze_layout()
+        except Exception:
+            layout = None
+        if isinstance(layout, dict):
+            for x0, y0, width, height in layout["wall_rectangles"]:
+                ax.add_patch(
+                    patches.Rectangle(
+                        (x0, y0),
+                        width,
+                        height,
+                        facecolor="black",
+                        edgecolor="black",
+                        linewidth=0.5,
+                        zorder=3,
+                    )
+                )
+            lower = np.asarray(layout["maze_lower"], dtype=np.float32)
+            upper = np.asarray(layout["maze_upper"], dtype=np.float32)
+            ax.add_patch(
+                patches.Rectangle(
+                    (lower[0], lower[1]),
+                    upper[0] - lower[0],
+                    upper[1] - lower[1],
+                    fill=False,
+                    edgecolor="black",
+                    linewidth=1.2,
+                    zorder=4,
+                )
+            )
+            ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
+            ax.set_ylim(lower[1] - 0.1, upper[1] + 0.1)
+        else:
+            pad = 0.05 * max(float(np.ptp(points[:, 0])), float(np.ptp(points[:, 1])), 1.0)
+            ax.set_xlim(float(points[:, 0].min()) - pad, float(points[:, 0].max()) + pad)
+            ax.set_ylim(float(points[:, 1].min()) - pad, float(points[:, 1].max()) + pad)
+
+        ax.scatter(points[:, 0], points[:, 1], s=8, c="#ff7f0e", linewidths=0.0, alpha=0.9)
+        ax.scatter(points[0, 0], points[0, 1], marker="*", s=130, c="white", edgecolors="black", linewidths=0.9, zorder=5)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(f"{title}\n{points.shape[0]} states")
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"PointMaze actor dataset plot saved to: {save_path}")
+
+    def _save_actor_full_dataset_plot(self, actor_data, step):
+        if isinstance(actor_data, EncodedActorUpdateData):
+            return
+        full_size = actor_data.full[0].shape[0]
+        self._save_pointmaze_actor_dataset_plot(
+            step,
+            self._xy_points_from_actor_batch(actor_data.full, expected_size=full_size),
+            f"step_{step}_actor_full_dataset.png",
+            "PointMaze actor full dataset",
+        )
+
+    def _save_actor_nystrom_subsample_plot(self, actor_data, step):
+        if isinstance(actor_data, EncodedActorUpdateData):
+            return
+        if actor_data.subsample is None:
+            return
+        subsample_size = actor_data.subsample[0].shape[0]
+        self._save_pointmaze_actor_dataset_plot(
+            step,
+            self._xy_points_from_actor_batch(actor_data.subsample, expected_size=subsample_size),
+            f"step_{step}_nystrom_subsamples.png",
+            "PointMaze Nyström subsamples",
         )
 
     def _synthetic_actor_subsample_batch(self):
@@ -1438,7 +1774,10 @@ class RoverAgent:
         # Nyström uses the whole encoded FIFO as support and a smaller landmark set.
         count = self._nystrom_subsample_count()
         full, rewards = self._all_encoded_actor_data(include_first=True)
-        if self.nystrom_synthetic_subsamples:
+        if self.nystrom_gradient_debug:
+            subsample, subsample_rewards = full, rewards
+            subsample_source = "same encoded FIFO support for Nyström gradient debug"
+        elif self.nystrom_synthetic_subsamples:
             subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
             subsample_source = "fixed PointMaze Nyström landmarks"
         else:
@@ -1457,6 +1796,8 @@ class RoverAgent:
 
     def _replay_actor_subsample_batch(self, replay_iter, full_batch, replay_buffer):
         count = self._nystrom_subsample_count()
+        if self.nystrom_gradient_debug:
+            return full_batch
         if self.nystrom_synthetic_subsamples:
             return self._synthetic_actor_subsample_batch()
         if count >= full_batch[0].shape[0]:
@@ -1536,8 +1877,30 @@ class RoverAgent:
             f"source={actor_data.source}, full={full_size}, subsampled={subsample_size}"
         )
 
+    def _assert_nystrom_gradient_debug_same_support(self, actor_data):
+        if not self.nystrom_gradient_debug:
+            return
+        if self.subsamples is None:
+            raise ValueError("nystrom_gradient_debug requires agent.subsamples to be active.")
+        if int(self.subsamples) != int(self.batch_size_actor):
+            raise ValueError("nystrom_gradient_debug requires agent.subsamples == agent.batch_size_actor.")
+        if actor_data.subsample is None:
+            raise ValueError("nystrom_gradient_debug requires a Nyström subsample batch.")
+        if isinstance(actor_data, EncodedActorUpdateData):
+            for key in ("phi_obs", "phi_next", "psi", "E"):
+                if not torch.equal(actor_data.full[key], actor_data.subsample[key]):
+                    raise ValueError(f"nystrom_gradient_debug requires encoded subsample[{key}] == full[{key}].")
+            return
+        for name, full_tensor, sub_tensor in zip(("obs", "action", "next_obs", "reward"), actor_data.full, actor_data.subsample):
+            if not torch.equal(full_tensor, sub_tensor):
+                raise ValueError(f"nystrom_gradient_debug requires subsample {name} == full {name}.")
+
     def _update_actor_from_data(self, actor_data, step):
         self._log_actor_update_data(actor_data)
+        self._assert_nystrom_gradient_debug_same_support(actor_data)
+        # DEBUG PLOTS: remove these two lines to disable actor dataset dumps.
+        self._save_actor_full_dataset_plot(actor_data, step)
+        self._save_actor_nystrom_subsample_plot(actor_data, step)
 
         if isinstance(actor_data, EncodedActorUpdateData):
             if self.subsamples is None:

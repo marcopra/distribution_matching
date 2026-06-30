@@ -49,8 +49,7 @@ agent:
   compute_dtype: float32
   sink_schedule: 1
   debug_fixed_dataset_updates: true
-  state_kernel_bandwidth_percentile: 5.0
-  state_action_kernel_bandwidth_percentile: 5.0
+  kernel_bandwidth_percentile: 5.0
   subsamples: null
   lambda_reg: 1e-2
   batch_size_actor: 200

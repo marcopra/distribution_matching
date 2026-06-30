@@ -1269,7 +1269,26 @@ class PointMazeNystromDebugVisualizer:
     def __init__(self, save_dir: str = "pointmaze_plots"):
         self.save_dir = Path(save_dir)
 
-    def save_fixed_points_plot(self, layout: dict, points: np.ndarray, n_actions: int) -> None:
+    @staticmethod
+    def _format_stat_triplet(values: Optional[dict]) -> str:
+        if not isinstance(values, dict):
+            return "n/a"
+        formatted = []
+        for key in ("min", "median", "max"):
+            value = values.get(key)
+            if value is None or not np.isfinite(float(value)):
+                formatted.append("n/a")
+            else:
+                formatted.append(f"{float(value):.4g}")
+        return "/".join(formatted)
+
+    def save_fixed_points_plot(
+            self,
+            layout: dict,
+            points: np.ndarray,
+            n_actions: int,
+            stats: Optional[dict] = None,
+        ) -> None:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         save_path = self.save_dir / "fixed_nystrom_points.png"
         points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
@@ -1316,6 +1335,35 @@ class PointMazeNystromDebugVisualizer:
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_title(f"Fixed Nyström continuous grid ({points.shape[0]} states, all {n_actions} actions each)")
+        if isinstance(stats, dict):
+            grid_spacing = stats.get("grid_spacing")
+            spacing = self._format_stat_triplet(stats.get("point_spacing"))
+            step_size = self._format_stat_triplet(stats.get("step_size"))
+            grid_line = "grid spacing: n/a"
+            if isinstance(grid_spacing, dict):
+                grid_line = (
+                    f"grid dx/dy: {float(grid_spacing.get('x', float('nan'))):.4g}/"
+                    f"{float(grid_spacing.get('y', float('nan'))):.4g} "
+                    f"({int(grid_spacing.get('n_x', 0))}x{int(grid_spacing.get('n_y', 0))})"
+                )
+            info_text = "\n".join(
+                [
+                    f"border margin: {float(stats.get('border_margin', 0.0)):.4g}",
+                    grid_line,
+                    f"point NN distance min/median/max: {spacing}",
+                    f"agent step distance min/median/max: {step_size}",
+                ]
+            )
+            ax.text(
+                0.02,
+                0.98,
+                info_text,
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8,
+                bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "#333333", "alpha": 0.86},
+            )
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"Fixed Nyström continuous grid plot saved to: {save_path}")

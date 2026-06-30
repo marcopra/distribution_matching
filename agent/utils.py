@@ -48,8 +48,12 @@ class PointMazeNystromDebugHelper:
         self.wrapped_env = None
         self.env = None
         self._subsample_batch = None
+        self._subsample_batches = {}
+        self._batch_xy_points = {}
         self._fixed_xy_points = None
         self._fixed_actions = None
+        self._fixed_plot_stats = None
+        self._last_grid_spacing = None
 
     @property
     def fixed_xy_points(self):
@@ -58,6 +62,10 @@ class PointMazeNystromDebugHelper:
     @property
     def fixed_actions(self):
         return self._fixed_actions
+
+    @property
+    def fixed_plot_stats(self):
+        return self._fixed_plot_stats
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -72,8 +80,12 @@ class PointMazeNystromDebugHelper:
 
     def clear_cache(self):
         self._subsample_batch = None
+        self._subsample_batches = {}
+        self._batch_xy_points = {}
         self._fixed_xy_points = None
         self._fixed_actions = None
+        self._fixed_plot_stats = None
+        self._last_grid_spacing = None
 
     @staticmethod
     def _find_discrete_env(env):
@@ -316,6 +328,93 @@ class PointMazeNystromDebugHelper:
         grid_x, grid_y = np.meshgrid(xs, ys)
         return np.column_stack([grid_x.ravel(), grid_y.ravel()])
 
+    @staticmethod
+    def _nearest_neighbor_distances(points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if points.shape[0] < 2:
+            return np.empty((0,), dtype=np.float32)
+        deltas = points[:, None, :] - points[None, :, :]
+        distances = np.linalg.norm(deltas, axis=2)
+        np.fill_diagonal(distances, np.inf)
+        nearest = distances.min(axis=1)
+        return nearest[np.isfinite(nearest)].astype(np.float32, copy=False)
+
+    @staticmethod
+    def _spacing_summary(points: np.ndarray) -> Dict[str, float]:
+        nearest = PointMazeNystromDebugHelper._nearest_neighbor_distances(points)
+        if nearest.size == 0:
+            return {"min": float("nan"), "median": float("nan"), "max": float("nan")}
+        return {
+            "min": float(np.min(nearest)),
+            "median": float(np.median(nearest)),
+            "max": float(np.max(nearest)),
+        }
+
+    @staticmethod
+    def _regular_grid_spacing(lower: np.ndarray, upper: np.ndarray, n_x: int, n_y: int) -> Dict[str, float]:
+        spacing_x = float((upper[0] - lower[0]) / max(n_x - 1, 1))
+        spacing_y = float((upper[1] - lower[1]) / max(n_y - 1, 1))
+        return {"x": spacing_x, "y": spacing_y}
+
+    @staticmethod
+    def _thin_regular_grid_points(valid_points: np.ndarray, n_points: int) -> np.ndarray:
+        if valid_points.shape[0] <= n_points:
+            return valid_points[:n_points].astype(np.float32, copy=False)
+        indices = np.round(np.linspace(0, valid_points.shape[0] - 1, n_points)).astype(np.int64)
+        return valid_points[indices].astype(np.float32, copy=False)
+
+    def _regular_grid_candidates(
+            self,
+            lower: np.ndarray,
+            upper: np.ndarray,
+            wall_rectangles: np.ndarray,
+            margin: float,
+            n_points: int,
+        ) -> Tuple[np.ndarray, Dict[str, float]]:
+        span = np.maximum(upper - lower, 1e-6)
+        base_n_x = max(2, int(np.ceil(np.sqrt(n_points * (span[0] / span[1]) * self.oversample))))
+        base_n_y = max(2, int(np.ceil(n_points * self.oversample / base_n_x)))
+
+        best = None
+        for radius in (12, 28, 56):
+            for n_x in range(max(2, base_n_x - radius), base_n_x + radius + 1):
+                for n_y in range(max(2, base_n_y - radius), base_n_y + radius + 1):
+                    candidates = self._xy_grid(lower, upper, n_x, n_y)
+                    valid_points = candidates[self._points_outside_walls(candidates, wall_rectangles, margin)]
+                    valid_count = valid_points.shape[0]
+                    if valid_count < n_points:
+                        continue
+                    spacing = self._regular_grid_spacing(lower, upper, n_x, n_y)
+                    mean_spacing = 0.5 * (spacing["x"] + spacing["y"])
+                    spacing_mismatch = abs(spacing["x"] - spacing["y"]) / max(mean_spacing, 1e-12)
+                    extra = valid_count - n_points
+                    score = (spacing_mismatch, extra, n_x * n_y)
+                    if best is None or score < best[0]:
+                        best = (score, valid_points, spacing, n_x, n_y, valid_count)
+            if best is not None:
+                break
+
+        if best is None:
+            n_x, n_y = base_n_x, base_n_y
+            valid_points = np.empty((0, 2), dtype=np.float32)
+            for _ in range(8):
+                candidates = self._xy_grid(lower, upper, n_x, n_y)
+                valid_points = candidates[self._points_outside_walls(candidates, wall_rectangles, margin)]
+                if valid_points.shape[0] >= n_points:
+                    break
+                n_x, n_y = int(np.ceil(n_x * 1.25)) + 1, int(np.ceil(n_y * 1.25)) + 1
+
+            if valid_points.shape[0] < n_points:
+                raise RuntimeError(
+                    f"Could only place {valid_points.shape[0]} reachable PointMaze grid points; "
+                    f"requested {n_points}. Try reducing nystrom_grid_border_margin."
+                )
+            spacing = self._regular_grid_spacing(lower, upper, n_x, n_y)
+            return valid_points, {"x": spacing["x"], "y": spacing["y"], "n_x": int(n_x), "n_y": int(n_y)}
+
+        _, valid_points, spacing, n_x, n_y, _ = best
+        return valid_points, {"x": spacing["x"], "y": spacing["y"], "n_x": int(n_x), "n_y": int(n_y)}
+
     def _fixed_start_xy(self):
         debug_fn = self._env_method("get_debug_coordinates")
         debug_info = debug_fn() if callable(debug_fn) else {}
@@ -352,32 +451,21 @@ class PointMazeNystromDebugHelper:
         if np.any(upper <= lower):
             lower, upper, margin = layout["maze_lower"], layout["maze_upper"], 0.0
 
-        span = np.maximum(upper - lower, 1e-6)
-        n_x = max(2, int(np.ceil(np.sqrt(n_points * (span[0] / span[1]) * self.oversample))))
-        n_y = max(2, int(np.ceil(n_points * self.oversample / n_x)))
-
-        valid_points = np.empty((0, 2), dtype=np.float32)
-        for _ in range(8):
-            candidates = self._xy_grid(lower, upper, n_x, n_y)
-            valid_points = candidates[self._points_outside_walls(candidates, layout["wall_rectangles"], margin)]
-            if valid_points.shape[0] >= n_points:
-                break
-            n_x, n_y = int(np.ceil(n_x * 1.4)) + 1, int(np.ceil(n_y * 1.4)) + 1
-
-        if valid_points.shape[0] < n_points:
-            raise RuntimeError(
-                f"Could only place {valid_points.shape[0]} reachable PointMaze grid points; "
-                f"requested {n_points}. Try reducing nystrom_grid_border_margin."
-            )
-
-        indices = np.linspace(0, valid_points.shape[0] - 1, n_points)
-        selected = valid_points[np.round(indices).astype(np.int64)]
+        valid_points, grid_spacing = self._regular_grid_candidates(
+            lower,
+            upper,
+            layout["wall_rectangles"],
+            margin,
+            n_points,
+        )
 
         start_xy = self._fixed_start_xy()
-        if start_xy is not None and self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin)[0]:
-            nearest = int(np.argmin(np.sum((selected - start_xy) ** 2, axis=1)))
-            selected[nearest] = selected[0]
+        if start_xy is not None and not self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin)[0]:
+            start_xy = None
+        selected = self._thin_regular_grid_points(valid_points, n_points)
+        if start_xy is not None:
             selected[0] = start_xy
+        self._last_grid_spacing = grid_spacing
         return selected.astype(np.float32, copy=False)
 
     def _landmark_transition(self, agent, xy, action_idx):
@@ -396,28 +484,49 @@ class PointMazeNystromDebugHelper:
             next_obs = self._observation_from_xy(agent, next_position)
             reward = [float(reward_value)]
             discount = [0.0 if bool(terminated or truncated) else 1.0]
-            return obs, next_obs, reward, discount
+            return obs, next_obs, reward, discount, np.asarray(next_position, dtype=np.float32).reshape(-1)[:2]
 
         self._set_state(xy)
         obs = self._observation(agent)
         time_step = self.wrapped_env.step(int(action_idx))
         next_obs = self._observation(agent)
+        next_xy = self._proprio_observation().reshape(-1)[:2]
         reward = [float(getattr(time_step, "reward", 0.0))]
         discount = [float(getattr(time_step, "discount", 1.0))]
-        return obs, next_obs, reward, discount
+        return obs, next_obs, reward, discount, np.asarray(next_xy, dtype=np.float32)
 
     def _synthetic_transition_to_xy(self, agent, source_xy, target_xy):
         source_xy = np.asarray(source_xy, dtype=np.float32).reshape(-1)[:2]
         target_xy = np.asarray(target_xy, dtype=np.float32).reshape(-1)[:2]
         obs = self.observation_from_xy(agent, source_xy)
         next_obs = self.observation_from_xy(agent, target_xy)
-        return obs, next_obs, [0.0], [1.0]
+        return obs, next_obs, [0.0], [1.0], target_xy.astype(np.float32, copy=False)
 
-    def build_subsample_batch(self, agent):
-        if self._subsample_batch is not None:
+    @staticmethod
+    def _step_summary(source_xy: np.ndarray, next_xy: np.ndarray) -> Dict[str, float]:
+        source_xy = np.asarray(source_xy, dtype=np.float32).reshape(-1, 2)
+        next_xy = np.asarray(next_xy, dtype=np.float32).reshape(-1, 2)
+        distances = np.linalg.norm(next_xy - source_xy, axis=1)
+        finite = distances[np.isfinite(distances)]
+        if finite.size == 0:
+            return {"min": float("nan"), "median": float("nan"), "max": float("nan")}
+        return {
+            "min": float(np.min(finite)),
+            "median": float(np.median(finite)),
+            "max": float(np.max(finite)),
+        }
+
+    def build_subsample_batch(self, agent, n_transitions: Optional[int] = None):
+        n_transitions = int(
+            n_transitions
+            if n_transitions is not None
+            else agent.subsamples if agent.subsamples is not None else agent.batch_size_actor
+        )
+        if n_transitions in self._subsample_batches:
+            self._subsample_batch = self._subsample_batches[n_transitions]
+            self._fixed_xy_points = self._batch_xy_points.get(n_transitions)
             return self._subsample_batch
 
-        n_transitions = int(agent.subsamples if agent.subsamples is not None else agent.batch_size_actor)
         if n_transitions % agent.n_actions != 0:
             raise ValueError(
                 f"Fixed continuous debug dataset size={n_transitions} must be divisible by "
@@ -441,10 +550,13 @@ class PointMazeNystromDebugHelper:
                 self._landmark_transition(agent, xy, action_idx)
                 for xy, action_idx in zip(xy_points, actions_np)
             ]
+        next_xy_points = np.stack([transition[4] for transition in transitions]).astype(np.float32, copy=False)
+        step_source_xy = xy_points[1:] if xy_points.shape[0] > 1 else xy_points
+        step_next_xy = next_xy_points[1:] if next_xy_points.shape[0] > 1 else next_xy_points
         if transitions:
             source_xy = state_points[1] if state_points.shape[0] > 1 else state_points[0]
             transitions[0] = self._synthetic_transition_to_xy(agent, source_xy, state_points[0])
-        obs_list, next_obs_list, rewards, discounts = zip(*transitions)
+        obs_list, next_obs_list, rewards, discounts, _ = zip(*transitions)
 
         obs = torch.as_tensor(np.stack(obs_list), dtype=torch.float32, device=agent.device)
         next_obs = torch.as_tensor(np.stack(next_obs_list), dtype=torch.float32, device=agent.device)
@@ -453,8 +565,17 @@ class PointMazeNystromDebugHelper:
         discount = torch.as_tensor(discounts, dtype=agent.compute_dtype, device=agent.device)
 
         self._subsample_batch = (obs, action, reward, discount, next_obs)
+        self._subsample_batches[n_transitions] = self._subsample_batch
+        self._batch_xy_points[n_transitions] = state_points
         self._fixed_xy_points = state_points
         self._fixed_actions = actions_np
+        self._fixed_plot_stats = {
+            "border_margin": float(self.border_margin),
+            "oversample": float(self.oversample),
+            "grid_spacing": getattr(self, "_last_grid_spacing", None),
+            "point_spacing": self._spacing_summary(state_points),
+            "step_size": self._step_summary(step_source_xy, step_next_xy),
+        }
         dataset_name = "Nyström grid" if agent.subsamples is not None else "debug grid"
         ColorPrint.yellow(
             f"Using fixed continuous {dataset_name} with {n_states} reachable XY states "
@@ -464,9 +585,12 @@ class PointMazeNystromDebugHelper:
         self.save_fixed_points_plot(agent.n_actions)
         return self._subsample_batch
 
-    def fixed_actor_batch(self, agent):
-        obs, action, reward, _, next_obs = self.build_subsample_batch(agent)
+    def fixed_actor_batch(self, agent, n_transitions: Optional[int] = None):
+        obs, action, reward, _, next_obs = self.build_subsample_batch(agent, n_transitions=n_transitions)
         return agent._make_actor_batch(obs, action, next_obs, reward)
+
+    def fixed_xy_points_for_size(self, n_transitions: int):
+        return self._batch_xy_points.get(int(n_transitions))
 
     def fixed_encoder_batch(self, agent):
         actor_batch = self.fixed_actor_batch(agent)
@@ -503,6 +627,7 @@ class PointMazeNystromDebugHelper:
             layout=self.maze_layout(),
             points=self._fixed_xy_points,
             n_actions=n_actions,
+            stats=self._fixed_plot_stats,
         )
 
 class Encoder(nn.Module):
