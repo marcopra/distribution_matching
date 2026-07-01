@@ -14,23 +14,21 @@ class DistributionMatcher:
     def __init__(self, 
                  lambda_reg: float,
                  gamma: float = 0.9, 
+                 pca_truncation: Optional[int] = None,
                  svd_truncation: Optional[int] = None,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
-                 kernel_bandwidth_percentile: Optional[float] = None,
                  device: str = "cpu"):
         
         self.gamma = gamma
         self.lambda_reg = lambda_reg
         self.device = device  
-        self.svd_truncation = svd_truncation  
+        self.pca_truncation = pca_truncation if pca_truncation is not None else svd_truncation
         self.kernel_type = kernel_type
         self.kernel_bandwidth = kernel_bandwidth
-        self.kernel_bandwidth_percentile = kernel_bandwidth_percentile
         self.kernel_fn = utils.build_kernel_fn(
             kernel_type,
             bandwidth=self.kernel_bandwidth,
-            bandwidth_percentile=self.kernel_bandwidth_percentile,
         )
         self.state_kernel_fn = None
 
@@ -222,7 +220,12 @@ class DistributionMatcher:
         inv_A_nystrom = self.pseudo_inverse_low_rank_svd(A_nystrom, svd_rank=svd_truncation)
         return inv_A_nystrom@K_nm.T
     
-    def compute_B_and_projections(self, K_nm: torch.Tensor, K_mm: torch.Tensor, components: int = 10000) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_B_and_projections(
+            self,
+            K_nm: torch.Tensor,
+            K_mm: torch.Tensor,
+            components: Optional[int] = 10000,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
       
         m = K_nm.shape[1]
 
@@ -231,7 +234,7 @@ class DistributionMatcher:
 
         B = torch.linalg.solve(A_nystrom, K_nm.T) # [m, n]
 
-        effective_components = min(m, components)
+        effective_components = m if components is None else min(m, int(components))
         eig_vals_r, eig_vecs_r = torch.linalg.eigh(
             K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
         )
@@ -309,7 +312,7 @@ class DistributionMatcher:
             B = self.compute_B_nystrom(
                 psi_all_obs_action,
                 psi_sub_obs_action,
-                svd_truncation=self.svd_truncation,
+                svd_truncation=self.pca_truncation,
                 phi_all_obs=phi_all_obs,
                 phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
                 all_actions=all_actions,
@@ -502,7 +505,7 @@ class DistributionMatcher:
             B = self.compute_B_nystrom(
                 psi_all_obs_action,
                 psi_sub_obs_action,
-                svd_truncation=self.svd_truncation,
+                svd_truncation=self.pca_truncation,
                 phi_all_obs=phi_all_obs,
                 phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
                 all_actions=all_actions,

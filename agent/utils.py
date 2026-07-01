@@ -42,9 +42,10 @@ class EncodedActorUpdateData:
 class PointMazeNystromDebugHelper:
     """Build fixed PointMaze landmark transitions for Nyström debugging."""
 
-    def __init__(self, border_margin: float = 0.05, oversample: float = 2.0):
+    def __init__(self, border_margin: float = 0.05, oversample: float = 2.0, exact_grid: bool = False):
         self.border_margin = float(border_margin)
         self.oversample = float(oversample)
+        self.exact_grid = bool(exact_grid)
         self.wrapped_env = None
         self.env = None
         self._subsample_batch = None
@@ -357,6 +358,81 @@ class PointMazeNystromDebugHelper:
         return {"x": spacing_x, "y": spacing_y}
 
     @staticmethod
+    def _exact_grid_shape(n_points: int, lower: np.ndarray, upper: np.ndarray) -> Tuple[int, int]:
+        span = np.maximum(np.asarray(upper, dtype=np.float32) - np.asarray(lower, dtype=np.float32), 1e-6)
+        aspect = float(span[0] / span[1])
+        n_x = max(2, int(round(np.sqrt(max(n_points, 1) * aspect))))
+        n_y = max(2, int(round(n_points / n_x)))
+        candidates = []
+        for dx in range(-4, 5):
+            for dy in range(-4, 5):
+                cand_x = max(2, n_x + dx)
+                cand_y = max(2, n_y + dy)
+                product = cand_x * cand_y
+                spacing = PointMazeNystromDebugHelper._regular_grid_spacing(lower, upper, cand_x, cand_y)
+                mean_spacing = 0.5 * (spacing["x"] + spacing["y"])
+                spacing_mismatch = abs(spacing["x"] - spacing["y"]) / max(mean_spacing, 1e-12)
+                candidates.append((abs(product - n_points), spacing_mismatch, product, cand_x, cand_y))
+        _, _, _, best_x, best_y = min(candidates)
+        return int(best_x), int(best_y)
+
+    def _exact_feasible_grid_candidates(
+            self,
+            lower: np.ndarray,
+            upper: np.ndarray,
+            wall_rectangles: np.ndarray,
+            n_points: int,
+        ) -> Tuple[np.ndarray, Dict[str, float]]:
+        base_n_x, base_n_y = self._exact_grid_shape(n_points, lower, upper)
+        best = None
+        for radius in (8, 20, 44, 80):
+            for n_x in range(max(2, base_n_x - radius), base_n_x + radius + 1):
+                for n_y in range(max(2, base_n_y - radius), base_n_y + radius + 1):
+                    candidates = self._xy_grid(lower, upper, n_x, n_y)
+                    valid_points = candidates[self._points_outside_walls(candidates, wall_rectangles, margin=0.0)]
+                    valid_count = valid_points.shape[0]
+                    if valid_count == 0:
+                        continue
+                    spacing = self._regular_grid_spacing(lower, upper, n_x, n_y)
+                    mean_spacing = 0.5 * (spacing["x"] + spacing["y"])
+                    spacing_mismatch = abs(spacing["x"] - spacing["y"]) / max(mean_spacing, 1e-12)
+                    score = (abs(valid_count - n_points), spacing_mismatch, n_x * n_y)
+                    if best is None or score < best[0]:
+                        best = (score, valid_points, spacing, n_x, n_y, valid_count)
+            if best is not None and best[0][0] == 0:
+                break
+
+        if best is None:
+            raise RuntimeError("Could not build any feasible PointMaze exact-grid points.")
+
+        _, valid_points, spacing, n_x, n_y, valid_count = best
+        grid_spacing = {
+            "x": spacing["x"],
+            "y": spacing["y"],
+            "n_x": int(n_x),
+            "n_y": int(n_y),
+            "requested_points": int(n_points),
+            "adjusted_points": int(valid_count),
+            "exact_grid": True,
+            "feasible_points": int(valid_count),
+        }
+        return valid_points.astype(np.float32, copy=False), grid_spacing
+
+    @staticmethod
+    def _put_start_first(points: np.ndarray, start_xy: Optional[np.ndarray]) -> np.ndarray:
+        if start_xy is None or points.shape[0] == 0:
+            return points
+        start_xy = np.asarray(start_xy, dtype=np.float32).reshape(1, 2)
+        selected = points.astype(np.float32, copy=True)
+        matches = np.where(np.all(np.isclose(selected, start_xy, atol=1e-6), axis=1))[0]
+        if matches.size > 0:
+            start_idx = int(matches[0])
+            selected[[0, start_idx]] = selected[[start_idx, 0]]
+        else:
+            selected[0] = start_xy[0]
+        return selected
+
+    @staticmethod
     def _thin_regular_grid_points(valid_points: np.ndarray, n_points: int) -> np.ndarray:
         if valid_points.shape[0] <= n_points:
             return valid_points[:n_points].astype(np.float32, copy=False)
@@ -429,8 +505,27 @@ class PointMazeNystromDebugHelper:
         raw_lower = layout["maze_lower"].astype(np.float32, copy=False)
         raw_upper = layout["maze_upper"].astype(np.float32, copy=False)
         raw_span = raw_upper - raw_lower
+        if self.exact_grid and abs(float(raw_span[1])) > 1e-6:
+            selected, self._last_grid_spacing = self._exact_feasible_grid_candidates(
+                raw_lower,
+                raw_upper,
+                layout["wall_rectangles"],
+                n_points,
+            )
+            start_xy = self._fixed_start_xy()
+            if start_xy is not None and not self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin=0.0)[0]:
+                start_xy = None
+            selected = self._put_start_first(selected, start_xy)
+            if selected.shape[0] != n_points:
+                ColorPrint.yellow(
+                    f"Exact PointMaze grid adjusted states from {n_points} to {selected.shape[0]} "
+                    f"({self._last_grid_spacing['n_x']} x {self._last_grid_spacing['n_y']} lattice, "
+                    f"{selected.shape[0]} feasible)."
+                )
+            return selected.astype(np.float32, copy=False)
+
         if abs(float(raw_span[1])) <= 1e-6:
-            margin = max(self.border_margin, 0.0)
+            margin = 0.0 if self.exact_grid else max(self.border_margin, 0.0)
             x_lower = float(raw_lower[0] + margin)
             x_upper = float(raw_upper[0] - margin)
             if x_upper <= x_lower:
@@ -522,12 +617,20 @@ class PointMazeNystromDebugHelper:
             if n_transitions is not None
             else agent.subsamples if agent.subsamples is not None else agent.batch_size_actor
         )
+        requested_transitions = n_transitions
         if n_transitions in self._subsample_batches:
             self._subsample_batch = self._subsample_batches[n_transitions]
             self._fixed_xy_points = self._batch_xy_points.get(n_transitions)
             return self._subsample_batch
 
-        if n_transitions % agent.n_actions != 0:
+        if n_transitions % agent.n_actions != 0 and self.exact_grid:
+            n_states = max(1, int(round(n_transitions / agent.n_actions)))
+            ColorPrint.yellow(
+                f"Exact PointMaze grid adjusted transitions from {n_transitions} "
+                f"to {n_states * agent.n_actions} so every state has all actions."
+            )
+            n_transitions = n_states * agent.n_actions
+        elif n_transitions % agent.n_actions != 0:
             raise ValueError(
                 f"Fixed continuous debug dataset size={n_transitions} must be divisible by "
                 f"n_actions={agent.n_actions} so each sampled state can include all actions. "
@@ -536,6 +639,14 @@ class PointMazeNystromDebugHelper:
 
         n_states = n_transitions // agent.n_actions
         state_points = self.build_grid_points(n_states)
+        n_states = state_points.shape[0]
+        adjusted_transitions = n_states * agent.n_actions
+        if adjusted_transitions != n_transitions:
+            ColorPrint.yellow(
+                f"Exact PointMaze grid adjusted transitions from {n_transitions} "
+                f"to {adjusted_transitions}."
+            )
+            n_transitions = adjusted_transitions
         xy_points = np.repeat(state_points, agent.n_actions, axis=0)
         actions_np = np.tile(np.arange(agent.n_actions, dtype=np.int64), n_states)
 
@@ -554,8 +665,7 @@ class PointMazeNystromDebugHelper:
         step_source_xy = xy_points[1:] if xy_points.shape[0] > 1 else xy_points
         step_next_xy = next_xy_points[1:] if next_xy_points.shape[0] > 1 else next_xy_points
         if transitions:
-            source_xy = state_points[1] if state_points.shape[0] > 1 else state_points[0]
-            transitions[0] = self._synthetic_transition_to_xy(agent, source_xy, state_points[0])
+            transitions[0] = self._synthetic_transition_to_xy(agent, state_points[0], state_points[0])
         obs_list, next_obs_list, rewards, discounts, _ = zip(*transitions)
 
         obs = torch.as_tensor(np.stack(obs_list), dtype=torch.float32, device=agent.device)
@@ -566,7 +676,9 @@ class PointMazeNystromDebugHelper:
 
         self._subsample_batch = (obs, action, reward, discount, next_obs)
         self._subsample_batches[n_transitions] = self._subsample_batch
+        self._subsample_batches[requested_transitions] = self._subsample_batch
         self._batch_xy_points[n_transitions] = state_points
+        self._batch_xy_points[requested_transitions] = state_points
         self._fixed_xy_points = state_points
         self._fixed_actions = actions_np
         self._fixed_plot_stats = {
