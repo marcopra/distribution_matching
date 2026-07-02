@@ -229,15 +229,22 @@ class DistributionMatcher:
       
         m = K_nm.shape[1]
 
+        # A_nystrom = K_nm.T @ K_nm
+        # A_nystrom.add_(self.lambda_reg * K_mm)
+        # A_nystrom.diagonal().add_(1e-6)
 
-        A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm + + 1e-6 * torch.eye(m, dtype=torch.float64, device=self.device)# [m, m] # TODO add N
-
+        A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm + 1e-6 * torch.eye(m, dtype=torch.float64, device=self.device)# [m, m] # TODO add N
         B = torch.linalg.solve(A_nystrom, K_nm.T) # [m, n]
-
         effective_components = m if components is None else min(m, int(components))
+        
+        # K = K_mm.clone()
+        # K.diagonal().add_(1e-8)
+        
         eig_vals_r, eig_vecs_r = torch.linalg.eigh(
             K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
         )
+
+        eig_vals_r, eig_vecs_r = torch.linalg.eigh(K_mm)
         U_r = eig_vecs_r[:, -effective_components:]
 
         return B, U_r
@@ -429,16 +436,21 @@ class DistributionMatcher:
         S[-1, -1] = 1.0 - self.gamma
 
         tilde_S_r = tilde_eig_vecs_r.T @ S @ tilde_eig_vecs_r
+        # del S, BM
         tilde_S_r_reg = tilde_S_r + 1e-6 * torch.eye(tilde_S_r.shape[0], device=tilde_S_r.device, dtype=tilde_S_r.dtype)
+        # del tilde_S_r
 
         tilde_phi_kernel = self.state_kernel(tilde_phi_sub_next_obs, tilde_phi_sub_next_obs) 
         tilde_phi_kernel_r = tilde_eig_vecs_r.T @ tilde_phi_kernel @ tilde_eig_vecs_r
+        # del tilde_phi_kernel, tilde_phi_sub_next_obs
         
         tilde_B = torch.zeros(B_nystrom.shape[0] + 1, B_nystrom.shape[1] + 1, device=B_nystrom.device, dtype=B_nystrom.dtype)
         tilde_B[:-1, :-1] = B_nystrom
         tilde_B[-1, -1] = 1.0
         tilde_B_r = tilde_eig_vecs_r.T @  tilde_B #@ tilde_eig_vecs_r
-        left_term_r = tilde_B_r.T @ torch.linalg.solve(tilde_S_r_reg.T,tilde_phi_kernel_r)
+        inv_tilde_S_r_reg = torch.linalg.solve(tilde_S_r_reg, tilde_phi_kernel_r) 
+        # del tilde_phi_kernel_r
+        left_term_r = tilde_B_r.T @ inv_tilde_S_r_reg
        
         # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
         tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
