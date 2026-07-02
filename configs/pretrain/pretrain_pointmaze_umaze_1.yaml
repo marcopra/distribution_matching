@@ -41,7 +41,7 @@ update_encoder: true
   
 agent:
   feature_dim: 256
-  embeddings: true
+  embeddings: false
   lr_actor: 10
   pmd_steps: 10
   update_every_steps: 1

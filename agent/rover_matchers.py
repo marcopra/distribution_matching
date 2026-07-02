@@ -229,20 +229,20 @@ class DistributionMatcher:
       
         m = K_nm.shape[1]
 
-        # A_nystrom = K_nm.T @ K_nm
-        # A_nystrom.add_(self.lambda_reg * K_mm)
-        # A_nystrom.diagonal().add_(1e-6)
+        A_nystrom = K_nm.T @ K_nm
+        A_nystrom.add_(self.lambda_reg * K_mm)
+        A_nystrom.diagonal().add_(1e-6)
 
-        A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm + 1e-6 * torch.eye(m, dtype=torch.float64, device=self.device)# [m, m] # TODO add N
+        # A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm + 1e-6 * torch.eye(m, dtype=torch.float64, device=self.device)# [m, m] # TODO add N
         B = torch.linalg.solve(A_nystrom, K_nm.T) # [m, n]
         effective_components = m if components is None else min(m, int(components))
         
-        # K = K_mm.clone()
-        # K.diagonal().add_(1e-8)
+        K = K_mm.clone()
+        K.diagonal().add_(1e-8)
         
-        eig_vals_r, eig_vecs_r = torch.linalg.eigh(
-            K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
-        )
+        # eig_vals_r, eig_vecs_r = torch.linalg.eigh(
+        #     K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
+        # )
 
         eig_vals_r, eig_vecs_r = torch.linalg.eigh(K_mm)
         U_r = eig_vecs_r[:, -effective_components:]
