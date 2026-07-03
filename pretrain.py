@@ -26,7 +26,8 @@ import ale_py
 from omegaconf import open_dict
 from agent.utils_debug_visualization import (
     extract_eval_trajectory_point,
-    save_eval_trajectory_plots,
+    save_maze_trajectory_overlay_plot,
+    # save_eval_trajectory_plots,
 )
 
 
@@ -287,22 +288,28 @@ class Workspace:
 
         save_dir = getattr(self.cfg, "eval_trajectory_plot_dir", "eval_trajectory_plots")
         save_dir = self.work_dir / Path(save_dir)
-        styles = getattr(self.cfg, "eval_trajectory_plot_styles", None)
-        if styles is not None:
-            styles = tuple(styles)
-
         for checkpoint in self._eval_trajectory_plot_checkpoints(len(trajectories)):
             checkpoint_trajectories = trajectories[:checkpoint]
             try:
-                save_eval_trajectory_plots(
+                save_maze_trajectory_overlay_plot(
                     trajectories=checkpoint_trajectories,
                     env=self.eval_env,
                     step=self.global_frame,
                     save_dir=save_dir,
-                    styles=styles,
                 )
+                # Previous multi-style trajectory plotting intentionally disabled:
+                # styles = getattr(self.cfg, "eval_trajectory_plot_styles", None)
+                # if styles is not None:
+                #     styles = tuple(styles)
+                # save_eval_trajectory_plots(
+                #     trajectories=checkpoint_trajectories,
+                #     env=self.eval_env,
+                #     step=self.global_frame,
+                #     save_dir=save_dir,
+                #     styles=styles,
+                # )
             except Exception as exc:
-                print(f"⚠ Could not generate evaluation trajectory plots: {exc}")
+                print(f"Could not generate evaluation trajectory plots: {exc}")
 
     def _eval_trajectory_plot_checkpoints(self, n_trajectories):
         plot_episodes = getattr(self.cfg, "eval_trajectory_plot_episodes", None)
@@ -463,17 +470,43 @@ class Workspace:
             for obj, attr, value in reversed(restored_refs):
                 setattr(obj, attr, value)
 
+    def close(self):
+        replay_iter = getattr(self, "_replay_iter", None)
+        shutdown_workers = getattr(replay_iter, "_shutdown_workers", None)
+        if callable(shutdown_workers):
+            try:
+                shutdown_workers()
+            except Exception as exc:
+                print(f"Could not shut down replay workers cleanly: {exc}")
+
+        for recorder_name in ("video_recorder", "train_video_recorder"):
+            recorder = getattr(self, recorder_name, None)
+            if recorder is not None and hasattr(recorder, "frames"):
+                recorder.frames = []
+
+        for env_name in ("eval_env", "train_env"):
+            env = getattr(self, env_name, None)
+            close = getattr(env, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    print(f"Could not close {env_name} cleanly: {exc}")
+
 
 @hydra.main(config_path='configs', config_name='pretrain/pretrain_atari', version_base='1.1')
 def main(cfg):
     from pretrain import Workspace as W
     root_dir = Path.cwd()
     workspace = W(cfg)
-    snapshot = root_dir / 'snapshot.pt'
-    if snapshot.exists():
-        print(f'resuming: {snapshot}')
-        workspace.load_snapshot()
-    workspace.train()
+    try:
+        snapshot = root_dir / 'snapshot.pt'
+        if snapshot.exists():
+            print(f'resuming: {snapshot}')
+            workspace.load_snapshot()
+        workspace.train()
+    finally:
+        workspace.close()
 
 
 if __name__ == '__main__':

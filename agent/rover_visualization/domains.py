@@ -502,6 +502,183 @@ def _paper_trajectory_rc() -> dict:
     }
 
 
+def _get_pointmaze_wall_layout(env):
+    method = _get_env_method(env, "get_debug_maze_layout")
+    if not callable(method):
+        return None
+
+    layout = method()
+    if not isinstance(layout, dict):
+        return None
+
+    required = ("maze_lower", "maze_upper", "wall_rectangles")
+    if any(key not in layout for key in required):
+        return None
+
+    return {
+        "maze_lower": np.asarray(layout["maze_lower"], dtype=np.float32),
+        "maze_upper": np.asarray(layout["maze_upper"], dtype=np.float32),
+        "wall_rectangles": np.asarray(layout["wall_rectangles"], dtype=np.float32).reshape(-1, 4),
+    }
+
+
+def _smooth_trajectory_for_overlay(trajectory: np.ndarray, points_per_segment: int = 4) -> np.ndarray:
+    if trajectory.shape[0] < 3:
+        return trajectory
+
+    pieces = []
+    for idx in range(trajectory.shape[0] - 1):
+        p0 = trajectory[max(idx - 1, 0)]
+        p1 = trajectory[idx]
+        p2 = trajectory[idx + 1]
+        p3 = trajectory[min(idx + 2, trajectory.shape[0] - 1)]
+        t_values = np.linspace(0.0, 1.0, points_per_segment, endpoint=False, dtype=np.float32)
+        for t in t_values:
+            t2 = t * t
+            t3 = t2 * t
+            point = 0.5 * (
+                (2.0 * p1)
+                + (-p0 + p2) * t
+                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+            )
+            pieces.append(point)
+    pieces.append(trajectory[-1])
+    return np.asarray(pieces, dtype=np.float32)
+
+
+def _draw_overlay_maze_walls(ax, wall_rectangles: np.ndarray, wall_color: str) -> None:
+    if wall_rectangles.size == 0:
+        return
+
+    rounded = np.round(wall_rectangles, decimals=5)
+    wall_cells = {
+        (float(x0), float(y0), float(width), float(height))
+        for x0, y0, width, height in rounded
+    }
+
+    for x0, y0, width, height in wall_cells:
+        ax.add_patch(
+            patches.Rectangle(
+                (x0, y0),
+                width,
+                height,
+                facecolor=wall_color,
+                edgecolor="none",
+                zorder=1,
+            )
+        )
+
+    for x0, y0, width, height in wall_cells:
+        neighbors = (
+            ((x0, y0 - height, width, height), ((x0, x0 + width), (y0, y0))),
+            ((x0, y0 + height, width, height), ((x0, x0 + width), (y0 + height, y0 + height))),
+            ((x0 - width, y0, width, height), ((x0, x0), (y0, y0 + height))),
+            ((x0 + width, y0, width, height), ((x0 + width, x0 + width), (y0, y0 + height))),
+        )
+        for neighbor, segment in neighbors:
+            if neighbor in wall_cells:
+                continue
+            xs, ys = segment
+            ax.plot(
+                xs,
+                ys,
+                color="black",
+                linewidth=2.4,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                zorder=3,
+            )
+
+
+def save_maze_trajectory_overlay_plot(
+    trajectories,
+    env,
+    step: int,
+    save_dir: str | os.PathLike = "eval_trajectory_plots",
+) -> dict[str, str]:
+    trajectories = _prepare_trajectories(trajectories)
+    if not trajectories:
+        return {}
+
+    layout = _get_pointmaze_wall_layout(env)
+    if layout is None:
+        return save_eval_trajectory_plots(
+            trajectories=trajectories,
+            env=env,
+            step=step,
+            save_dir=save_dir,
+            styles=("colored",),
+        )
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"eval_trajectories_step_{step}_ntraj_{len(trajectories)}_maze_overlay.png"
+
+    lower = layout["maze_lower"]
+    upper = layout["maze_upper"]
+    wall_rectangles = layout["wall_rectangles"]
+    span = upper - lower
+    pad = 0.35 * float(max(span[0], span[1])) / 12.0
+
+    wall_color = "#2f3f58"
+    colors = plt.get_cmap("plasma")(np.linspace(0.15, 0.85, max(len(trajectories), 2)))
+
+    with plt.rc_context(
+        {
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "savefig.transparent": False,
+            "lines.solid_capstyle": "round",
+            "lines.solid_joinstyle": "round",
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(8.0, 6.05))
+        ax.set_facecolor("white")
+
+        _draw_overlay_maze_walls(ax, wall_rectangles, wall_color)
+
+        for idx, trajectory in enumerate(trajectories):
+            path = _smooth_trajectory_for_overlay(trajectory)
+            color = colors[idx]
+            ax.plot(
+                path[:, 0],
+                path[:, 1],
+                color=color,
+                linewidth=2.8,
+                alpha=0.9,
+                zorder=5,
+            )
+            if path.shape[0] >= 2:
+                start = max(path.shape[0] - 5, 0)
+                ax.annotate(
+                    "",
+                    xy=path[-1],
+                    xytext=path[start],
+                    arrowprops=dict(
+                        arrowstyle="-|>",
+                        color=color,
+                        lw=2.8,
+                        mutation_scale=8.0,
+                        shrinkA=0.0,
+                        shrinkB=0.0,
+                    ),
+                    zorder=6,
+                )
+
+        ax.set_xlim(float(lower[0] - pad), float(upper[0] + pad))
+        ax.set_ylim(float(lower[1] - pad), float(upper[1] + pad))
+        ax.set_aspect("equal", adjustable="box")
+        ax.axis("off")
+        fig.subplots_adjust(left=0.015, right=0.985, bottom=0.015, top=0.985)
+        fig.savefig(save_path, dpi=300)
+        plt.close(fig)
+
+    print(f"Evaluation trajectory maze overlay saved: {save_path}")
+    return {"maze_overlay": str(save_path)}
+
+
 def save_eval_trajectory_plots(
     trajectories,
     env,
