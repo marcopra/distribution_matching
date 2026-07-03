@@ -244,7 +244,7 @@ class DistributionMatcher:
         #     K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
         # )
 
-        eig_vals_r, eig_vecs_r = torch.linalg.eigh(K_mm)
+        eig_vals_r, eig_vecs_r = torch.linalg.eigh(K)
         U_r = eig_vecs_r[:, -effective_components:]
 
         return B, U_r
@@ -448,7 +448,7 @@ class DistributionMatcher:
         tilde_B[:-1, :-1] = B_nystrom
         tilde_B[-1, -1] = 1.0
         tilde_B_r = tilde_eig_vecs_r.T @  tilde_B #@ tilde_eig_vecs_r
-        inv_tilde_S_r_reg = torch.linalg.solve(tilde_S_r_reg, tilde_phi_kernel_r) 
+        inv_tilde_S_r_reg = torch.linalg.solve(tilde_S_r_reg.T, tilde_phi_kernel_r) 
         # del tilde_phi_kernel_r
         left_term_r = tilde_B_r.T @ inv_tilde_S_r_reg
        
