@@ -105,6 +105,45 @@ class ContinuousCorridorEnvTest(unittest.TestCase):
         np.testing.assert_allclose(helper.fixed_xy_points[-1], [max_x, env._center_y()], atol=1e-6)
         self.assertTrue(np.all(np.diff(helper.fixed_xy_points[1:, 0]) > 0.0))
 
+    def test_pointmaze_grid_keeps_start_on_wall_boundary(self):
+        helper = PointMazeNystromDebugHelper(border_margin=0.0, exact_grid=True)
+        wall_rectangles = np.array([[1.0, -0.5, 1.0, 1.0]], dtype=np.float32)
+
+        boundary_start = np.array([1.0, 0.0], dtype=np.float32)
+        interior_wall = np.array([1.5, 0.0], dtype=np.float32)
+        outside_flags = helper._points_outside_walls(
+            np.stack([boundary_start, interior_wall]),
+            wall_rectangles,
+            margin=0.0,
+        )
+
+        self.assertEqual(outside_flags.tolist(), [True, False])
+
+        helper.maze_layout = lambda: {
+            "maze_lower": np.array([0.0, -1.0], dtype=np.float32),
+            "maze_upper": np.array([3.0, 1.0], dtype=np.float32),
+            "wall_rectangles": wall_rectangles,
+            "walkable_rectangles": np.array(
+                [
+                    [0.0, -1.0, 1.0, 2.0],
+                    [2.0, -1.0, 1.0, 2.0],
+                ],
+                dtype=np.float32,
+            ),
+        }
+        helper._fixed_start_xy = lambda: boundary_start
+
+        points = helper.build_grid_points(6)
+
+        np.testing.assert_allclose(points[0], boundary_start, atol=1e-6)
+        feasible = helper._feasible_points_mask(
+            points[1:],
+            wall_rectangles,
+            helper.maze_layout()["walkable_rectangles"],
+            margin=0.0,
+        )
+        self.assertTrue(np.all(feasible))
+
 
 if __name__ == "__main__":
     unittest.main()

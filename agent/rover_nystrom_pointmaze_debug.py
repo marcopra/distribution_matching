@@ -1290,7 +1290,7 @@ class RoverAgent:
                         facecolor="black",
                         edgecolor="black",
                         linewidth=0.5,
-                        zorder=3,
+                        zorder=1,
                     )
                 )
             lower = np.asarray(layout["maze_lower"], dtype=np.float32)
@@ -1303,7 +1303,7 @@ class RoverAgent:
                     fill=False,
                     edgecolor="black",
                     linewidth=1.2,
-                    zorder=4,
+                    zorder=2,
                 )
             )
             ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
@@ -1313,8 +1313,8 @@ class RoverAgent:
             ax.set_xlim(float(points[:, 0].min()) - pad, float(points[:, 0].max()) + pad)
             ax.set_ylim(float(points[:, 1].min()) - pad, float(points[:, 1].max()) + pad)
 
-        ax.scatter(points[:, 0], points[:, 1], s=8, c="#ff7f0e", linewidths=0.0, alpha=0.9)
-        ax.scatter(points[0, 0], points[0, 1], marker="*", s=130, c="white", edgecolors="black", linewidths=0.9, zorder=5)
+        ax.scatter(points[:, 0], points[:, 1], s=8, c="#ff7f0e", linewidths=0.0, alpha=0.9, zorder=8)
+        ax.scatter(points[0, 0], points[0, 1], marker="*", s=130, c="white", edgecolors="black", linewidths=0.9, zorder=9)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
@@ -1662,5 +1662,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        exit()
+        # exit()
         return metrics

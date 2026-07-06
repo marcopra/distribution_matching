@@ -277,12 +277,14 @@ class PointMazeNystromDebugHelper:
         maze_lower = np.asarray(layout.get("maze_lower"), dtype=np.float32).reshape(-1)
         maze_upper = np.asarray(layout.get("maze_upper"), dtype=np.float32).reshape(-1)
         wall_rectangles = np.asarray(layout.get("wall_rectangles"), dtype=np.float32).reshape(-1, 4)
+        walkable_rectangles = np.asarray(layout.get("walkable_rectangles", []), dtype=np.float32).reshape(-1, 4)
         if maze_lower.size != 2 or maze_upper.size != 2:
             raise RuntimeError("PointMaze layout must provide 2D maze_lower and maze_upper bounds.")
         return {
             "maze_lower": maze_lower[:2],
             "maze_upper": maze_upper[:2],
             "wall_rectangles": wall_rectangles,
+            "walkable_rectangles": walkable_rectangles,
         }
 
     def _layout_from_unwrapped_maze(self):
@@ -292,7 +294,7 @@ class PointMazeNystromDebugHelper:
             return None
 
         half_cell = 0.5 * float(getattr(maze, "maze_size_scaling", 1.0))
-        all_rectangles, wall_rectangles = [], []
+        all_rectangles, wall_rectangles, walkable_rectangles = [], [], []
         for row_idx, row in enumerate(maze.maze_map):
             for col_idx, cell in enumerate(row):
                 center = maze.cell_rowcol_to_xy(np.array([row_idx, col_idx], dtype=np.int32))
@@ -303,6 +305,8 @@ class PointMazeNystromDebugHelper:
                 all_rectangles.append(rect)
                 if cell == 1:
                     wall_rectangles.append(rect)
+                else:
+                    walkable_rectangles.append(rect)
 
         if not all_rectangles:
             return None
@@ -311,6 +315,7 @@ class PointMazeNystromDebugHelper:
             "maze_lower": all_rectangles[:, :2].min(axis=0),
             "maze_upper": (all_rectangles[:, :2] + all_rectangles[:, 2:4]).max(axis=0),
             "wall_rectangles": np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4),
+            "walkable_rectangles": np.asarray(walkable_rectangles, dtype=np.float32).reshape(-1, 4),
         }
 
     @staticmethod
@@ -319,8 +324,34 @@ class PointMazeNystromDebugHelper:
             return np.ones(points.shape[0], dtype=bool)
         wall_lower = wall_rectangles[:, :2] - margin
         wall_upper = wall_rectangles[:, :2] + wall_rectangles[:, 2:4] + margin
-        in_wall = ((points[:, None, :] >= wall_lower) & (points[:, None, :] <= wall_upper)).all(axis=2).any(axis=1)
+        in_wall = ((points[:, None, :] > wall_lower) & (points[:, None, :] < wall_upper)).all(axis=2).any(axis=1)
         return ~in_wall
+
+    @staticmethod
+    def _points_inside_rectangles(points: np.ndarray, rectangles: np.ndarray, margin: float) -> np.ndarray:
+        if rectangles.size == 0:
+            return np.ones(points.shape[0], dtype=bool)
+        rect_lower = rectangles[:, :2] + margin
+        rect_upper = rectangles[:, :2] + rectangles[:, 2:4] - margin
+        valid_rectangles = np.all(rect_upper >= rect_lower, axis=1)
+        if not np.any(valid_rectangles):
+            rect_lower = rectangles[:, :2]
+            rect_upper = rectangles[:, :2] + rectangles[:, 2:4]
+        else:
+            rect_lower = rect_lower[valid_rectangles]
+            rect_upper = rect_upper[valid_rectangles]
+        return ((points[:, None, :] >= rect_lower) & (points[:, None, :] <= rect_upper)).all(axis=2).any(axis=1)
+
+    def _feasible_points_mask(
+            self,
+            points: np.ndarray,
+            wall_rectangles: np.ndarray,
+            walkable_rectangles: np.ndarray,
+            margin: float,
+        ) -> np.ndarray:
+        inside_walkable = self._points_inside_rectangles(points, walkable_rectangles, margin)
+        outside_walls = self._points_outside_walls(points, wall_rectangles, margin)
+        return inside_walkable & outside_walls
 
     @staticmethod
     def _xy_grid(lower: np.ndarray, upper: np.ndarray, n_x: int, n_y: int) -> np.ndarray:
@@ -328,6 +359,24 @@ class PointMazeNystromDebugHelper:
         ys = np.linspace(lower[1], upper[1], n_y, dtype=np.float32)
         grid_x, grid_y = np.meshgrid(xs, ys)
         return np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+    @staticmethod
+    def _anchored_equispaced_grid(lower: np.ndarray, upper: np.ndarray, spacing: float, anchor: np.ndarray) -> np.ndarray:
+        spacing = float(spacing)
+        if spacing <= 0.0:
+            raise ValueError(f"PointMaze grid spacing must be positive, got {spacing}")
+        anchor = np.asarray(anchor, dtype=np.float32).reshape(-1)[:2]
+        lower = np.asarray(lower, dtype=np.float32).reshape(-1)[:2]
+        upper = np.asarray(upper, dtype=np.float32).reshape(-1)[:2]
+
+        x_min = int(np.ceil((lower[0] - anchor[0]) / spacing))
+        x_max = int(np.floor((upper[0] - anchor[0]) / spacing))
+        y_min = int(np.ceil((lower[1] - anchor[1]) / spacing))
+        y_max = int(np.floor((upper[1] - anchor[1]) / spacing))
+        xs = anchor[0] + spacing * np.arange(x_min, x_max + 1, dtype=np.float32)
+        ys = anchor[1] + spacing * np.arange(y_min, y_max + 1, dtype=np.float32)
+        grid_x, grid_y = np.meshgrid(xs.astype(np.float32), ys.astype(np.float32))
+        return np.column_stack([grid_x.ravel(), grid_y.ravel()]).astype(np.float32, copy=False)
 
     @staticmethod
     def _nearest_neighbor_distances(points: np.ndarray) -> np.ndarray:
@@ -358,6 +407,15 @@ class PointMazeNystromDebugHelper:
         return {"x": spacing_x, "y": spacing_y}
 
     @staticmethod
+    def _walkable_area(rectangles: np.ndarray, margin: float) -> float:
+        if rectangles.size == 0:
+            return 0.0
+        rectangles = np.asarray(rectangles, dtype=np.float32).reshape(-1, 4)
+        widths = np.maximum(rectangles[:, 2] - 2.0 * margin, 0.0)
+        heights = np.maximum(rectangles[:, 3] - 2.0 * margin, 0.0)
+        return float(np.sum(widths * heights))
+
+    @staticmethod
     def _exact_grid_shape(n_points: int, lower: np.ndarray, upper: np.ndarray) -> Tuple[int, int]:
         span = np.maximum(np.asarray(upper, dtype=np.float32) - np.asarray(lower, dtype=np.float32), 1e-6)
         aspect = float(span[0] / span[1])
@@ -381,39 +439,51 @@ class PointMazeNystromDebugHelper:
             lower: np.ndarray,
             upper: np.ndarray,
             wall_rectangles: np.ndarray,
+            walkable_rectangles: np.ndarray,
+            margin: float,
             n_points: int,
+            anchor: Optional[np.ndarray] = None,
         ) -> Tuple[np.ndarray, Dict[str, float]]:
-        base_n_x, base_n_y = self._exact_grid_shape(n_points, lower, upper)
+        if anchor is None:
+            anchor = lower
+        area = self._walkable_area(walkable_rectangles, margin)
+        if area <= 0.0:
+            span = np.maximum(upper - lower, 1e-6)
+            area = float(span[0] * span[1])
+        base_spacing = float(np.sqrt(area / max(n_points, 1)))
         best = None
-        for radius in (8, 20, 44, 80):
-            for n_x in range(max(2, base_n_x - radius), base_n_x + radius + 1):
-                for n_y in range(max(2, base_n_y - radius), base_n_y + radius + 1):
-                    candidates = self._xy_grid(lower, upper, n_x, n_y)
-                    valid_points = candidates[self._points_outside_walls(candidates, wall_rectangles, margin=0.0)]
-                    valid_count = valid_points.shape[0]
-                    if valid_count == 0:
-                        continue
-                    spacing = self._regular_grid_spacing(lower, upper, n_x, n_y)
-                    mean_spacing = 0.5 * (spacing["x"] + spacing["y"])
-                    spacing_mismatch = abs(spacing["x"] - spacing["y"]) / max(mean_spacing, 1e-12)
-                    score = (abs(valid_count - n_points), spacing_mismatch, n_x * n_y)
-                    if best is None or score < best[0]:
-                        best = (score, valid_points, spacing, n_x, n_y, valid_count)
+        # Search one scalar spacing. This keeps dx == dy; count may adjust if maze holes make exact count impossible.
+        for radius in (0.35, 0.6, 0.9):
+            for factor in np.linspace(max(0.05, 1.0 - radius), 1.0 + radius, 241):
+                spacing_value = base_spacing * float(factor)
+                candidates = self._anchored_equispaced_grid(lower, upper, spacing_value, anchor)
+                valid_points = candidates[
+                    self._feasible_points_mask(candidates, wall_rectangles, walkable_rectangles, margin)
+                ]
+                valid_count = valid_points.shape[0]
+                if valid_count == 0:
+                    continue
+                unique_x = np.unique(np.round(candidates[:, 0], decimals=6)).size
+                unique_y = np.unique(np.round(candidates[:, 1], decimals=6)).size
+                score = (abs(valid_count - n_points), abs(float(factor) - 1.0), candidates.shape[0])
+                if best is None or score < best[0]:
+                    best = (score, valid_points, spacing_value, unique_x, unique_y, valid_count)
             if best is not None and best[0][0] == 0:
                 break
 
         if best is None:
             raise RuntimeError("Could not build any feasible PointMaze exact-grid points.")
 
-        _, valid_points, spacing, n_x, n_y, valid_count = best
+        _, valid_points, spacing_value, n_x, n_y, valid_count = best
         grid_spacing = {
-            "x": spacing["x"],
-            "y": spacing["y"],
+            "x": float(spacing_value),
+            "y": float(spacing_value),
             "n_x": int(n_x),
             "n_y": int(n_y),
             "requested_points": int(n_points),
             "adjusted_points": int(valid_count),
             "exact_grid": True,
+            "equispaced": True,
             "feasible_points": int(valid_count),
         }
         return valid_points.astype(np.float32, copy=False), grid_spacing
@@ -433,6 +503,18 @@ class PointMazeNystromDebugHelper:
         return selected
 
     @staticmethod
+    def _put_existing_start_first(points: np.ndarray, start_xy: Optional[np.ndarray]) -> np.ndarray:
+        if start_xy is None or points.shape[0] == 0:
+            return points
+        start_xy = np.asarray(start_xy, dtype=np.float32).reshape(1, 2)
+        selected = points.astype(np.float32, copy=True)
+        matches = np.where(np.all(np.isclose(selected, start_xy, atol=1e-5), axis=1))[0]
+        if matches.size > 0:
+            start_idx = int(matches[0])
+            selected[[0, start_idx]] = selected[[start_idx, 0]]
+        return selected
+
+    @staticmethod
     def _thin_regular_grid_points(valid_points: np.ndarray, n_points: int) -> np.ndarray:
         if valid_points.shape[0] <= n_points:
             return valid_points[:n_points].astype(np.float32, copy=False)
@@ -444,6 +526,7 @@ class PointMazeNystromDebugHelper:
             lower: np.ndarray,
             upper: np.ndarray,
             wall_rectangles: np.ndarray,
+            walkable_rectangles: np.ndarray,
             margin: float,
             n_points: int,
         ) -> Tuple[np.ndarray, Dict[str, float]]:
@@ -456,7 +539,9 @@ class PointMazeNystromDebugHelper:
             for n_x in range(max(2, base_n_x - radius), base_n_x + radius + 1):
                 for n_y in range(max(2, base_n_y - radius), base_n_y + radius + 1):
                     candidates = self._xy_grid(lower, upper, n_x, n_y)
-                    valid_points = candidates[self._points_outside_walls(candidates, wall_rectangles, margin)]
+                    valid_points = candidates[
+                        self._feasible_points_mask(candidates, wall_rectangles, walkable_rectangles, margin)
+                    ]
                     valid_count = valid_points.shape[0]
                     if valid_count < n_points:
                         continue
@@ -475,7 +560,9 @@ class PointMazeNystromDebugHelper:
             valid_points = np.empty((0, 2), dtype=np.float32)
             for _ in range(8):
                 candidates = self._xy_grid(lower, upper, n_x, n_y)
-                valid_points = candidates[self._points_outside_walls(candidates, wall_rectangles, margin)]
+                valid_points = candidates[
+                    self._feasible_points_mask(candidates, wall_rectangles, walkable_rectangles, margin)
+                ]
                 if valid_points.shape[0] >= n_points:
                     break
                 n_x, n_y = int(np.ceil(n_x * 1.25)) + 1, int(np.ceil(n_y * 1.25)) + 1
@@ -506,20 +593,24 @@ class PointMazeNystromDebugHelper:
         raw_upper = layout["maze_upper"].astype(np.float32, copy=False)
         raw_span = raw_upper - raw_lower
         if self.exact_grid and abs(float(raw_span[1])) > 1e-6:
+            exact_margin = 0.0
+            start_xy = self._fixed_start_xy()
+            if start_xy is not None and not self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin=0.0)[0]:
+                start_xy = None
             selected, self._last_grid_spacing = self._exact_feasible_grid_candidates(
                 raw_lower,
                 raw_upper,
                 layout["wall_rectangles"],
+                layout["walkable_rectangles"],
+                exact_margin,
                 n_points,
+                anchor=start_xy,
             )
-            start_xy = self._fixed_start_xy()
-            if start_xy is not None and not self._points_outside_walls(start_xy[None, :], layout["wall_rectangles"], margin=0.0)[0]:
-                start_xy = None
-            selected = self._put_start_first(selected, start_xy)
+            selected = self._put_existing_start_first(selected, start_xy)
             if selected.shape[0] != n_points:
                 ColorPrint.yellow(
                     f"Exact PointMaze grid adjusted states from {n_points} to {selected.shape[0]} "
-                    f"({self._last_grid_spacing['n_x']} x {self._last_grid_spacing['n_y']} lattice, "
+                    f"({self._last_grid_spacing['n_x']} x {self._last_grid_spacing['n_y']} equispaced lattice, "
                     f"{selected.shape[0]} feasible)."
                 )
             return selected.astype(np.float32, copy=False)
@@ -550,6 +641,7 @@ class PointMazeNystromDebugHelper:
             lower,
             upper,
             layout["wall_rectangles"],
+            layout["walkable_rectangles"],
             margin,
             n_points,
         )

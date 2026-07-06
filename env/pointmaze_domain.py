@@ -115,7 +115,7 @@ class PointMazeDirectVelocityActions(gym.Wrapper):
 
 
 class FixedPointMazeResetWrapper(gym.Wrapper):
-    def __init__(self, env, goal_position, start_position):
+    def __init__(self, env, goal_position, start_position, start_position_variance=0.0):
         super().__init__(env)
         self.fixed_goal = np.asarray(goal_position, dtype=np.float32)
         if self.fixed_goal.shape != (2,):
@@ -125,8 +125,16 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         if self.fixed_start.shape != (2,):
             raise ValueError(f"PointMaze start_position must have shape (2,), got {self.fixed_start.shape}")
 
+        self.start_position_variance = float(start_position_variance)
+        if self.start_position_variance < 0.0:
+            raise ValueError(
+                "PointMaze start_position_variance must be non-negative, "
+                f"got {self.start_position_variance}"
+            )
+
         self.goal_position = self.fixed_goal.copy()
         self.start_position = self.fixed_start.copy()
+        self.current_start_position = self.fixed_start.copy()
 
     def _base_env(self):
         return self.env.unwrapped
@@ -136,34 +144,52 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         point_obs, _ = base_env.point_env._get_obs()
         return base_env._get_obs(point_obs)
 
-    def _apply_fixed_task(self):
+    def _sample_start_position(self):
+        if self.start_position_variance <= 0.0:
+            return self.fixed_start.copy()
+
+        base_env = self._base_env()
+        rng = getattr(base_env, "np_random", None)
+        std = np.sqrt(self.start_position_variance)
+        if rng is not None:
+            noise = rng.normal(loc=0.0, scale=std, size=2)
+        else:
+            noise = np.random.normal(loc=0.0, scale=std, size=2)
+        return (self.fixed_start + noise.astype(np.float32)).astype(np.float32)
+
+    def _apply_fixed_task(self, start_position):
         base_env = self._base_env()
         base_env.goal = self.fixed_goal.copy()
-        base_env.reset_pos = self.fixed_start.copy()
-        base_env.point_env.init_qpos[:2] = self.fixed_start
+        base_env.reset_pos = start_position.copy()
+        base_env.point_env.init_qpos[:2] = start_position
         base_env.point_env.init_qvel[:] = 0.0
 
         qpos = base_env.point_env.data.qpos.copy()
         qvel = np.zeros_like(base_env.point_env.data.qvel)
-        qpos[:2] = self.fixed_start
+        qpos[:2] = start_position
         base_env.point_env.set_state(qpos, qvel)
         base_env.update_target_site_pos()
 
     def reset(self, **kwargs):
         _, info = self.env.reset(**kwargs)
-        self._apply_fixed_task()
+        self.current_start_position = self._sample_start_position()
+        self.start_position = self.current_start_position.copy()
+        self._apply_fixed_task(self.current_start_position)
         obs = self._refresh_obs()
 
         info = dict(info) if info is not None else {}
         info["fixed_goal_position"] = self.fixed_goal.copy()
         info["fixed_start_position"] = self.fixed_start.copy()
+        info["start_position"] = self.current_start_position.copy()
+        info["start_position_variance"] = self.start_position_variance
         return obs, info
 
     def get_debug_coordinates(self):
         obs = self._refresh_obs()
         return {
             "xy": np.asarray(obs["observation"], dtype=np.float32)[:2].copy(),
-            "fixed_start": self.fixed_start.copy(),
+            "fixed_start": self.current_start_position.copy(),
+            "configured_start": self.fixed_start.copy(),
             "fixed_goal": self.fixed_goal.copy(),
         }
 
@@ -175,6 +201,7 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
 
         half_cell = 0.5 * float(getattr(maze, "maze_size_scaling", 1.0))
         wall_rectangles = []
+        walkable_rectangles = []
         all_rectangles = []
 
         for row_idx, row in enumerate(maze.maze_map):
@@ -186,6 +213,8 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
                 all_rectangles.append(rect)
                 if cell == 1:
                     wall_rectangles.append(rect)
+                else:
+                    walkable_rectangles.append(rect)
 
         if not all_rectangles:
             return None
@@ -194,11 +223,13 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         maze_lower = all_rectangles[:, :2].min(axis=0)
         maze_upper = (all_rectangles[:, :2] + all_rectangles[:, 2:4]).max(axis=0)
         wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+        walkable_rectangles = np.asarray(walkable_rectangles, dtype=np.float32).reshape(-1, 4)
 
         return {
             "maze_lower": maze_lower,
             "maze_upper": maze_upper,
             "wall_rectangles": wall_rectangles,
+            "walkable_rectangles": walkable_rectangles,
         }
 
     def __getattr__(self, name):
@@ -347,6 +378,7 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
     goal_position = pointmaze_kwargs.pop("goal_position", None)
     start_position = pointmaze_kwargs.pop("start_position", None)
+    start_position_variance = pointmaze_kwargs.pop("start_position_variance", 0.0)
     top_down_camera = bool(pointmaze_kwargs.pop("top_down_camera", True))
     camera_distance = pointmaze_kwargs.pop("camera_distance", None)
     camera_elevation = pointmaze_kwargs.pop("camera_elevation", -90.0)
@@ -365,7 +397,12 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
         unknown_keys = ", ".join(sorted(pointmaze_kwargs))
         raise TypeError(f"Unknown PointMaze kwargs: {unknown_keys}")
 
-    env = FixedPointMazeResetWrapper(env, goal_position=goal_position, start_position=start_position)
+    env = FixedPointMazeResetWrapper(
+        env,
+        goal_position=goal_position,
+        start_position=start_position,
+        start_position_variance=start_position_variance,
+    )
     if top_down_camera:
         env = PointMazeTopDownCameraWrapper(
             env,

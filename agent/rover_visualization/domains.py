@@ -1480,6 +1480,7 @@ class PointMazeNystromDebugVisualizer:
                     facecolor="black",
                     edgecolor="black",
                     linewidth=0.5,
+                    zorder=1,
                 )
             )
 
@@ -1493,9 +1494,10 @@ class PointMazeNystromDebugVisualizer:
                 fill=False,
                 edgecolor="black",
                 linewidth=1.2,
+                zorder=2,
             )
         )
-        ax.scatter(points[:, 0], points[:, 1], s=7, c="#ff7f0e", linewidths=0.0, alpha=1.0)
+        ax.scatter(points[:, 0], points[:, 1], s=7, c="#ff7f0e", linewidths=0.0, alpha=1.0, zorder=8)
         ax.scatter(
             points[0, 0],
             points[0, 1],
@@ -1504,7 +1506,7 @@ class PointMazeNystromDebugVisualizer:
             c="white",
             edgecolors="black",
             linewidths=0.9,
-            zorder=5,
+            zorder=9,
         )
         ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
         ax.set_ylim(lower[1] - 0.1, upper[1] + 0.1)
