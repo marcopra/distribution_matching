@@ -2,11 +2,11 @@
 
 seeds="0 1 2 3 4 5 6"
 replay_buffer_dirs=(
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/grayscale/1M/rover"
+    "data_offline/tennis_score_masked/grayscale/1M/rover"
 )
 
 encoder_paths=(
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/grayscale/1M/rover/models/pixels/gym/dist_matching/1/snapshot.pt"
+    "data_offline/tennis_score_masked/grayscale/1M/rover/models/pixels/gym/dist_matching/1/snapshot.pt"
 )
 
 if [ "${#replay_buffer_dirs[@]}" -ne "${#encoder_paths[@]}" ]; then

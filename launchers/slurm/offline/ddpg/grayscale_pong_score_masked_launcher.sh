@@ -2,12 +2,12 @@
 
 seeds="0 1 2 3 4 5 6" # 3 4 5
 model_path=(
-    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/random"
-    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/rover"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/smm"
-    #"/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/cic"
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/grayscale/rnd"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/icm_apt50"
+    #"data_offline/pong_score_masked/1M/random"
+    #"data_offline/pong_score_masked/1M/rover"
+    # "data_offline/pong_score_masked/1M/smm"
+    #"data_offline/pong_score_masked/1M/cic"
+    "data_offline/pong_score_masked/1M/grayscale/rnd"
+    # "data_offline/pong_score_masked/1M/icm_apt50"
     
 
     )

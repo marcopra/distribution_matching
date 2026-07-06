@@ -2,13 +2,13 @@
 
 seeds="0 1 2 3 4 5 6"
 replay_buffer_dirs=(
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/icm_apt50"
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/rover"
+    "data_offline/bowling_score_masked/1M/icm_apt50"
+    "data_offline/bowling_score_masked/1M/rover"
 )
 
 encoder_paths=(
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/icm_apt50/models/pixels/gym/icm_apt/0/snapshot.pt"
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/rover/models/pixels/gym/dist_matching/1/snapshot.pt"
+    "data_offline/bowling_score_masked/1M/icm_apt50/models/pixels/gym/icm_apt/0/snapshot.pt"
+    "data_offline/bowling_score_masked/1M/rover/models/pixels/gym/dist_matching/1/snapshot.pt"
 )
 
 feature_dims=(

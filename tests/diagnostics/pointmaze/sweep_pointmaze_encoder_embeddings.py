@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from omegaconf import OmegaConf
 from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 import torch
 from tqdm.rich import tqdm
 
@@ -77,7 +78,13 @@ def parse_args() -> argparse.Namespace:
         "--max-plot-points",
         type=int,
         default=4000,
-        help="Uniformly subsample XY states for PCA scatter if fixed grid is larger.",
+        help="Uniformly subsample XY states for PCA/t-SNE scatter if fixed grid is larger.",
+    )
+    parser.add_argument(
+        "--tsne-perplexity",
+        type=float,
+        default=30.0,
+        help="Base t-SNE perplexity. It is clipped to fit the number of plotted points.",
     )
     return parser.parse_args()
 
@@ -251,6 +258,21 @@ def pca_projection(embeddings: np.ndarray) -> np.ndarray:
     return np.zeros((embeddings.shape[0], 2), dtype=np.float32)
 
 
+def tsne_projection(embeddings: np.ndarray, perplexity: float, seed: int) -> np.ndarray:
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+    centered = embeddings - embeddings.mean(axis=0, keepdims=True)
+    if embeddings.shape[0] < 3 or float(np.linalg.norm(centered)) <= 1e-12:
+        return np.zeros((embeddings.shape[0], 2), dtype=np.float32)
+    effective_perplexity = min(float(perplexity), max(1.0, (embeddings.shape[0] - 1) / 3.0))
+    return TSNE(
+        n_components=2,
+        perplexity=effective_perplexity,
+        init="pca",
+        learning_rate="auto",
+        random_state=int(seed),
+    ).fit_transform(embeddings)
+
+
 def save_metrics(path: Path, metrics_log: Dict[str, List[float]]) -> None:
     np.savez_compressed(path, **{key: np.asarray(value) for key, value in metrics_log.items()})
 
@@ -263,6 +285,9 @@ def save_evolution_figure(
     metrics_log: Dict[str, List[float]],
     feature_dim: int,
     max_plot_points: int,
+    projection_name: str,
+    perplexity: float,
+    seed: int,
 ) -> None:
     n_cols = len(checkpoints)
     fig, axes = plt.subplots(2, n_cols, figsize=(4.3 * n_cols, 7.2), squeeze=False)
@@ -278,7 +303,15 @@ def save_evolution_figure(
             ax.set_yticks([])
             ax.set_title(f"step {step}")
             continue
-        projected = pca_projection(embeddings)[plot_idx]
+        plot_embeddings = embeddings[plot_idx]
+        if projection_name == "pca":
+            projected = pca_projection(plot_embeddings)
+            x_label, y_label = "PC1", "PC2"
+        elif projection_name == "tsne":
+            projected = tsne_projection(plot_embeddings, perplexity=perplexity, seed=seed + int(step))
+            x_label, y_label = "t-SNE 1", "t-SNE 2"
+        else:
+            raise ValueError(f"Unknown projection {projection_name!r}")
         scatter = ax.scatter(
             projected[:, 0],
             projected[:, 1],
@@ -289,8 +322,8 @@ def save_evolution_figure(
             linewidths=0,
         )
         ax.set_title(f"step {step}")
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
         if col == n_cols - 1:
             fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04, label="XY color")
 
@@ -311,10 +344,37 @@ def save_evolution_figure(
     for col in range(1, n_cols):
         axes[1, col].axis("off")
 
-    fig.suptitle(f"PointMaze fixed-data encoder PCA | feature_dim={feature_dim}", fontsize=14)
+    fig.suptitle(
+        f"PointMaze fixed-data encoder {projection_name.upper()} | feature_dim={feature_dim}",
+        fontsize=14,
+    )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def save_projection_figures(
+    experiment_dir: Path,
+    checkpoints: Sequence[int],
+    embeddings_by_step: Dict[int, np.ndarray],
+    xy_points: np.ndarray,
+    metrics_log: Dict[str, List[float]],
+    feature_dim: int,
+    args: argparse.Namespace,
+) -> None:
+    for projection_name in ("pca", "tsne"):
+        save_evolution_figure(
+            experiment_dir / f"embedding_evolution_{projection_name}.png",
+            checkpoints,
+            embeddings_by_step,
+            xy_points,
+            metrics_log,
+            feature_dim,
+            args.max_plot_points,
+            projection_name=projection_name,
+            perplexity=args.tsne_perplexity,
+            seed=args.seed,
+        )
 
 
 def write_config(path: Path, args: argparse.Namespace, feature_dim: int, n_actions: int, actual_n_states: int) -> None:
@@ -331,6 +391,7 @@ def write_config(path: Path, args: argparse.Namespace, feature_dim: int, n_actio
         "config_name": str(args.config_name),
         "checkpoint_fractions": [float(value) for value in args.checkpoint_fractions],
         "save_every": int(args.save_every),
+        "tsne_perplexity": float(args.tsne_perplexity),
     }
     path.write_text(json.dumps(payload, indent=2))
 
@@ -370,16 +431,15 @@ def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int) -> None
         }
 
         metrics_path = experiment_dir / "metrics.npz"
-        figure_path = experiment_dir / "embedding_evolution_pca.png"
         save_metrics(metrics_path, metrics_log)
-        save_evolution_figure(
-            figure_path,
+        save_projection_figures(
+            experiment_dir,
             checkpoints,
             embeddings_by_step,
             xy_points,
             metrics_log,
             feature_dim,
-            args.max_plot_points,
+            args,
         )
 
         progress = tqdm(range(1, args.updates + 1), desc=f"feature_dim={feature_dim}")
@@ -400,14 +460,14 @@ def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int) -> None
                 )
             if should_snapshot or should_refresh or step == args.updates:
                 save_metrics(metrics_path, metrics_log)
-                save_evolution_figure(
-                    figure_path,
+                save_projection_figures(
+                    experiment_dir,
                     checkpoints,
                     embeddings_by_step,
                     xy_points,
                     metrics_log,
                     feature_dim,
-                    args.max_plot_points,
+                    args,
                 )
     finally:
         env.close()

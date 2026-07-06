@@ -2,7 +2,7 @@
 
 seeds="7 8 9 10"
 model_path=(
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/cic"
+    "data_offline/bowling_score_masked/1M/grayscale/cic"
     )
 
 

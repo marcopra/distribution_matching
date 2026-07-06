@@ -2,11 +2,11 @@
 
 seeds="0 1 2 3 4 5 6"
 replay_buffer_dirs=(
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/grayscale/rnd"
+    "data_offline/pong_score_masked/1M/grayscale/rnd"
 )
 
 encoder_paths=(
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/grayscale/rnd/114719_553530_rnd/models/pixels/gym/rnd/1/snapshot.pt"
+    "data_offline/pong_score_masked/1M/grayscale/rnd/114719_553530_rnd/models/pixels/gym/rnd/1/snapshot.pt"
 )
 
 feature_dims=(

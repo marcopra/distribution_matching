@@ -2,15 +2,15 @@
 
 seeds="0 1 2 3 4 5 6"
 replay_buffer_dirs=(
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/smm"
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/rnd"
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/cic"
+    "data_offline/bowling_score_masked/1M/grayscale/smm"
+    "data_offline/bowling_score_masked/1M/grayscale/rnd"
+    "data_offline/bowling_score_masked/1M/grayscale/cic"
 )
 
 encoder_paths=(
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/smm/125316_417158_smm/models/pixels/gym/smm/1/snapshot.pt"
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/rnd/125135_268771_rnd/models/pixels/gym/rnd/1/snapshot.pt"
-    "/home/mprattico/distribution_matching/data_offline/bowling_score_masked/1M/grayscale/cic/104651_810703_cic/models/pixels/gym/cic/0/snapshot.pt"
+    "data_offline/bowling_score_masked/1M/grayscale/smm/125316_417158_smm/models/pixels/gym/smm/1/snapshot.pt"
+    "data_offline/bowling_score_masked/1M/grayscale/rnd/125135_268771_rnd/models/pixels/gym/rnd/1/snapshot.pt"
+    "data_offline/bowling_score_masked/1M/grayscale/cic/104651_810703_cic/models/pixels/gym/cic/0/snapshot.pt"
 )
 
 feature_dims=(
