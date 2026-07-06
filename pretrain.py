@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+import sys
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
@@ -32,6 +33,54 @@ from agent.utils_debug_visualization import (
 
 
 torch.backends.cudnn.benchmark = True
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+class ConsoleLog:
+    def __init__(self, log_path):
+        self.log_path = log_path
+        self.log_file = None
+        self.stdout = None
+        self.stderr = None
+
+    def __enter__(self):
+        self.stdout = sys.stdout
+        self.stderr = sys.stderr
+        self.log_file = open(self.log_path, 'a', buffering=1)
+        sys.stdout = Tee(self.stdout, self.log_file)
+        sys.stderr = Tee(self.stderr, self.log_file)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        sys.stdout = self.stdout
+        sys.stderr = self.stderr
+        self.log_file.close()
+
+
+def enable_console_log(log_path):
+    return ConsoleLog(log_path)
+
+
+class NullContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
 
 
 def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
@@ -498,15 +547,21 @@ class Workspace:
 def main(cfg):
     from pretrain import Workspace as W
     root_dir = Path.cwd()
-    workspace = W(cfg)
-    try:
-        snapshot = root_dir / 'snapshot.pt'
-        if snapshot.exists():
-            print(f'resuming: {snapshot}')
-            workspace.load_snapshot()
-        workspace.train()
-    finally:
-        workspace.close()
+    if not hasattr(cfg, 'save_log'):
+        with open_dict(cfg):
+            cfg.save_log = True
+
+    log_context = enable_console_log(root_dir / 'pretrain.log') if cfg.save_log else NullContext()
+    with log_context:
+        workspace = W(cfg)
+        try:
+            snapshot = root_dir / 'snapshot.pt'
+            if snapshot.exists():
+                print(f'resuming: {snapshot}')
+                workspace.load_snapshot()
+            workspace.train()
+        finally:
+            workspace.close()
 
 
 if __name__ == '__main__':

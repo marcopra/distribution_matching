@@ -57,6 +57,7 @@ save_buffer: false
 save_snapshot: false
 use_tb: true
 use_wandb: true
+save_log: false
 wandb_project: umaze_baselines
 wandb_entity: urlb
 wandb_tag: ${agent.name}

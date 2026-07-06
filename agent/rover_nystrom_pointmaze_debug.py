@@ -1662,5 +1662,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        # exit()
+        exit()
         return metrics

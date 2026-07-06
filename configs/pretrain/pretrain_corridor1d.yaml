@@ -66,6 +66,7 @@ save_buffer: false
 save_snapshot: false
 use_tb: true
 use_wandb: false
+save_log: false
 wandb_project: "pretrain_pointmaze"
 wandb_entity: "urlb"
 wandb_tag: none
