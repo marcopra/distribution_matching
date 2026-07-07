@@ -73,6 +73,7 @@ agent:
   lambda_reg: 1e-6
   batch_size_actor: 50000
   update_actor_every_steps: 5000
+  update_every_steps: 100
   T_init_steps: 10000
 
 hydra:
