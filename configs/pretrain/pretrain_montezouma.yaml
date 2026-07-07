@@ -60,8 +60,8 @@ experiment: exp
 agent:
   feature_dim: 256
   embeddings: true
-  lr_actor: 500
-  pmd_steps: 10
+  lr_actor: 1000
+  pmd_steps: 50
   pmd_eta_mode: backtracking
   compute_dtype: float64
   sink_schedule: "linear(0.0, 0.001, 2_000_000)"
