@@ -244,8 +244,28 @@ class DistributionMatcher:
         #     K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
         # )
 
-        eig_vals_r, eig_vecs_r = torch.linalg.eigh(K)
-        U_r = eig_vecs_r[:, -effective_components:]
+        # eig_vals_r, eig_vecs_r = torch.linalg.eigh(K)
+        # U_r = eig_vecs_r[:, -effective_components:]
+        
+        with torch.no_grad():
+            # Move to CPU for the full eigendecomposition
+            K_cpu = K.detach().cpu()
+
+            # Optional: use float32 to reduce RAM, if precision is acceptable
+            K_cpu = K_cpu.float()
+
+            eig_vals_r, eig_vecs_r = torch.linalg.eigh(K_cpu)
+
+            # Keep only the top effective_components eigenvectors
+            U_r = eig_vecs_r[:, -effective_components:]
+
+
+            # Move back to GPU only if needed
+            U_r = U_r.to(K.device)
+            eig_vals_r = eig_vals_r.to(K.device)
+
+            # Free full eigenvector matrix
+            del eig_vecs_r, K_cpu
 
         return B, U_r
 

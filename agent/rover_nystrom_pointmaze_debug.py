@@ -563,10 +563,10 @@ class RoverAgent:
                         "For pixel observations, compute_action_probs expects an image [C, H, W], "
                         f"but got shape {obs.shape}. Use render_observation_from_state() first."
                     )
-                obs_tensor = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)  # [1, C, H, W]
+                obs_tensor = torch.as_tensor(obs, device=self.device, dtype=self.compute_dtype).unsqueeze(0)  # [1, C, H, W]
             else:
                 # State observations: [x, y] -> [1, 2]
-                obs_tensor = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)  # [1, obs_dim]
+                obs_tensor = torch.as_tensor(obs, device=self.device, dtype=self.compute_dtype).unsqueeze(0)  # [1, obs_dim]
             
             enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
     
@@ -574,7 +574,7 @@ class RoverAgent:
                 return np.ones(self.n_actions) / self.n_actions
             
             # Add a zero to enc_obs to account for the extra row in H
-            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), device=enc_obs.device)], dim=1)  # [1, feature_dim + 1]
+            enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), device=enc_obs.device, dtype=enc_obs.dtype)], dim=1)  # [1, feature_dim + 1]
             H = self._kernel(enc_obs_augmented, self._phi_all_obs)  # [1, num_unique]
             probs = self._policy_from_H(H)
 
@@ -771,7 +771,8 @@ class RoverAgent:
             K_mm=K_sub_sub,
             components=self.pca_truncation
         )
-
+    
+        U_r = U_r.to(self.compute_dtype)
         del K_sub_sub, K_all_sub
         
 
@@ -920,14 +921,14 @@ class RoverAgent:
         with torch.no_grad():
             
             print(f"encoding obs shape: {obs.shape}, next_obs shape: {next_obs.shape}")
-            self._phi_all_obs = self._encode_with_module(encoder, obs, project=True)
-            self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True)
+            self._phi_all_obs = self._encode_with_module(encoder, obs, project=True).to(dtype=self.compute_dtype)
+            self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True).to(dtype=self.compute_dtype)
 
             action = action #.cpu()
             self._psi_all = self._encode_state_action(self._phi_all_obs, action) #.cpu()
             self._all_actions = action.long().reshape(-1).detach().cpu()
            
-            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device)  # [n, 1]
+            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [n, 1]
     
             self._alpha[0] = 1.0  # set alpha to 1.0 for the first state
             self.E = F.one_hot(
@@ -937,32 +938,32 @@ class RoverAgent:
 
             # ** AUGMENTATION STEP **
             # ψ and Φ are augmented with an additional zero dimension
-            zeros_col = torch.zeros(*self._psi_all.shape[:-1], 1, device=self._psi_all.device)
+            zeros_col = torch.zeros(*self._psi_all.shape[:-1], 1, device=self._psi_all.device, dtype=self._psi_all.dtype)
             self._psi_all = torch.cat([self._psi_all, zeros_col], dim=-1)
 
-            zero_col = torch.zeros(*self._phi_all_next.shape[:-1], 1, device=self._phi_all_next.device)
+            zero_col = torch.zeros(*self._phi_all_next.shape[:-1], 1, device=self._phi_all_next.device, dtype=self._phi_all_next.dtype)
             self._phi_all_next = torch.cat([self._phi_all_next, zero_col], dim=-1)
 
-            zero_col = torch.zeros(*self._phi_all_obs.shape[:-1], 1, device=self._phi_all_obs.device)
+            zero_col = torch.zeros(*self._phi_all_obs.shape[:-1], 1, device=self._phi_all_obs.device, dtype=self._phi_all_obs.dtype)
             self._phi_all_obs = torch.cat([self._phi_all_obs, zero_col], dim=-1)
 
             if sub_obs is not None and sub_next_obs is not None and sub_action is not None:
-                self._phi_sub_obs = self._encode_with_module(encoder, sub_obs, project=True)
-                self._phi_sub_next = self._encode_with_module(encoder, sub_next_obs, project=True)
+                self._phi_sub_obs = self._encode_with_module(encoder, sub_obs, project=True).to(dtype=self.compute_dtype)
+                self._phi_sub_next = self._encode_with_module(encoder, sub_next_obs, project=True).to(dtype=self.compute_dtype)
                 self._sub_actions = sub_action.long().reshape(-1).detach().cpu()
 
                 self._psi_sub = self._encode_state_action(self._phi_sub_obs, sub_action)
 
-                zeros_col_sub_next = torch.zeros(*self._phi_sub_next.shape[:-1], 1, device=self._phi_sub_next.device)
+                zeros_col_sub_next = torch.zeros(*self._phi_sub_next.shape[:-1], 1, device=self._phi_sub_next.device, dtype=self._phi_sub_next.dtype)
                 self._phi_sub_next = torch.cat([self._phi_sub_next, zeros_col_sub_next], dim=-1)
 
-                zero_col_sub_obs = torch.zeros(*self._phi_sub_obs.shape[:-1], 1, device=self._phi_sub_obs.device)
+                zero_col_sub_obs = torch.zeros(*self._phi_sub_obs.shape[:-1], 1, device=self._phi_sub_obs.device, dtype=self._phi_sub_obs.dtype)
                 self._phi_sub_obs = torch.cat([self._phi_sub_obs, zero_col_sub_obs], dim=-1)
 
-                zero_col_sub_psi = torch.zeros(*self._psi_sub.shape[:-1], 1, device=self._psi_sub.device)
+                zero_col_sub_psi = torch.zeros(*self._psi_sub.shape[:-1], 1, device=self._psi_sub.device, dtype=self._psi_sub.dtype)
                 self._psi_sub = torch.cat([self._psi_sub, zero_col_sub_psi], dim=-1)
 
-                self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device)  # [m, 1]
+                self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [m, 1]
                 self._sub_alpha[0] = 1.0  # set alpha to 1.0 for the first state
 
             print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
@@ -1073,13 +1074,19 @@ class RoverAgent:
                 action.long(),
                 self.n_actions,
             ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
-        return {
+        encoded = {
             "phi_obs": phi_obs,
             "phi_next": phi_next,
             "psi": psi,
             "E": action_onehot,
             "reward": reward,
         }
+        # TEMP DEBUG: carry PointMaze XY through encoded FIFO so actor dataset
+        # plots still work when using real replay data instead of synthetic
+        # Nyström/debug-fixed data. Remove with encoded plotting helpers below.
+        if self.obs_type != "pixels" and obs.ndim >= 2 and obs.shape[1] >= 2:
+            encoded["debug_xy"] = obs.detach().reshape(obs.shape[0], -1)[:, :2]
+        return encoded
 
     def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
         splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
@@ -1245,6 +1252,14 @@ class RoverAgent:
     def _xy_points_from_actor_batch(self, actor_batch, expected_size=None):
         if actor_batch is None:
             return None
+        if isinstance(actor_batch, dict):
+            xy = actor_batch.get("debug_xy")
+            if xy is None:
+                return None
+            points = xy.detach().float().cpu().numpy().reshape(xy.shape[0], -1)[:, :2]
+            if points.shape[0] == 0 or not np.isfinite(points).all():
+                return None
+            return points.astype(np.float32, copy=False)
         if (
             self.debug_fixed_dataset_updates
             and expected_size is not None
@@ -1324,25 +1339,31 @@ class RoverAgent:
         print(f"PointMaze actor dataset plot saved to: {save_path}")
 
     def _save_actor_full_dataset_plot(self, actor_data, step):
-        if isinstance(actor_data, EncodedActorUpdateData):
-            return
-        full_size = actor_data.full[0].shape[0]
+        full_size = (
+            self._encoded_batch_size(actor_data.full)
+            if isinstance(actor_data, EncodedActorUpdateData)
+            else actor_data.full[0].shape[0]
+        )
+        points = self._xy_points_from_actor_batch(actor_data.full, expected_size=full_size)
         self._save_pointmaze_actor_dataset_plot(
             step,
-            self._xy_points_from_actor_batch(actor_data.full, expected_size=full_size),
+            points,
             f"step_{step}_actor_full_dataset.png",
             "PointMaze actor full dataset",
         )
 
     def _save_actor_nystrom_subsample_plot(self, actor_data, step):
-        if isinstance(actor_data, EncodedActorUpdateData):
-            return
         if actor_data.subsample is None:
             return
-        subsample_size = actor_data.subsample[0].shape[0]
+        subsample_size = (
+            self._encoded_batch_size(actor_data.subsample)
+            if isinstance(actor_data, EncodedActorUpdateData)
+            else actor_data.subsample[0].shape[0]
+        )
+        points = self._xy_points_from_actor_batch(actor_data.subsample, expected_size=subsample_size)
         self._save_pointmaze_actor_dataset_plot(
             step,
-            self._xy_points_from_actor_batch(actor_data.subsample, expected_size=subsample_size),
+            points,
             f"step_{step}_nystrom_subsamples.png",
             "PointMaze Nyström subsamples",
         )
@@ -1662,5 +1683,6 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        # exit()
         return metrics
+
+

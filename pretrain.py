@@ -48,6 +48,19 @@ class Tee:
         for stream in self.streams:
             stream.flush()
 
+    def isatty(self):
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+    def fileno(self):
+        for stream in self.streams:
+            if hasattr(stream, "fileno"):
+                return stream.fileno()
+        raise OSError("no stream has fileno")
+
+    @property
+    def encoding(self):
+        return getattr(self.streams[0], "encoding", None)
+
 
 class ConsoleLog:
     def __init__(self, log_path):

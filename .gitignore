@@ -223,3 +223,5 @@ maxent/
 *outputs
 exp_local*
 _rooms
+exp_config.yaml
+

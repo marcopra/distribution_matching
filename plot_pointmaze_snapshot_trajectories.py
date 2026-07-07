@@ -7,9 +7,9 @@
 
 python plot_pointmaze_snapshot_trajectories.py   \
     --snapshot models/pointmaze/umaze/states/rover/models/states/gym/dist_matching/1/snapshot.pt  \
-    --num-trajectories 10 \
-    --episode-steps 1000 \
-    --start-position-variance 0.1
+    --num-trajectories 50 \
+    --episode-steps 1500 \
+    --start-position-variance 0.01
 
 python plot_pointmaze_snapshot_trajectories.py --config configs/env/pointmaze/pointmaze_largedense_goal_1.yaml --num-trajectories 50  --episode-steps 1500  --start-position-variance 0.01
 """
@@ -19,6 +19,7 @@ import argparse
 import os
 import re
 import types
+from collections.abc import Mapping
 from pathlib import Path
 
 os.environ.setdefault("MUJOCO_GL", "egl")
@@ -215,6 +216,67 @@ def random_action(action_space, rng: np.random.Generator):
     return action_space.sample()
 
 
+def _as_numpy_1d(value) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    value = np.asarray(value, dtype=np.float64).reshape(-1)
+    return value if value.size else None
+
+
+def _agent_latent_probs(agent, dim: int) -> np.ndarray:
+    """Best-effort plot-only prior for categorical latent variables."""
+    for name in (
+        "z_probs",
+        "z_prob",
+        "p_z",
+        "pz",
+        "skill_probs",
+        "skill_prob",
+        "p_skill",
+        "latent_probs",
+        "latent_prob",
+    ):
+        probs = _as_numpy_1d(getattr(agent, name, None))
+        if probs is None or probs.size != dim:
+            continue
+        probs = np.clip(probs, 0.0, None)
+        total = probs.sum()
+        if np.isfinite(total) and total > 0:
+            return (probs / total).astype(np.float64)
+    return np.full(dim, 1.0 / dim, dtype=np.float64)
+
+
+def _sample_one_hot(dim: int, rng: np.random.Generator, probs: np.ndarray) -> np.ndarray:
+    sample = np.zeros(dim, dtype=np.float32)
+    sample[int(rng.choice(dim, p=probs))] = 1.0
+    return sample
+
+
+def _sample_latent_meta_for_plot(agent, meta: Mapping, rng: np.random.Generator):
+    if not isinstance(meta, Mapping):
+        return meta, False
+
+    sampled_meta = dict(meta)
+    has_latent_meta = False
+
+    if "z" in sampled_meta:
+        z = np.asarray(sampled_meta["z"], dtype=np.float32)
+        if z.ndim == 1 and z.size > 0:
+            sampled_meta["z"] = _sample_one_hot(z.size, rng, _agent_latent_probs(agent, z.size))
+            has_latent_meta = True
+
+    if "skill" in sampled_meta:
+        skill = np.asarray(sampled_meta["skill"], dtype=np.float32)
+        if skill.ndim == 1 and skill.size > 0:
+            # CIC uses continuous latent skill vectors. Sample one per trajectory and keep it fixed.
+            sampled_meta["skill"] = rng.uniform(0.0, 1.0, size=skill.shape).astype(np.float32)
+            has_latent_meta = True
+
+    return sampled_meta, has_latent_meta
+
+
 def sample_trajectories(
     agent,
     env,
@@ -231,7 +293,12 @@ def sample_trajectories(
     for episode in range(num_trajectories):
         episode_seed = seed + episode
         time_step = env.reset(seed=episode_seed)
-        meta = agent.init_meta() if callable(getattr(agent, "init_meta", None)) else {}
+        meta = agent.init_meta() if agent is not None and callable(getattr(agent, "init_meta", None)) else {}
+        meta, fixed_latent_meta = _sample_latent_meta_for_plot(
+            agent,
+            meta,
+            np.random.default_rng(seed + episode * 1000003),
+        )
         trajectory = []
 
         point = extract_eval_trajectory_point(env, time_step)
@@ -253,7 +320,7 @@ def sample_trajectories(
             time_step = env.step(action)
 
             update_meta = getattr(agent, "update_meta", None)
-            if agent is not None and callable(update_meta):
+            if agent is not None and callable(update_meta) and not fixed_latent_meta:
                 meta = update_meta(meta, policy_step, time_step)
 
             point = extract_eval_trajectory_point(env, time_step)

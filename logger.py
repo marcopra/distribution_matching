@@ -116,12 +116,15 @@ class MetersGroup(object):
             'eval': 'green',
             'eval_dp': 'magenta'
         }
-        prefix = colored(prefix, color_map.get(prefix, 'white'))
+        try:
+            prefix = colored(prefix, color_map.get(prefix, 'white'), force_color=True)
+        except TypeError:
+            prefix = colored(prefix, color_map.get(prefix, 'white'))
         pieces = [f'| {prefix: <14}']
         for key, disp_key, ty in self._formating:
             value = data.get(key, 0)
             pieces.append(self._format(disp_key, value, ty))
-        print(' | '.join(pieces))
+        print(' | '.join(pieces), flush=True)
 
     def _dump_to_wandb(self, data):
         wandb.log(data)
