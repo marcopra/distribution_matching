@@ -83,7 +83,7 @@ class DistributionMatcher:
 
         # ** COMPUTATION STEP **
         # Compute Cholesky decomposition and solve: B̃M̃ = Ã⁻¹M̃
-        A = K + self.lambda_reg * torch.eye(N, device=self.device)
+        A = K + self.lambda_reg * torch.eye(N, device=K.device, dtype=K.dtype)
         # L = torch.linalg.cholesky(A)
         # BM = torch.cholesky_solve(M, L)
 
@@ -94,7 +94,7 @@ class DistributionMatcher:
         tilde_BM[:-1, :-1] = BM
         tilde_BM[-1, -1] = 1.0
 
-        inv_term = torch.linalg.solve( torch.eye(N+1, device=self.device) - self.gamma * tilde_BM, tilde_alpha)
+        inv_term = torch.linalg.solve(torch.eye(N + 1, device=tilde_BM.device, dtype=tilde_BM.dtype) - self.gamma * tilde_BM, tilde_alpha)
         
         sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
         sink_state[-1] = sink_norm
@@ -121,7 +121,7 @@ class DistributionMatcher:
         ) -> torch.Tensor:
         """Compute gradient coefficient for policy update."""
         # Identity matrix
-        I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
+        I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)
 
         sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
         sink_state[-1] = sink_norm

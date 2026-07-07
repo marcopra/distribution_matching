@@ -731,7 +731,7 @@ class RoverAgent:
             )
 
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
-        self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device)  # [z_x + 1, 1]
+        self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
         sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
         self._save_actor_kernel_debug_plot(
@@ -973,9 +973,9 @@ class RoverAgent:
 
     def _cache_encoded_features(self, encoded_full, encoded_sub=None):
         with torch.no_grad():
-            self._phi_all_obs = self._append_zero_feature_column(encoded_full["phi_obs"])
-            self._phi_all_next = self._append_zero_feature_column(encoded_full["phi_next"])
-            self._psi_all = self._append_zero_feature_column(encoded_full["psi"])
+            self._phi_all_obs = self._append_zero_feature_column(encoded_full["phi_obs"].to(dtype=self.compute_dtype, device=self.device))
+            self._phi_all_next = self._append_zero_feature_column(encoded_full["phi_next"].to(dtype=self.compute_dtype, device=self.device))
+            self._psi_all = self._append_zero_feature_column(encoded_full["psi"].to(dtype=self.compute_dtype, device=self.device))
 
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self._phi_all_next.dtype)
             self._alpha[0] = 1.0
@@ -984,9 +984,9 @@ class RoverAgent:
             self._all_actions = torch.argmax(encoded_full["E"], dim=1).long().detach().cpu()
 
             if encoded_sub is not None:
-                self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"])
-                self._phi_sub_next = self._append_zero_feature_column(encoded_sub["phi_next"])
-                self._psi_sub = self._append_zero_feature_column(encoded_sub["psi"])
+                self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"].to(dtype=self.compute_dtype, device=self.device))
+                self._phi_sub_next = self._append_zero_feature_column(encoded_sub["phi_next"].to(dtype=self.compute_dtype, device=self.device))
+                self._psi_sub = self._append_zero_feature_column(encoded_sub["psi"].to(dtype=self.compute_dtype, device=self.device))
                 self._sub_actions = torch.argmax(encoded_sub["E"], dim=1).long().detach().cpu()
 
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
@@ -1662,5 +1662,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        exit()
+        # exit()
         return metrics
