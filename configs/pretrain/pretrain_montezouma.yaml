@@ -62,7 +62,6 @@ agent:
   embeddings: true
   lr_actor: 500
   pmd_steps: 10
-  update_every_steps: 1
   pmd_eta_mode: backtracking
   compute_dtype: float64
   sink_schedule: "linear(0.0, 0.001, 2_000_000)"
