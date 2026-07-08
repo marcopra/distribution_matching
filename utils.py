@@ -88,6 +88,20 @@ def gaussian_kernel_torch(X, Y, bandwidth=1.0, distance_norm=None):
     bandwidth = max(float(bandwidth), 1e-12)
     return torch.exp(-squared_distance / (2.0 * bandwidth * bandwidth))
 
+def gaussian_kernel_chunked(X, Y, bandwidth, chunk_size=8192):
+    Y_norm = torch.sum(Y * Y, dim=1, keepdim=True).T
+    out = torch.empty((X.shape[0], Y.shape[0]), device=X.device, dtype=X.dtype)
+    scale = -1.0 / (2.0 * bandwidth * bandwidth)
+
+    for start in range(0, X.shape[0], chunk_size):
+        end = min(start + chunk_size, X.shape[0])
+        Xc = X[start:end]
+        X_norm = torch.sum(Xc * Xc, dim=1, keepdim=True)
+        dist = X_norm + Y_norm - 2.0 * (Xc @ Y.T)
+        dist.clamp_(min=0.0)
+        out[start:end] = torch.exp(dist * scale)
+
+    return out
 
 def laplacian_kernel_torch(X, Y, bandwidth=1.0, distance_norm=None):
     del distance_norm
@@ -123,7 +137,8 @@ class KernelFunction:
         kernel_type = aliases.get(kernel_type, kernel_type)
         kernels = {
             "inner_product": inner_product_kernel,
-            "gaussian": gaussian_kernel_torch,
+            "gaussian": gaussian_kernel_chunked,
+            "gaussian_chunked": gaussian_kernel_chunked,
             "laplacian": laplacian_kernel_torch,
             "dirac": dirac_kernel_torch,
         }

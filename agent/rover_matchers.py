@@ -60,7 +60,7 @@ class DistributionMatcher:
             X_actions = X_actions.to(device=K.device).reshape(-1)
             Y_actions = Y_actions.to(device=K.device).reshape(-1)
             action_mask = X_actions[:, None] == Y_actions[None, :]
-        return K * action_mask.to(dtype=K.dtype)
+        return K.masked_fill_(~action_mask, 0.0)
 
     
             
@@ -431,7 +431,7 @@ class DistributionMatcher:
 
         
         BM = B_nystrom @ M
-    
+        del M
 
         tilde_eig_vecs_r = torch.zeros((m + 1, eig_vecs_r.shape[1]+1), device=eig_vecs_r.device, dtype=eig_vecs_r.dtype)
         tilde_eig_vecs_r[:-1, :-1] = eig_vecs_r
@@ -456,21 +456,21 @@ class DistributionMatcher:
         S[-1, -1] = 1.0 - self.gamma
 
         tilde_S_r = tilde_eig_vecs_r.T @ S @ tilde_eig_vecs_r
-        # del S, BM
+        del S, BM
         tilde_S_r_reg = tilde_S_r + 1e-6 * torch.eye(tilde_S_r.shape[0], device=tilde_S_r.device, dtype=tilde_S_r.dtype)
-        # del tilde_S_r
+        del tilde_S_r
 
         tilde_phi_kernel = self.state_kernel(tilde_phi_sub_next_obs, tilde_phi_sub_next_obs) 
         tilde_phi_kernel_r = tilde_eig_vecs_r.T @ tilde_phi_kernel @ tilde_eig_vecs_r
-        # del tilde_phi_kernel, tilde_phi_sub_next_obs
+        del tilde_phi_kernel, tilde_phi_sub_next_obs
         
         tilde_B = torch.zeros(B_nystrom.shape[0] + 1, B_nystrom.shape[1] + 1, device=B_nystrom.device, dtype=B_nystrom.dtype)
         tilde_B[:-1, :-1] = B_nystrom
         tilde_B[-1, -1] = 1.0
         tilde_B_r = tilde_eig_vecs_r.T @  tilde_B #@ tilde_eig_vecs_r
         inv_tilde_S_r_reg = torch.linalg.solve(tilde_S_r_reg.T, tilde_phi_kernel_r) 
-        # del tilde_phi_kernel_r
-        left_term_r = tilde_B_r.T @ inv_tilde_S_r_reg
+        del tilde_phi_kernel_r
+        # left_term_r = tilde_B_r.T @ inv_tilde_S_r_reg
        
         # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
         tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
@@ -478,277 +478,152 @@ class DistributionMatcher:
         tilde_alpha_r = tilde_eig_vecs_r.T @ tilde_alpha
         right_term_r = torch.linalg.solve(tilde_S_r_reg, tilde_alpha_r)
 
-        gradient = left_term_r @ right_term_r
+        tmp = inv_tilde_S_r_reg @ right_term_r
+        del right_term_r
+        gradient = tilde_B_r.T @ tmp
 
         gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
 
-        # gradient = tilde_eig_vecs_r @ gradient_r
         return gradient
     
-    def compute_gradient_coefficient_nystrom_memory_efficient(
+    def compute_gradient_coefficient_nystrom_blockwise_and_proj(
             self, 
-            phi_all_obs: torch.Tensor,
-            phi_all_next_obs:torch.Tensor, 
             phi_sub_next_obs:torch.Tensor,
-            psi_all_obs_action:torch.Tensor, 
             psi_sub_obs_action:torch.Tensor,
             H: torch.Tensor,
             pi: torch.Tensor,
             E: torch.Tensor,
             alpha:torch.Tensor,
             sink_norm: float,
-            B_nystrom: Optional[torch.Tensor] = None,
-            phi_sub_obs: Optional[torch.Tensor] = None,
-            all_actions: Optional[torch.Tensor] = None,
-            sub_actions: Optional[torch.Tensor] = None
+            B_nystrom: Optional[torch.Tensor],
+            eig_vecs_r: Optional[torch.Tensor],
+            
         ) -> torch.Tensor:
-        """Compute gradient coefficient for policy update."""
-        # Identity matrix
-        # I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
-        N = psi_all_obs_action.shape[0]
+        """Compute projected Nyström gradient using block augmented algebra."""
         m = phi_sub_next_obs.shape[0]
+        r = eig_vecs_r.shape[1]
         d = phi_sub_next_obs.shape[1]
+        eps = 1e-6
+        beta = 2 * self.gamma * ((1 - self.gamma) ** 2)
 
-        # Build Phi-tilde directly, without upper_left_sub temporary
-        tilde_phi_sub_next_obs_T = torch.zeros(
+        # s = 1 − γ
+        s = 1.0 - self.gamma
 
+        gradient = torch.empty(
+            (B_nystrom.shape[1] + 1, 1),
+            device=B_nystrom.device,
+            dtype=B_nystrom.dtype,
+        )
+
+        # M = H ⊙ (Eπᵀ)
+        M = H * (E @ pi.T)
+
+        # S = Iₘ − γBM
+        BM = B_nystrom @ M
+        del M
+        BM.mul_(-self.gamma)
+        idx = torch.arange(m, device=BM.device)
+        BM[idx, idx] += 1.0
+
+        # Sᵣ = Uᵣᵀ S Uᵣ
+        S_r = eig_vecs_r.T @ BM @ eig_vecs_r
+        del BM
+
+        # Sᵣε = Sᵣ + εIᵣ
+        S_r_reg = S_r.clone()
+        idx_r = torch.arange(r, device=S_r_reg.device)
+        S_r_reg[idx_r, idx_r] += eps
+
+        # Build Φ̃, then compute K̃_φ = k(Φ̃, Φ̃) with the configured kernel.
+        tilde_phi_T = torch.zeros(
             (d + 1, m + 1),
-
             device=phi_sub_next_obs.device,
-
             dtype=phi_sub_next_obs.dtype,
-
         )
-        tilde_phi_sub_next_obs_T[:d, :m] = phi_sub_next_obs.T
-        tilde_phi_sub_next_obs_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
-        tilde_phi_sub_next_obs_T[d - 1, m] = sink_norm
-        tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_T.T
+        tilde_phi_T[:d, :m] = phi_sub_next_obs.T
+        tilde_phi_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
+        tilde_phi_T[d - 1, m] = sink_norm
+        tilde_phi = tilde_phi_T.T
+        del tilde_phi_T
 
-        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
-        sink_state[-1] = sink_norm
+        # K̃_{φ,r} = [[K_rr, k_re], [k_erᵀ, k_ee]]
+        tilde_K_phi = self.state_kernel(tilde_phi, tilde_phi)
+        del tilde_phi
 
-        M = H*(E@pi.T) # [n, m]
+        # K_rr = Uᵣᵀ K̃_φ[1:m,1:m] Uᵣ
+        K_rr = eig_vecs_r.T @ tilde_K_phi[:-1, :-1] @ eig_vecs_r
 
-        if B_nystrom is not None:
-            B = B_nystrom
-            BM = B_nystrom @ M
-        else:
-            # Nyström matrices
-            B = self.compute_B_nystrom(
-                psi_all_obs_action,
-                psi_sub_obs_action,
-                svd_truncation=self.pca_truncation,
-                phi_all_obs=phi_all_obs,
-                phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
-                all_actions=all_actions,
-                sub_actions=sub_actions,
-            )
-            BM = B @ M
-    
+        # k_re = Uᵣᵀ K̃_φ[1:m,e]
+        k_re = eig_vecs_r.T @ tilde_K_phi[:-1, -1:]
 
-        # Build S = I - gamma * tilde_B * tilde_M directly
-        S = torch.empty(
+        # k_erᵀ = K̃_φ[e,1:m] Uᵣ
+        k_er_T = tilde_K_phi[-1:, :-1] @ eig_vecs_r
 
-            (BM.shape[0] + 1, BM.shape[1] + 1),
+        # k_ee = K̃_φ[e,e]
+        k_ee = tilde_K_phi[-1:, -1:]
+        del tilde_K_phi
 
-            device=BM.device,
+        # αᵣ = Uᵣᵀ α, αₑ = 1
+        alpha_r = eig_vecs_r.T @ alpha
+        alpha_e = torch.ones((1, 1), device=alpha.device, dtype=alpha.dtype)
 
-            dtype=BM.dtype,
+        # zᵣ = Sᵣ⁻¹αᵣ
+        z_r = torch.linalg.solve(S_r, alpha_r)
+        del S_r, alpha_r
 
-        )
+        # zₑ = s⁻¹αₑ
+        z_e = alpha_e / s
 
-        # 2 γ (1 - γ)² Ã_ny⁻ᵀ (I - γ Ã_ny⁻¹M̃)⁻ᵀΦ̃_m Φ̃_mᵀ(I - γ Ã_ny⁻¹M̃)⁻¹ α̃_m 
+        # hᵣ = K_rr zᵣ + k_re zₑ
+        h_r = K_rr @ z_r
+        del K_rr
+        h_r.add_(k_re * z_e)
+        del k_re
 
-        S[:-1, :-1] = BM
-        S[:-1, :-1].mul_(-self.gamma)
-        idx = torch.arange(BM.shape[0], device=BM.device)
-        S[idx, idx] += 1.0
-        S[:-1, -1] = 0.0
-        S[-1, :-1] = 0.0
-        S[-1, -1] = 1.0 - self.gamma
+        # hₑ = k_erᵀ zᵣ + k_ee zₑ
+        h_e = k_er_T @ z_r
+        del k_er_T, z_r
+        h_e.add_(k_ee * z_e)
+        del k_ee, z_e
 
-        phi_kernel = self.state_kernel(tilde_phi_sub_next_obs, tilde_phi_sub_next_obs) 
+        # tmp_main = (Sᵣ + εIᵣ)⁻ᵀ hᵣ
+        tmp_main = torch.linalg.solve(S_r_reg.T, h_r)
+        del S_r_reg, h_r
 
-        tilde_B = torch.zeros(B.shape[0] + 1, B.shape[1] + 1, device=B.device, dtype=B.dtype)
-        tilde_B[:-1, :-1] = B
-        tilde_B[-1, -1] = 1.0
-        left_term = tilde_B.T @ torch.linalg.solve(S.T,phi_kernel)   
+        # tmp_sink = (s + ε)⁻¹ hₑ
+        tmp_sink = h_e / (s + eps)
+        del h_e
+
+        # Current code has B_nystrom ∈ R^{m×n}; previous projected code uses B̃ᵀŨᵣ.
+        # Thus g₁:ₙ = BᵀUᵣ tmp_main, equivalent to Bᵣᵀ tmp_main when Bᵣ is available.
+        gradient[:-1] = B_nystrom.T @ (eig_vecs_r @ tmp_main)
+        del tmp_main
+
+        # gₑ = tmp_sink
+        gradient[-1:] = tmp_sink
+
+        gradient.mul_(beta)
+
+        # ref_gradient = self.compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
+        #     phi_sub_next_obs=phi_sub_next_obs,
+        #     psi_sub_obs_action=psi_sub_obs_action,
+        #     H=H,
+        #     pi=pi,
+        #     E=E,
+        #     alpha=alpha,
+        #     sink_norm=sink_norm,
+        #     B_nystrom=B_nystrom,
+        #     eig_vecs_r=eig_vecs_r,
+        # )
+        # if gradient.shape == ref_gradient.shape:
+        #     print(f"Gradient difference norm: {(gradient - ref_gradient).norm().item()}")
+        #     print(f"Gradient cosine similarity: {torch.nn.functional.cosine_similarity(gradient.flatten(), ref_gradient.flatten(), dim=0).item()}")
+        # else:
+        #     print(
+        #         "Gradient comparison skipped: "
+        #         f"blockwise shape={tuple(gradient.shape)}, ref shape={tuple(ref_gradient.shape)}"
+        #     )
+        
+        return gradient
 
        
-
-        # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
-        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
-        tilde_alpha[:-1] = alpha
-        right_term = torch.linalg.solve(S, tilde_alpha)
-
-        gradient = left_term @ right_term
-
-        gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
-
-        return gradient
-           
-
-
-# # Identity matrix
-# I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
-
-# sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
-# sink_state[-1] = sink_norm
-
-# # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-# upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
-# tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
-# tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
-# assert sink_state.shape[0] == upper_left.shape[0], "Sink state and upper left matrix row size mismatch"
-# tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
-# tilde_phi_all_next_obs = tilde_phi_all_next_obs_transposed.T
-# assert torch.all(tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] == sink_state), "Last column of tilde_phi_all_next_obs should be sink_state"
-
-# # Ã augmented to be [A 0; 0 1]
-# # Symmetric positive definite matrix A = ψψᵀ + λI
-# K_ref = self.kernel(psi_all_obs_action, psi_all_obs_action) if K is None else K
-# A_ref = K_ref + self.lambda_reg * I_n_plus1
-# tilde_A_ref = torch.zeros(A_ref.shape[0] + 1, A_ref.shape[1] + 1, device=A_ref.device, dtype=A_ref.dtype)
-# tilde_A_ref[:-1, :-1] = A_ref
-# tilde_A_ref[-1, -1] = 1.0
-
-# # M̃ augmented to be [M 0; 0 1]
-# tilde_M_ref = torch.zeros(M.shape[0] + 1, M.shape[1] + 1, device=M.device, dtype=M.dtype)
-# tilde_M_ref[:-1, :-1] = M
-# tilde_M_ref[-1, -1] = 1.0
-
-# # α̃ augmented to be [α; 1]
-# tilde_alpha_ref = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
-# tilde_alpha_ref[:-1] = alpha
-
-# # ** COMPUTATION STEP **
-# # Compute Cholesky decomposition and solve: BM = A⁻¹M
-# # L = torch.linalg.cholesky(A)
-# # BM = torch.cholesky_solve(M, L)
-# BM_ref= torch.linalg.solve(A_ref, M) # [n, n]
-# tilde_B_tilde_M_ref = torch.zeros(BM_ref.shape[0] + 1, BM_ref.shape[1] + 1, device=BM_ref.device, dtype=BM_ref.dtype)
-# tilde_B_tilde_M_ref[:-1, :-1] = BM_ref
-# tilde_B_tilde_M_ref[-1, -1] = 1.0
-
-# # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
-# # State and state-action similarities can use different Gaussian bandwidths.
-# phi_kernel_ref = self.state_kernel(tilde_phi_all_next_obs, tilde_phi_all_next_obs) # [n+1, n+1]
-# I_n_plus1 = torch.eye(tilde_B_tilde_M_ref.shape[0], device=tilde_B_tilde_M_ref.device, dtype=tilde_B_tilde_M_ref.dtype)
-# # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃Φ̃ᵀ
-# left_term_ref = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M_ref).T@tilde_A_ref.T, phi_kernel_ref) # [n+1, n+1]
-
-# # (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ
-# # inv_term_kernel = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T, phi_kernel_ref) # [n+1, n+1]
-# # Solve Ãᵀ x = left_term_without_b using Cholesky
-# # L_T = torch.linalg.cholesky(tilde_A.T)
-# # left_term = torch.cholesky_solve(inv_term_kernel, L_T)
-
-# # right term: (I - γ Ã⁻¹M̃)⁻¹ α̃
-# right_term_ref = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M_ref), tilde_alpha_ref)
-
-# # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃
-# gradient_ref = 2 * self.gamma * ((1 - self.gamma) ** 2) * left_term_ref @ right_term_ref
-
-
-
-
-# # Identity matrix
-# # I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
-# N = psi_all_obs_action.shape[0]
-# m = phi_sub_next_obs.shape[0]
-# d = phi_sub_next_obs.shape[1]
-
-# # Build Phi-tilde directly, without upper_left_sub temporary
-# tilde_phi_sub_next_obs_T = torch.zeros(
-
-#     (d + 1, m + 1),
-
-#     device=phi_sub_next_obs.device,
-
-#     dtype=phi_sub_next_obs.dtype,
-
-# )
-# tilde_phi_sub_next_obs_T[:d, :m] = phi_sub_next_obs.T
-# tilde_phi_sub_next_obs_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
-# tilde_phi_sub_next_obs_T[d - 1, m] = sink_norm
-# tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_T.T
-
-# sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
-# sink_state[-1] = sink_norm
-
-# M = H*(E@pi.T) # [n, m]
-
-# if B_nystrom is not None:
-#     B = B_nystrom
-#     BM = B_nystrom @ M
-# else:
-#     # Nyström matrices
-#     B = self.compute_B_nystrom(
-#         psi_all_obs_action,
-#         psi_sub_obs_action,
-#         svd_truncation=self.svd_truncation,
-#         phi_all_obs=phi_all_obs,
-#         phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
-#         all_actions=all_actions,
-#         sub_actions=sub_actions,
-#     )
-#     BM = B @ M
-
-
-# # Build S = I - gamma * tilde_B * tilde_M directly
-# S = torch.empty(
-
-#     (BM.shape[0] + 1, BM.shape[1] + 1),
-
-#     device=BM.device,
-
-#     dtype=BM.dtype,
-
-# )
-
-# S[:-1, :-1] = BM
-# S[:-1, :-1].mul_(-self.gamma)
-# idx = torch.arange(BM.shape[0], device=BM.device)
-# S[idx, idx] += 1.0
-# S[:-1, -1] = 0.0
-# S[-1, :-1] = 0.0
-# S[-1, -1] = 1.0 - self.gamma
-
-# symmetric_term = torch.linalg.solve(S.T,tilde_phi_sub_next_obs)   
-
-# # left_term = tilde_B.T @ symmetric_term, without tilde_B
-# left_term = torch.empty(
-#     (B.shape[1] + 1, symmetric_term.shape[1]),
-#     device=symmetric_term.device,
-#     dtype=symmetric_term.dtype,
-# )
-# left_term[:-1] = B.T @ symmetric_term[:-1]
-# left_term[-1:] = symmetric_term[-1:]
-
-# # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
-
-# right_term = symmetric_term[:-1].T @ alpha + symmetric_term[-1:].T
-
-# gradient = left_term @ right_term
-
-# gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
-
-# def compute_B_nystrom_no_pseudo(
-#             self,
-#             psi_all_obs_action: torch.Tensor,
-#             psi_sub_obs_action: torch.Tensor,
-#             svd_truncation: Optional[int] = None,
-#             phi_all_obs: Optional[torch.Tensor] = None,
-#             phi_sub_obs: Optional[torch.Tensor] = None,
-#             all_actions: Optional[torch.Tensor] = None,
-#             sub_actions: Optional[torch.Tensor] = None
-#         ) -> torch.Tensor:
-#         N = psi_all_obs_action.shape[0]
-#         if phi_all_obs is not None and phi_sub_obs is not None and all_actions is not None and sub_actions is not None:
-#             K_nm = self.state_action_kernel(phi_all_obs, phi_sub_obs, all_actions, sub_actions)
-#             K_mm = self.state_action_kernel(phi_sub_obs, phi_sub_obs, sub_actions, sub_actions)
-#         else:
-#             K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
-#             K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
-#         A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm # [m, m] # TODO add N
-#         return torch.linalg.solve(A_nystrom, K_nm.T)

@@ -804,7 +804,7 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
+            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_blockwise_and_proj(
                 phi_sub_next_obs = self._phi_sub_next,
                 psi_sub_obs_action = self._psi_sub,
                 H = sub_H,
@@ -1683,6 +1683,7 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
+        exit(0)  # TEMP DEBUG: remove this line to allow training to continue after first actor update
         return metrics
 
 
