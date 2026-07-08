@@ -3,15 +3,32 @@
     --snapshot models/pointmaze/largedense/states/rover/models/states/gym/dist_matching/1/snapshot.pt  \
     --num-trajectories 10 \
     --episode-steps 1000 \
-    --start-position-variance 0.1
+    
 
 python plot_pointmaze_snapshot_trajectories.py   \
-    --snapshot models/pointmaze/umaze/states/rover/models/states/gym/dist_matching/1/snapshot.pt  \
+    --snapshot models/pointmaze/largedense/states/rover/models/states/gym/dist_matching/1/snapshot.pt  \
     --num-trajectories 50 \
-    --episode-steps 1500 \
+    --episode-steps 3000 \
     --start-position-variance 0.01
 
-python plot_pointmaze_snapshot_trajectories.py --config configs/env/pointmaze/pointmaze_largedense_goal_1.yaml --num-trajectories 50  --episode-steps 1500  --start-position-variance 0.01
+
+python plot_pointmaze_snapshot_trajectories.py --config configs/env/pointmaze/pointmaze_largedense_goal_1.yaml --num-trajectories 15  --episode-steps 4000  
+
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/cic/models/states/gym/cic/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 4000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/icm_apt/models/states/gym/icm_apt/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 4000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/rnd/models/states/gym/rnd/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 4000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/smm/models/states/gym/smm/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 4000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/maxent/models/states/gym/maxent/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 4000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/rover/models/states/gym/dist_matching/1/snapshot.pt  --num-trajectories 15 --episode-steps 4000 
+
+python plot_pointmaze_snapshot_trajectories.py --config configs/env/pointmaze/pointmaze_largedense_goal_1.yaml --num-trajectories 15  --episode-steps 5000  
+
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/cic/models/states/gym/cic/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 5000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/icm_apt/models/states/gym/icm_apt/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 5000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/rnd/models/states/gym/rnd/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 5000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/smm/models/states/gym/smm/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 5000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/maxent/models/states/gym/maxent/0/snapshot_1000000.pt  --num-trajectories 15 --episode-steps 5000 
+python plot_pointmaze_snapshot_trajectories.py --snapshot models/pointmaze/largedense/states/rover/models/states/gym/dist_matching/1/snapshot.pt  --num-trajectories 15 --episode-steps 5000 
 """
 from __future__ import annotations
 
@@ -216,6 +233,42 @@ def random_action(action_space, rng: np.random.Generator):
     return action_space.sample()
 
 
+def _pointmaze_wall_rectangles(env) -> np.ndarray:
+    get_layout = get_env_method(env, "get_debug_maze_layout")
+    if not callable(get_layout):
+        return np.empty((0, 4), dtype=np.float32)
+    layout = get_layout()
+    if not isinstance(layout, dict) or "wall_rectangles" not in layout:
+        return np.empty((0, 4), dtype=np.float32)
+    return np.asarray(layout["wall_rectangles"], dtype=np.float32).reshape(-1, 4)
+
+
+def _points_inside_rectangles(points: np.ndarray, rectangles: np.ndarray, margin: float = 0.0) -> np.ndarray:
+    if rectangles.size == 0:
+        return np.zeros(len(points), dtype=bool)
+
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    x = points[:, 0:1]
+    y = points[:, 1:2]
+    x0 = rectangles[:, 0] - margin
+    y0 = rectangles[:, 1] - margin
+    x1 = rectangles[:, 0] + rectangles[:, 2] + margin
+    y1 = rectangles[:, 1] + rectangles[:, 3] + margin
+    return ((x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)).any(axis=1)
+
+
+def _reset_valid_pointmaze_start(env, seed: int, wall_rectangles: np.ndarray, max_attempts: int = 100):
+    """Reject noisy PointMaze starts that land in/too near walls."""
+    last_time_step = None
+    for attempt in range(max_attempts):
+        time_step = env.reset(seed=seed + attempt * 1009)
+        last_time_step = time_step
+        point = extract_eval_trajectory_point(env, time_step)
+        if point is None or not _points_inside_rectangles(np.asarray([point]), wall_rectangles, margin=0.05)[0]:
+            return time_step, attempt
+    return last_time_step, max_attempts
+
+
 def _as_numpy_1d(value) -> np.ndarray | None:
     if value is None:
         return None
@@ -289,10 +342,14 @@ def sample_trajectories(
 ):
     trajectories = []
     frames = []
+    wall_rectangles = _pointmaze_wall_rectangles(env)
+    rejected_starts = 0
+    wall_points = 0
 
     for episode in range(num_trajectories):
         episode_seed = seed + episode
-        time_step = env.reset(seed=episode_seed)
+        time_step, rejected = _reset_valid_pointmaze_start(env, episode_seed, wall_rectangles)
+        rejected_starts += rejected
         meta = agent.init_meta() if agent is not None and callable(getattr(agent, "init_meta", None)) else {}
         meta, fixed_latent_meta = _sample_latent_meta_for_plot(
             agent,
@@ -317,6 +374,19 @@ def sample_trajectories(
                         policy_step,
                         eval_mode=deterministic,
                     )
+                    # policy_prob = getattr(agent, "compute_action_probs", None)
+                    # if callable(policy_prob):
+                    #     probs = policy_prob(time_step.observation)
+                    #     if not np.all(np.isfinite(probs)) or np.sum(probs) <= 0.0:
+                    #         utils.ColorPrint.red(
+                    #             f"Warning: action_probs sum to zero or NaN. Returning uniform distribution. "
+                    #             f"Check training stability and learning rates.{np.sum(probs)}, {probs}"
+                    #         )
+                    #         probs = np.ones_like(probs) / len(probs)
+                    #     if np.random.rand() < 0.5:
+                    #         action = np.random.choice(len(probs), p=probs)
+                    #     else:
+                    #         action = np.argmax(probs) if deterministic else np.random.choice(len(probs), p=probs)
             time_step = env.step(action)
 
             update_meta = getattr(agent, "update_meta", None)
@@ -325,14 +395,21 @@ def sample_trajectories(
 
             point = extract_eval_trajectory_point(env, time_step)
             if point is not None:
+                if _points_inside_rectangles(np.asarray([point]), wall_rectangles)[0]:
+                    wall_points += 1
                 trajectory.append(point)
             frames.append(render_goal_hidden_frame(env))
 
-            if time_step.last():
-                break
+            # if time_step.last():
+            #     break
 
         if trajectory:
             trajectories.append(np.asarray(trajectory, dtype=np.float32))
+
+    if rejected_starts:
+        print(f"Rejected {rejected_starts} noisy PointMaze starts in/near walls.")
+    if wall_points:
+        print(f"Warning: collected {wall_points} trajectory points inside wall rectangles after reset.")
 
     return trajectories, frames
 

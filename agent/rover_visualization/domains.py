@@ -613,7 +613,7 @@ def save_maze_trajectory_overlay_plot(
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_path = save_dir / f"eval_trajectories_step_{step}_ntraj_{len(trajectories)}_maze_overlay.png"
+    save_path = save_dir / f"eval_trajectories_step_{step}_ntraj_{len(trajectories)}_H_{len(trajectories[0])}_maze_overlay.png"
 
     lower = layout["maze_lower"]
     upper = layout["maze_upper"]
@@ -640,7 +640,9 @@ def save_maze_trajectory_overlay_plot(
         _draw_overlay_maze_walls(ax, wall_rectangles, wall_color)
 
         for idx, trajectory in enumerate(trajectories):
-            path = _smooth_trajectory_for_overlay(trajectory)
+            # Use raw sampled positions for maze overlays. Spline smoothing can overshoot
+            # tight corners and visually cut through walls even when the simulator did not.
+            path = trajectory
             color = colors[idx]
             ax.plot(
                 path[:, 0],
