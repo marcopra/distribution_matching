@@ -1683,7 +1683,7 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        exit(0)  # TEMP DEBUG: remove this line to allow training to continue after first actor update
+        # exit(0)  # TEMP DEBUG: remove this line to allow training to continue after first actor update
         return metrics
 
 
