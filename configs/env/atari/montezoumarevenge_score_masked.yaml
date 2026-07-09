@@ -8,7 +8,7 @@ env:
     score_mask:
       enabled: true
     terminal_on_life_loss: false
-  frameskip: 4
+  frameskip: 1
   repeat_action_probability: 0.25
   max_episode_steps: 27000
 
