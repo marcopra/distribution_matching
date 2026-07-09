@@ -20,6 +20,7 @@ encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 kernel_type: gaussian # [inner_product, gaussian, laplacian, dirac]
 kernel_bandwidth: null # fixed Gaussian bandwidth when set
+kernel_bandwidth_mult: null # when set, Gaussian bandwidth = median pairwise state distance * multiplier
 nystrom_grid_border_margin: 0.01
 nystrom_grid_oversample: 2.0
 nystrom_exact_grid: false

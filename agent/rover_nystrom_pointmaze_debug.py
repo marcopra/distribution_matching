@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib import patches
 import utils
 import logging
+import agent.utils
 from agent.utils import (
     EncodedActorUpdateData,
     PointMazeNystromDebugHelper,
@@ -112,6 +113,7 @@ class RoverAgent:
                  encoded_fifo_cuda_oom_splits: int = 4,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
+                 kernel_bandwidth_mult: Optional[float] = None,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  nystrom_exact_grid: bool = False,
@@ -172,6 +174,7 @@ class RoverAgent:
         self.image_channels = 1 if self.grayscale else 3
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
+        self.kernel_bandwidth_mult = kernel_bandwidth_mult
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
@@ -447,6 +450,29 @@ class RoverAgent:
 
     def _kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return self.kernel_fn(X, Y)
+
+    def _fit_state_kernel_bandwidth(self, X: torch.Tensor, Y: torch.Tensor) -> None:
+        if self.kernel_type != "gaussian" or self.kernel_bandwidth_mult is None:
+            return
+        multiplier = float(self.kernel_bandwidth_mult)
+        if multiplier <= 0.0:
+            raise ValueError("kernel_bandwidth_mult must be positive when set.")
+
+        with torch.no_grad():
+            distances = torch.sqrt(torch.clamp(agent.utils.pairwise_squared_distance_torch(X.detach(), Y.detach()), min=0.0))
+            distances = distances[distances > 0]
+            if distances.numel() == 0:
+                median_distance = torch.tensor(1.0, device=X.device, dtype=X.dtype)
+            else:
+                median_distance = torch.median(distances)
+            bandwidth = max(float(median_distance.item()) * multiplier, 1e-12)
+
+        self.kernel_fn.bandwidth = bandwidth
+        self.distribution_matcher.kernel_fn.bandwidth = bandwidth
+        utils.ColorPrint.yellow(
+            f"Fitted actor Gaussian bandwidth={bandwidth:.6g} "
+            f"(median_distance={float(median_distance.item()):.6g}, multiplier={multiplier:.6g})."
+        )
 
     def _kernel_status(self, kernel_fn=None) -> str:
         kernel_fn = self.kernel_fn if kernel_fn is None else kernel_fn
@@ -733,6 +759,7 @@ class RoverAgent:
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
+        self._fit_state_kernel_bandwidth(self._phi_all_obs, self._phi_sub_next)
         sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
         self._save_actor_kernel_debug_plot(
             step,
@@ -1685,5 +1712,3 @@ class RoverAgent:
             metrics = self._run_debug_visualizers(metrics, obs, step)
         # exit(0)  # TEMP DEBUG: remove this line to allow training to continue after first actor update
         return metrics
-
-

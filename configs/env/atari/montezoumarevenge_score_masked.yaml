@@ -7,10 +7,10 @@ env:
   atari:
     score_mask:
       enabled: true
+    terminal_on_life_loss: true
   frameskip: 1
   repeat_action_probability: 0.0
   max_episode_steps: 18000
-terminal_on_life_loss: true
 
 
 # agent:
