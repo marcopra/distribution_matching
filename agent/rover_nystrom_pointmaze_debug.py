@@ -175,6 +175,7 @@ class RoverAgent:
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_mult = kernel_bandwidth_mult
+        self.max_distances=1000
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
@@ -210,6 +211,7 @@ class RoverAgent:
         self._encoded_actor_fifo = EncodedTransitionFIFO(self.encoded_fifo_capacity)
         self._encoded_fifo_replay_marker = None
         
+
         # Track unique state-action pairs from previous dataset
         self._previous_unique_pairs = set()
         self._previous_unique_next_states = set()
@@ -459,6 +461,13 @@ class RoverAgent:
             raise ValueError("kernel_bandwidth_mult must be positive when set.")
 
         with torch.no_grad():
+            if X.shape[0] > self.max_distances or Y.shape[0] > self.max_distances:
+                pair_count = min(X.shape[0], Y.shape[0])
+                sample_count = min(pair_count, self.max_distances)
+                indices = torch.randperm(pair_count, device=X.device)[:sample_count]
+                X = X[indices]
+                Y = Y[indices.to(Y.device)]
+
             distances = torch.sqrt(torch.clamp(agent.utils.pairwise_squared_distance_torch(X.detach(), Y.detach()), min=0.0))
             distances = distances[distances > 0]
             if distances.numel() == 0:
