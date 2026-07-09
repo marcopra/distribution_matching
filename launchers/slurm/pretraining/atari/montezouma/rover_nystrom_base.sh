@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua-longrun
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
@@ -27,10 +27,12 @@ sink_schedules=(
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 
-python pretrain.py \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain.py \
     --config-name=pretrain/pretrain_montezouma \
     use_wandb=true \
     seed=${SEED} \
     agent.batch_size_actor=${BATCH_SIZE_ACTOR} \
-    agent.subsamples=${SUBSAMPLE} 
+    agent.subsamples=${SUBSAMPLE} \
+    agent.sink_schedule=0.0 \
+    num_train_frames=1_500_000
 
