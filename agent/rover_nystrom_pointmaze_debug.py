@@ -621,6 +621,46 @@ class RoverAgent:
             logger.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
+    def _compute_action_probs_batch(self, observations: np.ndarray) -> np.ndarray:
+        """Compute π(·|s) for a batch of observations."""
+        observations = np.asarray(observations)
+        with torch.no_grad():
+            obs_tensor = torch.as_tensor(
+                observations,
+                device=self.device,
+                dtype=self.compute_dtype,
+            )
+            enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+
+            if self.gradient_coeff is None:
+                return np.full(
+                    (observations.shape[0], self.n_actions),
+                    1.0 / self.n_actions,
+                    dtype=np.float64,
+                )
+
+            zeros = torch.zeros(
+                (enc_obs.shape[0], 1),
+                device=enc_obs.device,
+                dtype=enc_obs.dtype,
+            )
+            enc_obs_augmented = torch.cat([enc_obs, zeros], dim=1)
+            H = self._kernel(enc_obs_augmented, self._phi_all_obs)
+            probs = self._policy_from_H(H)
+            bad_rows = (torch.sum(probs, dim=1) == 0.0) | torch.isnan(torch.sum(probs, dim=1))
+            if torch.any(bad_rows):
+                utils.ColorPrint.red(
+                    "Warning: some batched action_probs sum to zero or NaN. "
+                    "Using uniform distribution for those rows."
+                )
+                probs = probs.clone()
+                probs[bad_rows] = torch.ones(
+                    self.n_actions,
+                    device=probs.device,
+                    dtype=probs.dtype,
+                ) / self.n_actions
+            return probs.detach().cpu().numpy()
+
     
     def act(self, obs, meta, step, eval_mode):
         if step < self.num_expl_steps or np.random.rand() < utils.schedule(self.epsilon_schedule, step):
@@ -632,6 +672,45 @@ class RoverAgent:
         # print(f"Step {step}: Action probabilities: {action_probs}")
         # Sample action
         return np.random.choice(self.n_actions, p=action_probs)
+
+    def act_parallel(self, observations, metas, step, eval_mode):
+        observations = np.asarray(observations)
+        num_envs = observations.shape[0]
+        steps = np.asarray(step if np.ndim(step) > 0 else [step] * num_envs, dtype=np.int64)
+        if steps.shape[0] != num_envs:
+            raise ValueError(f"Expected {num_envs} logical steps, got {steps.shape[0]}")
+
+        actions = np.empty(num_envs, dtype=np.int64)
+        policy_indices = []
+        for env_id, step_i in enumerate(steps):
+            epsilon = utils.schedule(self.epsilon_schedule, int(step_i))
+            if step_i < self.num_expl_steps or np.random.rand() < epsilon:
+                actions[env_id] = np.random.randint(self.n_actions)
+            else:
+                policy_indices.append(env_id)
+
+        if policy_indices:
+            try:
+                batch_obs = observations[policy_indices]
+                action_probs = self._compute_action_probs_batch(batch_obs)
+                if action_probs.shape != (len(policy_indices), self.n_actions):
+                    raise ValueError(f"Unexpected action_probs shape {action_probs.shape}")
+                for row, env_id in enumerate(policy_indices):
+                    probs = action_probs[row]
+                    self.current_action_probs.append(probs)
+                    actions[env_id] = np.random.choice(self.n_actions, p=probs)
+            except Exception as exc:
+                utils.ColorPrint.yellow(f"Batched act_parallel failed; falling back to looped act: {exc}")
+                for env_id in policy_indices:
+                    meta = metas[env_id] if metas is not None else None
+                    actions[env_id] = self.act(
+                        observations[env_id],
+                        meta,
+                        int(steps[env_id]),
+                        eval_mode=eval_mode,
+                    )
+
+        return actions
 
     
     def _is_T_sufficiently_initialized(self, step: int) -> bool:
