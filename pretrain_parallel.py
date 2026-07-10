@@ -524,7 +524,7 @@ class Workspace:
                             self.train_video_recorder.init(time_steps[env_id].image_observation)
                     else:
                         time_steps[env_id] = next_time_steps[env_id]
-                self.save_snapshot()
+                # self.save_snapshot()
             else:
                 observations = next_observations
                 time_steps = next_time_steps
