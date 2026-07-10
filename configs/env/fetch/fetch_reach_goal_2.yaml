@@ -1,0 +1,8 @@
+# @package _global_
+
+env:
+  name: "FetchReach-v4"
+  render_mode: rgb_array
+  fetch:
+    start_position: [1.3419, 0.7491, 0.5550]
+    goal_position: [1.2800, 0.8200, 0.5200]

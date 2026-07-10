@@ -2,17 +2,17 @@
 
 seeds="0 1 2 3 4 5 6"
 replay_buffer_dirs=(
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/cic"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/icm_apt50"
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/smm"
-    # /home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/rnd
+    # "data_offline/pong_score_masked/1M/cic"
+    # "data_offline/pong_score_masked/1M/icm_apt50"
+    "data_offline/pong_score_masked/1M/smm"
+    # data_offline/pong_score_masked/1M/rnd
 )
 
 encoder_paths=(
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/cic/162858_cic/models/pixels/gym/cic/1/snapshot.pt"
-    # "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/icm_apt50/models/pixels/gym/icm_apt/0/snapshot.pt"
-    "/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/smm/164128_smm/models/pixels/gym/smm/2/snapshot.pt"
-    # /home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/rnd/114719_553530_rnd/models/pixels/gym/rnd/1/snapshot.pt
+    # "data_offline/pong_score_masked/1M/cic/162858_cic/models/pixels/gym/cic/1/snapshot.pt"
+    # "data_offline/pong_score_masked/1M/icm_apt50/models/pixels/gym/icm_apt/0/snapshot.pt"
+    "data_offline/pong_score_masked/1M/smm/164128_smm/models/pixels/gym/smm/2/snapshot.pt"
+    # data_offline/pong_score_masked/1M/rnd/114719_553530_rnd/models/pixels/gym/rnd/1/snapshot.pt
 )
 
 feature_dims=(

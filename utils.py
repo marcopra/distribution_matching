@@ -69,6 +69,142 @@ def weight_init(m):
             m.bias.data.fill_(0.0)
 
 
+def pairwise_squared_distance(X, Y):
+    X_norm = torch.sum(X * X, dim=1, keepdim=True)
+    Y_norm = torch.sum(Y * Y, dim=1, keepdim=True).T
+    dist = X_norm + Y_norm - 2.0 * (X @ Y.T)
+    return torch.clamp(dist, min=0.0)
+
+
+def inner_product_kernel(X, Y, bandwidth=None, distance_norm=None):
+    del bandwidth
+    del distance_norm
+    return X @ Y.T
+
+
+def gaussian_kernel_torch(X, Y, bandwidth=1.0, distance_norm=None):
+    del distance_norm
+    squared_distance = pairwise_squared_distance(X, Y)
+    bandwidth = max(float(bandwidth), 1e-12)
+    return torch.exp(-squared_distance / (2.0 * bandwidth * bandwidth))
+
+def gaussian_kernel_chunked(X, Y, bandwidth, chunk_size=8192):
+    Y_norm = torch.sum(Y * Y, dim=1, keepdim=True).T
+    out = torch.empty((X.shape[0], Y.shape[0]), device=X.device, dtype=X.dtype)
+    scale = -1.0 / (2.0 * bandwidth * bandwidth)
+
+    for start in range(0, X.shape[0], chunk_size):
+        end = min(start + chunk_size, X.shape[0])
+        Xc = X[start:end]
+        X_norm = torch.sum(Xc * Xc, dim=1, keepdim=True)
+        dist = X_norm + Y_norm - 2.0 * (Xc @ Y.T)
+        dist.clamp_(min=0.0)
+        out[start:end] = torch.exp(dist * scale)
+
+    return out
+
+def laplacian_kernel_torch(X, Y, bandwidth=1.0, distance_norm=None):
+    del distance_norm
+    distance = torch.cdist(X, Y, p=1)
+    return torch.exp(-distance / max(float(bandwidth), 1e-12))
+
+
+def dirac_kernel_torch(X, Y, bandwidth=None, distance_norm=None):
+    del bandwidth
+    del distance_norm
+    return torch.all(X[:, None, :] == Y[None, :, :], dim=-1).to(dtype=X.dtype)
+
+
+class KernelFunction:
+    def __init__(
+        self,
+        kernel_type="inner_product",
+        bandwidth=None,
+        bandwidth_percentile=None,
+    ):
+        kernel_type = str(kernel_type or "inner_product").strip().lower()
+        aliases = {
+            "inner": "inner_product",
+            "linear": "inner_product",
+            "dot": "inner_product",
+            "dot_product": "inner_product",
+            "rbf": "gaussian",
+            "gaussian_kernel": "gaussian",
+            "abel": "laplacian",
+            "abel_diag": "laplacian",
+            "laplace": "laplacian",
+        }
+        kernel_type = aliases.get(kernel_type, kernel_type)
+        kernels = {
+            "inner_product": inner_product_kernel,
+            "gaussian": gaussian_kernel_chunked,
+            "gaussian_chunked": gaussian_kernel_chunked,
+            "laplacian": laplacian_kernel_torch,
+            "dirac": dirac_kernel_torch,
+        }
+        if kernel_type not in kernels:
+            choices = ", ".join(sorted(kernels))
+            raise ValueError(f"Unknown kernel_type={kernel_type!r}. Available choices: {choices}")
+
+        self.kernel_type = kernel_type
+        self.bandwidth = None if bandwidth is None else float(bandwidth)
+        self.bandwidth_percentile = None if bandwidth_percentile is None else float(bandwidth_percentile)
+        self.bandwidth_fit_max_pairs = 16_000_000
+        self._kernel = kernels[kernel_type]
+
+    def __call__(self, X, Y):
+        self.fit_bandwidth(X, Y)
+        bandwidth = 1.0 if self.bandwidth is None else self.bandwidth
+        return self._kernel(X, Y, bandwidth=bandwidth)
+
+    def reset_auto_bandwidth(self):
+        if self.bandwidth_percentile is not None:
+            self.bandwidth = None
+
+    def fit_bandwidth(self, X, Y):
+        if self.kernel_type == "gaussian":
+            self._maybe_fit_gaussian_bandwidth(X, Y)
+        return self.bandwidth
+
+    def _maybe_fit_gaussian_bandwidth(self, X, Y):
+        if self.bandwidth is not None or self.bandwidth_percentile is None:
+            return
+        X_detached = X.detach()
+        Y_detached = Y.detach()
+        total_pairs = int(X_detached.shape[0]) * int(Y_detached.shape[0])
+        if total_pairs <= self.bandwidth_fit_max_pairs:
+            distances = torch.sqrt(torch.clamp(pairwise_squared_distance(X_detached, Y_detached), min=0.0))
+            fit_source = f"all {total_pairs} pairwise distances"
+        else:
+            sample_size = min(self.bandwidth_fit_max_pairs, total_pairs)
+            x_idx = torch.randint(X_detached.shape[0], (sample_size,), device=X_detached.device)
+            y_idx = torch.randint(Y_detached.shape[0], (sample_size,), device=Y_detached.device)
+            distances = torch.linalg.vector_norm(X_detached[x_idx] - Y_detached[y_idx], ord=2, dim=1)
+            fit_source = f"{sample_size} sampled distances from {total_pairs} pairs"
+        distances = distances[distances > 0]
+        if distances.numel() == 0:
+            self.bandwidth = 1.0
+            return
+        percentile = min(max(self.bandwidth_percentile / 100.0, 0.0), 1.0)
+        self.bandwidth = float(torch.quantile(distances.flatten(), percentile).item())
+        print(
+            f"Fitted Gaussian kernel bandwidth={self.bandwidth:.6g} from "
+            f"percentile={self.bandwidth_percentile} using {fit_source} with l2 norm."
+        )
+
+
+def build_kernel_fn(
+    kernel_type="inner_product",
+    bandwidth=None,
+    bandwidth_percentile=None,
+):
+    return KernelFunction(
+        kernel_type=kernel_type,
+        bandwidth=bandwidth,
+        bandwidth_percentile=bandwidth_percentile,
+    )
+
+
 def grad_norm(params, norm_type=2.0):
     params = [p for p in params if p.grad is not None]
     total_norm = torch.norm(

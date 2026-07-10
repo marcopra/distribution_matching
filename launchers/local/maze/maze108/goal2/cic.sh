@@ -1,0 +1,10 @@
+CUDA_DEVICE=${1:-0}
+
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=0 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=1 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=2 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=3 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=4 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=5 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+python train.py --config-name=train/finetune_maze agent=cic_discrete env=gridworld/maze_108_seed7_env_2 agent.actor_lr=1e-4 p_path="/home/mprattico/distribution_matching/models/maze/108/pixels/cic/snapshot.pt" seed=6 obs_type=pixels device=cuda:${CUDA_DEVICE}; 
+

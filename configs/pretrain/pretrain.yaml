@@ -42,6 +42,7 @@ save_train_video: false
 save_buffer: false
 use_tb: false
 use_wandb: false
+save_log: false
 wandb_project: "pretrain_gym"
 wandb_entity: "urlb"
 wandb_tag: none

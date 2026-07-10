@@ -211,10 +211,82 @@ class CorridorEnv(BaseRoomEnv):
         return positions
 
 
+class CorridorWithRoomEnv(BaseRoomEnv):
+    """
+    A short corridor-like room: three walkable rows with one extra cell attached
+    to each side of the middle row.
+
+    For length=5 the layout is:
+
+         0 1 2 3 4
+      y0 . . . . .
+      y1 . . . . . .   plus the left extra cell at x=-1
+      y2 . . . . .
+
+    The default start is the extra cell on the far left of the middle row and
+    the default goal is the extra cell on the far right.
+    """
+
+    def __init__(
+        self,
+        length: int = 11,
+        goal_position: Optional[Tuple[int, int]] = None,
+        start_position: Optional[Tuple[int, int]] = None,
+        max_steps: int = 300,
+        render_mode: Optional[str] = None,
+        show_coordinates: bool = False,
+        lava: bool = False,
+        dense_reward: bool = False,
+    ):
+        if length < 1:
+            raise ValueError("length must be at least 1")
+
+        self.length = length
+        self.height = 3
+        default_start_position = start_position if start_position is not None else (-1, self.height // 2)
+        default_goal_position = goal_position if goal_position is not None else (self.length, self.height // 2)
+
+        super().__init__(
+            goal_position=default_goal_position,
+            start_position=default_start_position,
+            max_steps=max_steps,
+            render_mode=render_mode,
+            show_coordinates=show_coordinates,
+            lava=lava,
+            dense_reward=dense_reward,
+        )
+
+    def _build_cells(self):
+        """Build the three-row room and middle-row side cells."""
+        for y in range(self.height):
+            for x in range(self.length):
+                self._add_cell((x, y))
+
+        middle_y = self.height // 2
+        self._add_cell((-1, middle_y))
+        self._add_cell((self.length, middle_y))
+
+    def _get_default_goal(self) -> Tuple[int, int]:
+        """Default goal: the extra cell on the far right of the middle row."""
+        return (self.length, self.height // 2)
+
+    def _set_start_position(self, start_position: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+        """Default start: the extra cell on the far left of the middle row."""
+        if start_position is None:
+            return (-1, self.height // 2)
+        return super()._set_start_position(start_position)
+
+
 # Register the environment
 gym.register(
     id="Corridor-v0",
     entry_point="env.corridor:CorridorEnv",
+    max_episode_steps=300,
+)
+
+gym.register(
+    id="CorridorWithRoom-v0",
+    entry_point="env.corridor:CorridorWithRoomEnv",
     max_episode_steps=300,
 )
 

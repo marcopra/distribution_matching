@@ -1,0 +1,28 @@
+# @package _global_
+# Middle Room Environment Configuration
+
+env:
+  name: "MiddleRoom-v0"
+  center_room_size: 5
+  outer_room_size: 5
+  connector_length: 1
+  max_steps: 15
+  render_mode: rgb_array
+  show_coordinates: false
+  dense_reward: false
+  # synthetic_first_transition: true
+
+  # Optional per-side size overrides. Leave null to use outer_room_size.
+  north_room_size: null
+  south_room_size: null
+  west_room_size: null
+  east_room_size: null
+
+  # Optional middle-room connector positions. north/south are x offsets;
+  # west/east are y offsets. Leave null for centered connectors.
+  connector_positions: null
+
+  # With the default sizes above, room centers are:
+  # north=[9,2], south=[9,16], west=[2,9], middle=[9,9], east=[16,9].
+  goal_position: null
+  start_position: [8, 8]

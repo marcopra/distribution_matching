@@ -50,6 +50,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+tests/outputs/
 
 # Translations
 *.mo
@@ -218,3 +219,9 @@ tmp*
 data_plot/
 data*
 .hydra
+maxent/
+*outputs
+exp_local*
+_rooms
+exp_config.yaml
+

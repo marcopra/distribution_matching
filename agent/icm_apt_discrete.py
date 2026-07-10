@@ -127,7 +127,8 @@ class ICMAPTAgent(DDPGAgent):
 
         if self.use_tb or self.use_wandb:
             metrics['extr_reward'] = extr_reward.mean().item()
-            metrics['intr_reward'] = intr_reward.mean().item()
+            if self.reward_free:
+                metrics['intr_reward'] = intr_reward.mean().item()
             metrics['batch_reward'] = reward.mean().item()
 
         if not self.update_encoder:
@@ -139,8 +140,9 @@ class ICMAPTAgent(DDPGAgent):
             self.update_critic(obs.detach(), action, reward, discount,
                                next_obs.detach(), step))
 
-        # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

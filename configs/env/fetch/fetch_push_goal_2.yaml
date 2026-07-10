@@ -1,0 +1,8 @@
+# @package _global_
+
+env:
+  name: "FetchPush-v4"
+  render_mode: rgb_array
+  fetch:
+    start_position: [1.2500, 0.5300, 0.4200]
+    goal_position: [1.4200, 0.6500, 0.4200]

@@ -68,8 +68,8 @@ class ContinuousRoomEnv(gym.Env, ABC):
         super().__init__()
         
         # Validate num_actions
-        if num_actions not in [4, 8]:
-            raise ValueError(f"num_actions must be 4 or 8, got {num_actions}")
+        if num_actions not in [2, 4, 8]:
+            raise ValueError(f"num_actions must be 2, 4, or 8, got {num_actions}")
         
         self.num_actions = num_actions
         self.move_delta = move_delta
@@ -398,7 +398,12 @@ class ContinuousRoomEnv(gym.Env, ABC):
         
         return new_position, reward, terminated, truncated, info
     
-    def render_from_position(self, position: np.ndarray, goal: Optional[np.ndarray] = None) -> np.ndarray:
+    def render_from_position(
+        self,
+        position: np.ndarray,
+        goal: Optional[np.ndarray] = None,
+        show_goal: bool = False,
+    ) -> np.ndarray:
         """
         Render the environment from a specific position without changing state.
         
@@ -422,7 +427,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
             self.goal = goal.astype(np.float32)
         
         # Render
-        image = self.render()
+        image = self.render(show_goal=show_goal)
         
         # Restore original state
         self.position = original_position
@@ -431,7 +436,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
         
         return image
     
-    def render(self) -> Optional[np.ndarray]:
+    def render(self, show_goal: bool = False) -> Optional[np.ndarray]:
         if self.render_mode is None:
             return None
         
@@ -460,12 +465,13 @@ class ContinuousRoomEnv(gym.Env, ABC):
             rect = to_screen_rect(*area)
             pygame.draw.rect(surface, COLORS['floor'], rect)
         
-        # Draw goal (green)
-        # if self._fixed_goal_position is not None:
-        #     goal_screen = to_screen(self.goal[0], self.goal[1])
-        #     goal_radius = int(self.goal_threshold * scale)
-        #     pygame.draw.circle(surface, COLORS['goal'], goal_screen, goal_radius)
-        #     pygame.draw.circle(surface, COLORS['goal_border'], goal_screen, goal_radius, 3)
+        # Draw goal only for auxiliary/debug images. The agent-facing pixel
+        # observation stays goal-hidden, matching the PointMaze debug setup.
+        if show_goal:
+            goal_screen = to_screen(self.goal[0], self.goal[1])
+            goal_radius = max(1, int(self.goal_threshold * scale))
+            pygame.draw.circle(surface, COLORS['goal'], goal_screen, goal_radius)
+            pygame.draw.circle(surface, COLORS['goal_border'], goal_screen, goal_radius, 3)
         
         # Draw agent (red) - using actual agent_radius for visual consistency
         agent_screen = to_screen(self.position[0], self.position[1])
@@ -486,12 +492,238 @@ class ContinuousRoomEnv(gym.Env, ABC):
             self._clock.tick(self.metadata["render_fps"])
         
         return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))
+
+    def render_observation(self) -> Optional[np.ndarray]:
+        return self.render(show_goal=False)
+
+    def render_image_observation(self) -> Optional[np.ndarray]:
+        return self.render(show_goal=True)
     
     def close(self):
         if self._pygame_initialized:
             
             pygame.quit()
             self._pygame_initialized = False
+
+
+class ContinuousCorridorEnv(ContinuousRoomEnv):
+    """Continuous 1D corridor with two discrete direct-velocity actions."""
+
+    ACTION_NAMES = {0: "Left", 1: "Right"}
+
+    def __init__(
+        self,
+        corridor_length: float = 10.0,
+        corridor_width: float = 1.0,
+        max_velocity: Optional[float] = None,
+        horizon: Optional[int] = None,
+        max_steps: int = 200,
+        start_position: Optional[Tuple[float, float]] = None,
+        goal_position: Optional[Tuple[float, float]] = None,
+        **kwargs,
+    ):
+        if corridor_length <= 0.0:
+            raise ValueError(f"corridor_length must be positive, got {corridor_length}")
+        if corridor_width <= 0.0:
+            raise ValueError(f"corridor_width must be positive, got {corridor_width}")
+
+        self.corridor_length = float(corridor_length)
+        self.corridor_width = float(corridor_width)
+        resolved_max_steps = int(horizon) if horizon is not None else int(max_steps)
+        if resolved_max_steps <= 0:
+            raise ValueError(f"horizon/max_steps must be positive, got {resolved_max_steps}")
+        self.horizon = resolved_max_steps
+
+        move_delta = kwargs.pop("move_delta", 0.3)
+        self.max_velocity = float(move_delta if max_velocity is None else max_velocity)
+        if self.max_velocity <= 0.0:
+            raise ValueError(f"max_velocity must be positive, got {self.max_velocity}")
+
+        super().__init__(
+            move_delta=self.max_velocity,
+            max_steps=resolved_max_steps,
+            start_position=start_position,
+            goal_position=goal_position,
+            num_actions=2,
+            **kwargs,
+        )
+
+        min_x, max_x = self._valid_x_bounds()
+        center_y = self._center_y()
+        y_eps = np.float32(1e-6)
+        self.observation_space = spaces.Box(
+            low=np.array([min_x, center_y - y_eps], dtype=np.float32),
+            high=np.array([max_x, center_y + y_eps], dtype=np.float32),
+            dtype=np.float32,
+        )
+
+    def _build_environment(self) -> None:
+        wt = self.wall_thickness
+        self.width = self.corridor_length + 2.0 * wt
+        self.height = self.corridor_width + 2.0 * wt
+        self.walkable_areas = [(wt, wt, self.corridor_length, self.corridor_width)]
+
+    def _center_y(self) -> float:
+        return self.wall_thickness + 0.5 * self.corridor_width
+
+    def _valid_x_bounds(self) -> Tuple[float, float]:
+        min_x = self.wall_thickness + self.agent_radius
+        max_x = self.wall_thickness + self.corridor_length - self.agent_radius
+        if max_x < min_x:
+            raise ValueError(
+                "corridor_length must be at least 2 * agent_radius so the agent can fit "
+                f"(length={self.corridor_length}, agent_radius={self.agent_radius})"
+            )
+        return min_x, max_x
+
+    def _center_position(self) -> np.ndarray:
+        min_x, max_x = self._valid_x_bounds()
+        return np.array([0.5 * (min_x + max_x), self._center_y()], dtype=np.float32)
+
+    def _default_goal_position(self) -> np.ndarray:
+        _, max_x = self._valid_x_bounds()
+        return np.array([max_x, self._center_y()], dtype=np.float32)
+
+    def _as_corridor_position(self, position, name: str) -> np.ndarray:
+        arr = np.asarray(position, dtype=np.float32).reshape(-1)
+        if arr.size == 1:
+            arr = np.array([arr[0], self._center_y()], dtype=np.float32)
+        if arr.size != 2:
+            raise ValueError(f"{name} position must have shape (2,) or be an x scalar, got {arr.shape}")
+
+        min_x, max_x = self._valid_x_bounds()
+        center_y = self._center_y()
+        x_value = float(arr[0])
+        eps = 1e-6
+        if x_value < min_x - eps or x_value > max_x + eps:
+            raise ValueError(
+                f"{name} x={x_value:.3f} is outside valid corridor bounds "
+                f"[{min_x:.3f}, {max_x:.3f}]"
+            )
+        if not np.isclose(float(arr[1]), center_y, atol=1e-6):
+            raise ValueError(
+                f"{name} y={float(arr[1]):.3f} must equal corridor center y={center_y:.3f}"
+            )
+        return np.array([np.clip(x_value, min_x, max_x), center_y], dtype=np.float32)
+
+    def _validate_position(self, position: Tuple[float, float], name: str):
+        self._as_corridor_position(position, name)
+
+    def _move(self, action: int) -> Tuple[np.ndarray, bool]:
+        action_idx = int(action)
+        if action_idx not in (0, 1):
+            raise ValueError("ContinuousCorridor action must be 0 (left) or 1 (right)")
+
+        direction = -1.0 if action_idx == 0 else 1.0
+        raw_next_x = float(self.position[0]) + direction * self.max_velocity
+        min_x, max_x = self._valid_x_bounds()
+        next_x = float(np.clip(raw_next_x, min_x, max_x))
+        wall_collision = not np.isclose(raw_next_x, next_x)
+        return np.array([next_x, self._center_y()], dtype=np.float32), wall_collision
+
+    def step(self, action: int):
+        obs, reward, terminated, truncated, info = super().step(action)
+        info["xy"] = self.position.copy()
+        info["horizon"] = self.horizon
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        gym.Env.reset(self, seed=seed)
+
+        if options is not None and "start_position" in options:
+            self.position = self._as_corridor_position(options["start_position"], "start")
+        elif self._fixed_start_position is not None:
+            self.position = self._as_corridor_position(self._fixed_start_position, "start")
+        else:
+            self.position = self._center_position()
+
+        if options is not None and "goal_position" in options:
+            self.goal = self._as_corridor_position(options["goal_position"], "goal")
+        elif self._fixed_goal_position is not None:
+            self.goal = self._as_corridor_position(self._fixed_goal_position, "goal")
+        else:
+            self.goal = self._default_goal_position()
+
+        self.steps = 0
+        self.wall_collision = False
+        info = {
+            "position": self.position.copy(),
+            "xy": self.position.copy(),
+            "goal": self.goal.copy(),
+            "distance_to_goal": self._distance_to_goal(),
+            "wall_collision": self.wall_collision,
+        }
+        return self.position.astype(np.float32).copy(), info
+
+    def step_from_position(self, position: np.ndarray, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        original_position = self.position.copy()
+        original_steps = self.steps
+        original_collision = self.wall_collision
+
+        self.position = self._as_corridor_position(position, "debug")
+        new_position, wall_collision = self._move(action)
+        self.position = new_position
+
+        terminated = self._is_goal_reached()
+        truncated = False
+        if self.dense_reward:
+            reward = np.exp(-self._distance_to_goal())
+            reward += 1000.0 if terminated else 0.0
+            if wall_collision and self.wall_penalty > 0.0:
+                reward -= self.wall_penalty
+        else:
+            reward = 0.0 if terminated else -1.0
+
+        info = {
+            "position": new_position.copy(),
+            "xy": new_position.copy(),
+            "goal": self.goal.copy(),
+            "distance_to_goal": self._distance_to_goal(),
+            "success": terminated,
+            "wall_collision": wall_collision,
+        }
+
+        self.position = original_position
+        self.steps = original_steps
+        self.wall_collision = original_collision
+        return new_position, reward, terminated, truncated, info
+
+    def get_debug_coordinates(self) -> Dict[str, np.ndarray]:
+        return {
+            "xy": self.position.copy(),
+            "fixed_start": (
+                self._center_position()
+                if self._fixed_start_position is None
+                else self._as_corridor_position(self._fixed_start_position, "start")
+            ),
+            "fixed_goal": (
+                self._default_goal_position()
+                if self._fixed_goal_position is None
+                else self._as_corridor_position(self._fixed_goal_position, "goal")
+            ),
+        }
+
+    def get_debug_maze_layout(self) -> Dict[str, np.ndarray]:
+        wt = self.wall_thickness
+        min_x, max_x = self._valid_x_bounds()
+        lower = np.array([min_x, self._center_y()], dtype=np.float32)
+        upper = np.array([max_x, self._center_y()], dtype=np.float32)
+        left_wall = np.array([0.0, wt, wt, self.corridor_width], dtype=np.float32)
+        right_wall = np.array([wt + self.corridor_length, wt, wt, self.corridor_width], dtype=np.float32)
+        return {
+            "maze_lower": lower,
+            "maze_upper": upper,
+            "wall_rectangles": np.stack([left_wall, right_wall], axis=0),
+        }
+
+    def get_debug_plot_bounds(self) -> Dict[str, np.ndarray]:
+        min_x, max_x = self._valid_x_bounds()
+        y_margin = max(0.5 * self.corridor_width, self.agent_radius)
+        center_y = self._center_y()
+        return {
+            "lower": np.array([min_x, center_y - y_margin], dtype=np.float32),
+            "upper": np.array([max_x, center_y + y_margin], dtype=np.float32),
+        }
 
 
 class ContinuousSingleRoomEnv(ContinuousRoomEnv):
@@ -653,6 +885,7 @@ class ContinuousMultipleRoomsEnv(ContinuousRoomEnv):
 # Register environments
 def _register_envs():
     envs_to_register = [
+        ("ContinuousCorridor-v0", "env.continuous_rooms:ContinuousCorridorEnv"),
         ("ContinuousSingleRoom-v0", "env.continuous_rooms:ContinuousSingleRoomEnv"),
         ("ContinuousTwoRooms-v0", "env.continuous_rooms:ContinuousTwoRoomsEnv"),
         ("ContinuousFourRooms-v0", "env.continuous_rooms:ContinuousFourRoomsEnv"),

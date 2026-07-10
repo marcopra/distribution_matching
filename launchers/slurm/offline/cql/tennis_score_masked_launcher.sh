@@ -2,11 +2,11 @@
 
 seeds=" 7 8 9"
 model_path=(
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/random"
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/rover"
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/cic"
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/rnd"
-    "/home/mprattico/distribution_matching/data_offline/tennis_score_masked/1M/smm"
+    "data_offline/tennis_score_masked/1M/random"
+    "data_offline/tennis_score_masked/1M/rover"
+    "data_offline/tennis_score_masked/1M/cic"
+    "data_offline/tennis_score_masked/1M/rnd"
+    "data_offline/tennis_score_masked/1M/smm"
 
     )
 

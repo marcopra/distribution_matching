@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
-  - /agent: rover
-  - /env: montezoumarevenge_score_masked
+  - /agent: rover_nystrom_pointmaze_debug
+  - /env: atari/montezoumarevenge_score_masked
   # - override hydra/launcher: submitit_local
   
 # mode
@@ -15,17 +15,17 @@ frame_stack: 3
 action_repeat: 4
 discount: 0.999
 resolution: 84
-grayscale: false
+grayscale: true
 random_init: true
 random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
-num_train_frames: 1_000_000
+num_train_frames: 5_000_000
 num_seed_frames: 8000
 
 # eval
-eval_every_frames: 25000
+eval_every_frames: 75_000
 num_eval_episodes: 1
 
 # snapshot
@@ -47,7 +47,8 @@ save_train_video: false
 save_buffer: true
 use_tb: true
 use_wandb: false
-wandb_project: "montezouma_test"
+save_log: false
+wandb_project: "montezouma_nystrom"
 wandb_entity: "urlb"
 wandb_tag: none
 wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${task_name}
@@ -56,6 +57,23 @@ wandb_id: none
 # experiment
 experiment: exp
 
+agent:
+  feature_dim: 256
+  embeddings: true
+  lr_actor: 1000
+  pmd_steps: 50
+  pmd_eta_mode: backtracking
+  compute_dtype: float64
+  sink_schedule: "linear(0.0, 0.001, 2_000_000)"
+  kernel_type: inner_product
+  nystrom_synthetic_subsamples: false
+  pca_truncation: 5000
+  subsamples: 10000
+  lambda_reg: 1e-6
+  batch_size_actor: 50000
+  update_actor_every_steps: 5000
+  update_every_steps: 100
+  T_init_steps: 10000
 
 hydra:
   run:

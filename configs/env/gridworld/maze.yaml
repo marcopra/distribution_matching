@@ -1,0 +1,13 @@
+# @package _global_
+# Maze Environment Configuration
+
+env:
+  name: "Maze-v0"
+  maze_file: "configs/env/gridworld/mazes/maze_40_seed0.yaml"
+  max_steps: 160
+  render_mode: rgb_array
+  show_coordinates: false
+
+  # Goal and start can override the generated architecture values.
+  goal_position: null
+  start_position: null

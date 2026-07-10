@@ -1,0 +1,75 @@
+# @package _global_
+defaults:
+  - /agent: rnd_discrete
+  - /env: pointmaze/pointmaze_umaze_goal_1
+  - _self_
+
+# mode
+reward_free: true
+
+# task settings
+domain: gym
+task_name: ${env.name}
+obs_type: states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+# PointMaze U-Maze baseline setup
+env:
+  pointmaze:
+    start_position: [1.0, 0.0]
+
+# train settings
+num_train_frames: 2_000_000
+num_seed_frames: 500
+
+# eval
+eval_every_frames: 50_000
+num_eval_episodes: 10
+plot_eval_trajectories: true
+eval_trajectory_plot_dir: eval_trajectory_plots
+eval_trajectory_plot_styles: [maze_overlay]
+eval_trajectory_plot_episodes: [10]
+
+# snapshot
+snapshots: [50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000]
+snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
+
+# replay buffer
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+
+# misc
+seed: 0
+device: cuda
+save_video: true
+save_train_video: false
+save_buffer: false
+save_snapshot: false
+use_tb: true
+use_wandb: true
+save_log: false
+wandb_project: umaze_baselines
+wandb_entity: urlb
+wandb_tag: ${agent.name}
+wandb_run_name: ${agent.name}_seed_${seed}_${now:%Y.%m.%d}_${now:%H%M}_${task_name}
+wandb_id: none
+
+# experiment
+experiment: umaze_baselines
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${task_name}_${agent.name}_seed_${seed}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}
+    subdir: ${hydra.job.num}

@@ -13,7 +13,7 @@ batch_size: 1024
 batch_size_actor: 8100
 nstep: 1
 lr_encoder: 1e-4
-curl: true
+curl: false
 embedding_sum_loss: 0.0
 hidden_dim: 1024
 feature_dim: null
@@ -22,13 +22,13 @@ total_train_steps: ${num_train_frames}
 update_every_steps: 1
 update_actor_every_steps: 1500
 pmd_steps: 100
-pmd_eta_mode: none # [none, adagrad, backtracking]
+pmd_eta_mode: backtracking # [none, adagrad, backtracking]
 pmd_best_iterate: true
 pmd_grad_clip_norm: 0.0
 pmd_adagrad_eps: 1e-8
 pmd_eta_min: 1e-8
 pmd_eta_max: 1e3
-pmd_backtrack_factor: 0.5
+pmd_backtrack_factor: 0.25
 pmd_backtrack_max_trials: 12
 sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15

@@ -1,0 +1,15 @@
+# @package _global_
+# Generated Maze Environment Configuration
+
+env:
+  name: Maze-v0
+  maze_file: configs/env/gridworld/mazes/maze_200_seed7.yaml
+  max_steps: 128
+  render_mode: rgb_array
+  show_coordinates: false
+  goal_position:
+  - 1
+  - 18
+  start_position:
+  - 17
+  - 18

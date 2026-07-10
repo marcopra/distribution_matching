@@ -1,0 +1,24 @@
+# @package _global_
+defaults:
+  - /env/gridworld: multiplerooms5_4x4_0
+  - _self_
+
+task_name: ${env.name}
+obs_type: discrete_states
+frame_stack: 1
+action_repeat: 1
+resolution: 84
+grayscale: false
+random_init: false
+random_goal: false
+seed: 1
+
+replay_buffer_dir: models/discrete/multiplerooms/cic
+target_coverage_pcts: [25, 50, 75, 90, 95, 99, 100]
+max_samples: null
+output_path: models/discrete/multiplerooms/cic/coverage_speed.csv
+plot_path: models/discrete/multiplerooms/cic/coverage_speed.png
+
+hydra:
+  run:
+    dir: .

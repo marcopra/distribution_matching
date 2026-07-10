@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /agent: rover
-  - /env: multiplerooms5_4x4_0
+  - /env: gridworld/multiplerooms5_4x4_0
   # - override hydra/launcher: submitit_local
   
 # mode
@@ -21,12 +21,22 @@ random_goal: true
 update_actor_after_critic_steps: 0
 
 # train settings
-num_train_frames: 50_000
-num_seed_frames: 4000
+num_train_frames: 1_000_000
+num_seed_frames: 2000
 
 # eval
-eval_every_frames: 10000
+eval_every_frames: 25000
 num_eval_episodes: 1
+plot_eval_trajectories: false
+eval_trajectory_plot_dir: eval_trajectory_plots
+# 1-based eval checkpoints at which to save cumulative trajectory plots.
+# For [20, 25, 35], plots contain the first 20, 25, 35 trajectories;
+# the final eval episode is always included when this list is non-empty.
+eval_trajectory_plot_episodes: [20,25,35]
+eval_trajectory_plot_styles:
+  - suite
+  - occupancy
+  - small_multiples
 
 # snapshot
 snapshots: [500000000000]
@@ -47,6 +57,7 @@ save_train_video: false
 save_buffer: true
 use_tb: true
 use_wandb: false
+save_log: false
 wandb_project: "pretrain_gym"
 wandb_entity: "urlb"
 wandb_tag: none
@@ -58,8 +69,6 @@ experiment: exp
 
 # agent overrides
 agent:
-  feature_dim: 200
-  lambda_reg: 1e-6
   embeddings: true
   lr_actor: 10
   pmd_steps: 250
@@ -68,6 +77,9 @@ agent:
   T_init_steps: 300
   embedding_sum_loss: 0
   pmd_eta_mode: backtracking
+  lr_T: 1e-3
+  lr_encoder: 1e-3
+  curl: false
 
 hydra:
   run:

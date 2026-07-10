@@ -2,7 +2,7 @@ import datetime
 import io
 import random
 import traceback
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 import torch
@@ -37,6 +37,8 @@ class ReplayBufferStorage:
         self._replay_dir = replay_dir
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
+        self._transition_views = {}
+        self._synthetic_first_transition = None
         self._preload()
 
     def __len__(self):
@@ -51,6 +53,7 @@ class ReplayBufferStorage:
                 value = np.full(spec.shape, value, spec.dtype)
             assert spec.shape == value.shape and spec.dtype == value.dtype
             self._current_episode[spec.name].append(value)
+        self._record_pending_transitions()
         if time_step.last():
             episode = dict()
             for spec in self._data_specs:
@@ -61,6 +64,152 @@ class ReplayBufferStorage:
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
             self._store_episode(episode)
+
+    def register_transition_view(self, nstep, discount):
+        """Register a lightweight stream of new transitions for actor-side encoders.
+
+        This does not change the replay-buffer sampling API. It only keeps raw
+        transitions that have not yet been acknowledged by the actor FIFO, so
+        actor updates can encode new data without depending on episode files.
+        """
+        key = (int(nstep), float(discount))
+        if key not in self._transition_views:
+            self._transition_views[key] = {
+                'pending': deque(),
+                'next_id': 0,
+                'first_transition': None,
+            }
+        return key
+
+    def set_synthetic_first_transition(self, time_step, meta=None, overwrite=False):
+        """Set a fake first transition whose next state is the provided time step.
+
+        This is intentionally storage-level and opt-in so normal replay sampling
+        stays unchanged. The synthetic transition is returned only by the
+        "first transition" paths used by Rover-style actor updates.
+        """
+        if self._synthetic_first_transition is not None and not overwrite:
+            return
+
+        meta = {} if meta is None else meta
+        values = {}
+        for spec in self._data_specs:
+            value = time_step[spec.name]
+            if np.isscalar(value):
+                value = np.full(spec.shape, value, spec.dtype)
+            values[spec.name] = np.asarray(value, dtype=spec.dtype)
+
+        next_obs = values['observation']
+        obs = np.zeros_like(next_obs)
+        action = np.zeros_like(values['action'])
+        reward = np.zeros_like(values['reward'])
+        discount = np.ones_like(values['discount'])
+
+        meta_values = []
+        for spec in self._meta_specs:
+            value = meta.get(spec.name, None)
+            if value is None:
+                value = np.zeros(spec.shape, dtype=spec.dtype)
+            elif np.isscalar(value):
+                value = np.full(spec.shape, value, spec.dtype)
+            else:
+                value = np.asarray(value, dtype=spec.dtype)
+            meta_values.append(value)
+
+        self._synthetic_first_transition = (
+            obs,
+            action,
+            reward,
+            discount,
+            next_obs,
+            *meta_values,
+        )
+
+    def get_synthetic_first_transition(self):
+        return self._synthetic_first_transition
+
+    def _record_pending_transitions(self):
+        if not self._transition_views:
+            return
+        if 'observation' not in self._current_episode:
+            return
+
+        episode_length = len(self._current_episode['observation'])
+        for key, view in self._transition_views.items():
+            nstep, discount = key
+            if episode_length < nstep + 1:
+                continue
+
+            start_idx = episode_length - nstep - 1
+            transition = self._build_transition_from_episode(
+                self._current_episode,
+                start_idx,
+                nstep,
+                discount,
+            )
+            transition_id = view['next_id']
+            view['next_id'] += 1
+            view['pending'].append((transition_id, transition))
+            if view['first_transition'] is None:
+                view['first_transition'] = transition
+
+    def _build_transition_from_episode(self, episode, start_idx, nstep, discount):
+        obs = episode['observation'][start_idx]
+        action = episode['action'][start_idx + 1]
+        next_obs = episode['observation'][start_idx + nstep]
+
+        reward = np.zeros_like(episode['reward'][start_idx + 1])
+        discount_acc = np.ones_like(episode['discount'][start_idx + 1])
+        for i in range(nstep):
+            reward += discount_acc * episode['reward'][start_idx + 1 + i]
+            discount_acc *= episode['discount'][start_idx + 1 + i] * discount
+
+        meta = [
+            episode[spec.name][start_idx]
+            for spec in self._meta_specs
+        ]
+        return (obs, action, reward, discount_acc, next_obs, *meta)
+
+    def get_pending_transition_batch(self, view_key, after_id=None, limit=None):
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+
+        min_id = -1 if after_id is None else int(after_id)
+        pending = [
+            (transition_id, transition)
+            for transition_id, transition in view['pending']
+            if transition_id > min_id
+        ]
+        if limit is not None:
+            pending = pending[:int(limit)]
+        if not pending:
+            return None, None
+
+        transition_ids = np.array([transition_id for transition_id, _ in pending], dtype=np.int64)
+        transitions = tuple(
+            np.stack([transition[field_idx] for _, transition in pending], axis=0)
+            for field_idx in range(len(pending[0][1]))
+        )
+        return transition_ids, transitions
+
+    def discard_pending_transitions(self, view_key, through_id):
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+
+        through_id = int(through_id)
+        pending = view['pending']
+        while pending and pending[0][0] <= through_id:
+            pending.popleft()
+
+    def get_first_transition(self, view_key):
+        if self._synthetic_first_transition is not None:
+            return self._synthetic_first_transition
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+        return view['first_transition']
 
     def _preload(self):
         self._num_episodes = 0
@@ -99,6 +248,10 @@ class ReplayBuffer(IterableDataset):
         self._transition_cache = dict()
         self._all_data_cache = None
         self._all_data_cache_key = None
+        self._transition_view_key = self._storage.register_transition_view(
+            self._nstep,
+            self._discount,
+        )
 
     def _invalidate_transition_views(self):
         self._all_data_cache = None
@@ -130,8 +283,8 @@ class ReplayBuffer(IterableDataset):
             eps_fn.unlink(missing_ok=True)
         return True
 
-    def _try_fetch(self, force=False):
-        if not force and self._samples_since_last_fetch < self._fetch_every:
+    def _try_fetch(self):
+        if self._samples_since_last_fetch < self._fetch_every:
             return
         self._samples_since_last_fetch = 0
         try:
@@ -153,6 +306,11 @@ class ReplayBuffer(IterableDataset):
                 break
 
     def _sample(self, first=False):
+        if first:
+            synthetic_first_transition = self._storage.get_synthetic_first_transition()
+            if synthetic_first_transition is not None:
+                return synthetic_first_transition
+
         try:
             self._try_fetch()
         except:
@@ -224,17 +382,9 @@ class ReplayBuffer(IterableDataset):
         self._all_data_cache_key = cache_key
         return all_transitions
 
-    def _get_first_stored_transition(self):
-        for eps_fn in self._episode_fns:
-            transitions = self._episode_to_transitions(eps_fn)
-            if transitions is None:
-                continue
-            return tuple(field[:1] for field in transitions)
-        raise RuntimeError('Replay buffer is empty')
-
-    def get_all_data(self, last_n=None, first=False):
+    def get_all_data(self, last_n=None):
         try:
-            self._try_fetch(force=True)
+            self._try_fetch()
         except:
             traceback.print_exc()
 
@@ -244,13 +394,8 @@ class ReplayBuffer(IterableDataset):
         if last_n is None:
             return self._get_all_transitions()
 
-        if first:
-            first_transition = self._get_first_stored_transition()
-            if last_n == 1:
-                return first_transition
-
         transition_batches = []
-        remaining = last_n - 1 if first else last_n
+        remaining = last_n
         for eps_fn in reversed(self._episode_fns):
             if remaining == 0:
                 break
@@ -268,23 +413,45 @@ class ReplayBuffer(IterableDataset):
             remaining -= batch_size
 
         if not transition_batches:
-            if first:
-                return first_transition
             raise RuntimeError('Replay buffer is empty')
 
         transition_batches.reverse()
-        all_transitions = tuple(
+        return tuple(
             np.concatenate([batch[field_idx] for batch in transition_batches], axis=0)
             for field_idx in range(len(transition_batches[0]))
         )
 
-        if not first:
-            return all_transitions
-
-        return tuple(
-            np.concatenate([first_transition[field_idx], all_transitions[field_idx]], axis=0)
-            for field_idx in range(len(first_transition))
+    def get_new_transitions_since(self, last_transition_id=None, limit=None):
+        # Actor FIFO integration point: this streams only transitions that have
+        # not been acknowledged yet and does not rely on saved episode files.
+        return self._storage.get_pending_transition_batch(
+            self._transition_view_key,
+            after_id=last_transition_id,
+            limit=limit,
         )
+
+    def mark_transitions_encoded(self, through_transition_id):
+        self._storage.discard_pending_transitions(
+            self._transition_view_key,
+            through_transition_id,
+        )
+
+    def get_first_transition(self):
+        first_transition = self._storage.get_first_transition(self._transition_view_key)
+        if first_transition is not None:
+            return tuple(np.expand_dims(field, axis=0) for field in first_transition)
+
+        try:
+            self._try_fetch()
+        except:
+            traceback.print_exc()
+
+        for eps_fn in self._episode_fns:
+            transitions = self._episode_to_transitions(eps_fn)
+            if transitions is not None and transitions[0].shape[0] > 0:
+                return tuple(field[:1] for field in transitions)
+
+        raise RuntimeError('Replay buffer is empty')
 
     def __iter__(self):
         while True:

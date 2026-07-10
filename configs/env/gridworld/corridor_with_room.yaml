@@ -1,0 +1,16 @@
+# @package _global_
+# Corridor-with-room Environment Configuration
+
+env:
+  name: "CorridorWithRoom-v0"
+  length: 11
+  max_steps: 15
+  render_mode: rgb_array
+  show_coordinates: false
+  dense_reward: false
+
+  # Default start is the very left cell in the middle row: [-1, 1].
+  start_position: [-1, 1]
+
+  # Default goal is the extra right cell in the middle row: [11, 1].
+  goal_position: null

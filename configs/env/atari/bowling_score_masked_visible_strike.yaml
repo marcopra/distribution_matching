@@ -1,0 +1,13 @@
+# @package _global_
+# Pong Environment Configuration
+
+env:
+  name: "BowlingNoFrameskip-v4"
+  render_mode: rgb_array
+  atari:
+    score_mask:
+      enabled: true
+      band_height: 14
+
+# agent:
+#   feature_dim: 512

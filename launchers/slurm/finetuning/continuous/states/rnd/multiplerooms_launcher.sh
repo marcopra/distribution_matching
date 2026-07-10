@@ -6,7 +6,7 @@ envs=("continuous_multiple_rooms_0"
        "continuous_multiple_rooms_2" 
     )
 model_path=(
-    "/home/mprattico/distribution_matching/models/continuous/rnd/multiplerooms/states/snapshot.pt"
+    "models/continuous/rnd/multiplerooms/states/snapshot.pt"
     )
 
 

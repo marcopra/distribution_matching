@@ -2,8 +2,8 @@
 
 seeds="3 4"
 model_path=(
-    "/home/mprattico/distribution_matching/data_offline/pong/1M/random"
-    "/home/mprattico/distribution_matching/data_offline/pong/1M/rover"
+    "data_offline/pong/1M/random"
+    "data_offline/pong/1M/rover"
     )
 
 

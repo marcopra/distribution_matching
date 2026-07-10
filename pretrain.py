@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+import sys
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
@@ -24,9 +25,75 @@ from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 import ale_py
 from omegaconf import open_dict
+from agent.utils_debug_visualization import (
+    extract_eval_trajectory_point,
+    save_maze_trajectory_overlay_plot,
+    # save_eval_trajectory_plots,
+)
 
 
 torch.backends.cudnn.benchmark = True
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self):
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+    def fileno(self):
+        for stream in self.streams:
+            if hasattr(stream, "fileno"):
+                return stream.fileno()
+        raise OSError("no stream has fileno")
+
+    @property
+    def encoding(self):
+        return getattr(self.streams[0], "encoding", None)
+
+
+class ConsoleLog:
+    def __init__(self, log_path):
+        self.log_path = log_path
+        self.log_file = None
+        self.stdout = None
+        self.stderr = None
+
+    def __enter__(self):
+        self.stdout = sys.stdout
+        self.stderr = sys.stderr
+        self.log_file = open(self.log_path, 'a', buffering=1)
+        sys.stdout = Tee(self.stdout, self.log_file)
+        sys.stderr = Tee(self.stderr, self.log_file)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        sys.stdout = self.stdout
+        sys.stderr = self.stderr
+        self.log_file.close()
+
+
+def enable_console_log(log_path):
+    return ConsoleLog(log_path)
+
+
+class NullContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
 
 
 def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
@@ -55,6 +122,9 @@ class Workspace:
         if not hasattr(self.cfg, 'grayscale'):
             with open_dict(self.cfg):
                 self.cfg.grayscale = False
+        if cfg.seed == -1:
+            cfg.seed = np.random.randint(0, 1000000)
+            
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
 
@@ -82,16 +152,32 @@ class Workspace:
                              use_tb=cfg.use_tb,
                              use_wandb=cfg.use_wandb)
         # create envs
-        task = cfg.task_name
-        if hasattr(cfg, 'env'):
-            env_kwargs = gym_env.make_kwargs(cfg)
-        else:
-            env_kwargs = {}
+        env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
+        env_kwargs.pop('name', None)
+        env_kwargs.pop('synthetic_first_transition', None)
 
-        self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
-        self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
+        self.train_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=True,
+            **env_kwargs,
+        )
+        self.eval_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=True,
+            **env_kwargs,
+        )
        
         # TODO: modify the make function to work with cfg and modify inplace the cfg values, this is a temporary solution to avoid modifying the make function
         if isinstance(self.train_env.unwrapped, ale_py.env.AtariEnv) or str(self.cfg.task_name).startswith("ALE/"):
@@ -115,8 +201,8 @@ class Workspace:
 
     
         if hasattr(self.agent, 'insert_env'):
-            # Pass the wrapped train_env, not unwrapped
-            self.agent.insert_env(self.train_env)
+            # Use eval_env for debug rollouts so visualization does not disturb training.
+            self.agent.insert_env(self.eval_env)
     
 
         # create replay buffer
@@ -154,6 +240,7 @@ class Workspace:
             is_training_sample=False)
         
         self.snapshot_steps = cfg.snapshots
+        self.save_snapshot_flag =  cfg.save_snapshot if hasattr(cfg, 'save_snapshot') else True
 
         self.timer = utils.Timer()
         self._global_step = 0
@@ -195,15 +282,32 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
+    def _should_use_synthetic_first_transition(self):
+        env_cfg = getattr(self.cfg, "env", None)
+        if env_cfg is not None and hasattr(env_cfg, "synthetic_first_transition"):
+            return bool(env_cfg.synthetic_first_transition)
+        return str(self.cfg.task_name) in {"MiddleRoom-v0"}
+
+    def _maybe_set_synthetic_first_transition(self, time_step, meta):
+        if not self._should_use_synthetic_first_transition():
+            return
+        self.replay_storage.set_synthetic_first_transition(time_step, meta=meta)
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         meta = self.agent.init_meta()
+        eval_trajectories = []
         eval_mode = False
         if eval_mode == False:
             utils.ColorPrint.yellow("Evaluating with eval_mode=False")
         while eval_until_episode(episode):
+            meta = self.agent.init_meta()
             time_step = self.eval_env.reset()
+            trajectory = []
+            point = extract_eval_trajectory_point(self.eval_env, time_step)
+            if point is not None:
+                trajectory.append(point)
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
@@ -212,12 +316,19 @@ class Workspace:
                                             self.global_step,
                                             eval_mode=eval_mode) # I am not sure we should evaluate with eval_mode=True during pretrain... ORIGINAL CODE: True
                 time_step = self.eval_env.step(action)
+                point = extract_eval_trajectory_point(self.eval_env, time_step)
+                if point is not None:
+                    trajectory.append(point)
                 self.video_recorder.record(self.eval_env)
                 total_reward += time_step.reward
                 step += 1
 
             episode += 1
+            if trajectory:
+                eval_trajectories.append(trajectory)
             self.video_recorder.save(f'{self.global_frame}.mp4')
+
+        self._save_eval_trajectory_plots(eval_trajectories)
 
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             log('episode_reward', total_reward / episode)
@@ -232,6 +343,49 @@ class Workspace:
                 if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
                     log('montezuma_max_room_id', info['montezuma_max_room_id'])
 
+    def _save_eval_trajectory_plots(self, trajectories):
+        enabled = getattr(self.cfg, "plot_eval_trajectories", False)
+        if not enabled or not trajectories:
+            return
+
+        save_dir = getattr(self.cfg, "eval_trajectory_plot_dir", "eval_trajectory_plots")
+        save_dir = self.work_dir / Path(save_dir)
+        for checkpoint in self._eval_trajectory_plot_checkpoints(len(trajectories)):
+            checkpoint_trajectories = trajectories[:checkpoint]
+            try:
+                save_maze_trajectory_overlay_plot(
+                    trajectories=checkpoint_trajectories,
+                    env=self.eval_env,
+                    step=self.global_frame,
+                    save_dir=save_dir,
+                )
+                # Previous multi-style trajectory plotting intentionally disabled:
+                # styles = getattr(self.cfg, "eval_trajectory_plot_styles", None)
+                # if styles is not None:
+                #     styles = tuple(styles)
+                # save_eval_trajectory_plots(
+                #     trajectories=checkpoint_trajectories,
+                #     env=self.eval_env,
+                #     step=self.global_frame,
+                #     save_dir=save_dir,
+                #     styles=styles,
+                # )
+            except Exception as exc:
+                print(f"Could not generate evaluation trajectory plots: {exc}")
+
+    def _eval_trajectory_plot_checkpoints(self, n_trajectories):
+        plot_episodes = getattr(self.cfg, "eval_trajectory_plot_episodes", None)
+        if plot_episodes is None or len(plot_episodes) == 0:
+            return [n_trajectories]
+
+        checkpoints = {int(episode) for episode in plot_episodes}
+        checkpoints.add(n_trajectories)
+        return [
+            checkpoint
+            for checkpoint in sorted(checkpoints)
+            if 1 <= checkpoint <= n_trajectories
+        ]
+
     def train(self):
         # predicates
         train_until_step = utils.Until(self.cfg.num_train_frames,
@@ -243,8 +397,19 @@ class Workspace:
 
         episode_step, episode_reward = 0, 0
         time_step = self.train_env.reset()
-        print(f"Initial observation shape: {time_step.observation.shape}")
+        if self.cfg.obs_type == 'pixels' and hasattr(time_step.observation, 'shape'):
+            base_channels = 1 if self.cfg.grayscale else 3
+            stacked_channels = time_step.observation.shape[0]
+            effective_frame_stack = stacked_channels // base_channels if base_channels > 0 else 0
+            print(
+                "Initial observation shape: "
+                f"{time_step.observation.shape} "
+                f"(base_channels={base_channels}, frame_stack={effective_frame_stack})"
+            )
+        else:
+            print(f"Initial observation shape: {time_step.observation.shape}")
         meta = self.agent.init_meta()
+        self._maybe_set_synthetic_first_transition(time_step, meta)
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)
         metrics = None
@@ -253,24 +418,23 @@ class Workspace:
             # if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
             if time_step.last() or (hasattr(self.agent, "dataset") and self.agent.dataset.reset_episode):
                 self._global_episode += 1
-                # Print every 10 episodes:
-                if self._global_episode % 10 == 0:
-                    self.train_video_recorder.save(f'{self.global_frame}.mp4')
-                    # wait until all the metrics schema is populated
-                    if metrics is not None:
-                        # log stats
-                        elapsed_time, total_time = self.timer.reset()
-                        episode_frame = episode_step * self.cfg.action_repeat
-                        with self.logger.log_and_dump_ctx(self.global_frame,
-                                                        ty='train') as log:
-                            log('fps', episode_frame / elapsed_time)
-                            log('total_time', total_time)
-                            log('episode_reward', episode_reward)
-                            log('episode_length', episode_frame)
-                            log('episode', self.global_episode)
-                            log('buffer_size', len(self.replay_storage))
-                            log('step', self.global_step)
-                            self._log_montezuma_episode_metrics(log, time_step)
+                
+                self.train_video_recorder.save(f'{self.global_frame}.mp4')
+                # wait until all the metrics schema is populated
+                if metrics is not None:
+                    # log stats
+                    elapsed_time, total_time = self.timer.reset()
+                    episode_frame = episode_step * self.cfg.action_repeat
+                    with self.logger.log_and_dump_ctx(self.global_frame,
+                                                    ty='train') as log:
+                        log('fps', episode_frame / elapsed_time)
+                        log('total_time', total_time)
+                        log('episode_reward', episode_reward)
+                        log('episode_length', episode_frame)
+                        log('episode', self.global_episode)
+                        log('buffer_size', len(self.replay_storage))
+                        log('step', self.global_step)
+                        self._log_montezuma_episode_metrics(log, time_step)
 
                 if type(self.agent).__name__ == "DistMatchingEmbeddingAgent":
                     meta = self.agent.update_meta(meta, self.global_step, time_step)
@@ -330,53 +494,87 @@ class Workspace:
             self.snapshot_steps.pop(0)
             print(f'saving snapshot to {snapshot} at frame {self.global_frame}')
         else:
+            if self.save_snapshot_flag == False:
+                return
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode']
         payload = {k: self.__dict__[k] for k in keys_to_save}
-        
-        # Temporarily remove all environment references before saving
-        env_ref = None
-        wrapped_env_ref = None
-        discrete_env_ref = None
-        visualizer_ref = None
-        
-        if hasattr(payload['agent'], 'env'):
-            env_ref = payload['agent'].env
-            payload['agent'].env = None
-        if hasattr(payload['agent'], 'wrapped_env'):
-            wrapped_env_ref = payload['agent'].wrapped_env
-            payload['agent'].wrapped_env = None
-        if hasattr(payload['agent'], '_discrete_env'):
-            discrete_env_ref = payload['agent']._discrete_env
-            payload['agent']._discrete_env = None
-        if hasattr(payload['agent'], 'visualizer'):
-            visualizer_ref = payload['agent'].visualizer
-            payload['agent'].visualizer = None
-            
-        with snapshot.open('wb') as f:
-            torch.save(payload, f)
-        
-        # Restore all references after saving
-        if env_ref is not None:
-            payload['agent'].env = env_ref
-        if wrapped_env_ref is not None:
-            payload['agent'].wrapped_env = wrapped_env_ref
-        if discrete_env_ref is not None:
-            payload['agent']._discrete_env = discrete_env_ref
-        if visualizer_ref is not None:
-            payload['agent'].visualizer = visualizer_ref
+
+        agent = payload['agent']
+        restored_refs = []
+
+        def stash_attr(obj, attr, replacement=None):
+            # Use __dict__ directly to avoid wrapper __getattr__ recursion while saving.
+            obj_dict = getattr(obj, '__dict__', None)
+            if obj_dict is None or attr not in obj_dict:
+                return
+            restored_refs.append((obj, attr, obj_dict[attr]))
+            setattr(obj, attr, replacement)
+
+        # Temporarily remove all live environment/debug references before saving.
+        # PointMaze/Fetch domain visualizers keep env handles nested under
+        # agent.debug_visualizer.domain_visualizer; those env wrappers are not
+        # safely pickleable and can recurse during torch.load.
+        stash_attr(agent, 'env')
+        stash_attr(agent, 'wrapped_env')
+        stash_attr(agent, '_discrete_env')
+        stash_attr(agent, 'visualizer')
+        stash_attr(agent, 'gridworld_visualizer')
+        stash_attr(agent, 'domain_visualizer')
+
+        debug_visualizer = getattr(agent, '__dict__', {}).get('debug_visualizer', None)
+        stash_attr(debug_visualizer, 'domain_visualizer')
+
+        try:
+            with snapshot.open('wb') as f:
+                torch.save(payload, f)
+        finally:
+            for obj, attr, value in reversed(restored_refs):
+                setattr(obj, attr, value)
+
+    def close(self):
+        replay_iter = getattr(self, "_replay_iter", None)
+        shutdown_workers = getattr(replay_iter, "_shutdown_workers", None)
+        if callable(shutdown_workers):
+            try:
+                shutdown_workers()
+            except Exception as exc:
+                print(f"Could not shut down replay workers cleanly: {exc}")
+
+        for recorder_name in ("video_recorder", "train_video_recorder"):
+            recorder = getattr(self, recorder_name, None)
+            if recorder is not None and hasattr(recorder, "frames"):
+                recorder.frames = []
+
+        for env_name in ("eval_env", "train_env"):
+            env = getattr(self, env_name, None)
+            close = getattr(env, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    print(f"Could not close {env_name} cleanly: {exc}")
 
 
 @hydra.main(config_path='configs', config_name='pretrain/pretrain_atari', version_base='1.1')
 def main(cfg):
     from pretrain import Workspace as W
     root_dir = Path.cwd()
-    workspace = W(cfg)
-    snapshot = root_dir / 'snapshot.pt'
-    if snapshot.exists():
-        print(f'resuming: {snapshot}')
-        workspace.load_snapshot()
-    workspace.train()
+    if not hasattr(cfg, 'save_log'):
+        with open_dict(cfg):
+            cfg.save_log = True
+
+    log_context = enable_console_log(root_dir / 'pretrain.log') if cfg.save_log else NullContext()
+    with log_context:
+        workspace = W(cfg)
+        try:
+            snapshot = root_dir / 'snapshot.pt'
+            if snapshot.exists():
+                print(f'resuming: {snapshot}')
+                workspace.load_snapshot()
+            workspace.train()
+        finally:
+            workspace.close()
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 # @package _global_
+# Classical MiniGrid benchmark configuration.
 defaults:
   - /agent: rover 
   - /env: minigrid_empty_16x16
@@ -47,6 +48,7 @@ save_train_video: false
 save_buffer: true
 use_tb: true
 use_wandb: false
+save_log: false
 wandb_project: "pretrain_gym"
 wandb_entity: "urlb"
 wandb_tag: none
