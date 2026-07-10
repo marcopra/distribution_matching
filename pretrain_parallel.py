@@ -497,7 +497,7 @@ class Workspace:
                     self._global_episode += 1
                     if env_id == 0:
                         self.train_video_recorder.save(f'{self.global_frame}.mp4')
-                    if metrics is not None:
+                    if metrics is not None or True:
                         episode_frame = int(episode_steps[env_id]) * self.cfg.action_repeat
                         with self.logger.log_and_dump_ctx(self.global_frame,
                                                         ty='train') as log:
