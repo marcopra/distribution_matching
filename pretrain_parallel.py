@@ -158,7 +158,7 @@ class Workspace:
         env_kwargs.pop('synthetic_first_transition', None)
 
         self.num_envs = int(getattr(self.cfg, "num_envs", 1))
-        self.base_seed = int(getattr(self.cfg, "base_seed", self.cfg.seed))
+        self.base_seed = int(getattr(self.cfg, "base_seed", self.cfg.seed))*self.num_envs
         self.parallel_attach_eval_env_for_debug = bool(
             getattr(self.cfg, "parallel_attach_eval_env_for_debug", False)
         )
