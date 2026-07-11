@@ -30,6 +30,7 @@ SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_montezouma \
+    wandb_tag=parallel \
     use_wandb=true \
     seed=${SEED} \
     agent.batch_size_actor=${BATCH_SIZE_ACTOR} \
