@@ -1,0 +1,9 @@
+# @package agent
+_target_: agent.random.RandomAgent
+name: random
+obs_type: ??? # filled by pretrain_parallel.py
+obs_shape: ??? # filled by pretrain_parallel.py
+action_shape: ??? # filled by pretrain_parallel.py
+num_expl_steps: ??? # filled by pretrain_parallel.py
+batch_size: 1 # required by shared replay-buffer config; agent never samples it
+nstep: 1
