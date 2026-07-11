@@ -2,6 +2,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
@@ -34,4 +35,6 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.batch_size_actor=${BATCH_SIZE_ACTOR} \
     agent.subsamples=${SUBSAMPLE} \
     agent.sink_schedule=0.0 \
+    encoded_fifo_capacity=${BATCH_SIZE_ACTOR} \
+    num_envs=50
 
