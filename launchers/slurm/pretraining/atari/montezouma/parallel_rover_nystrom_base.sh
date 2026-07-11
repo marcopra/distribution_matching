@@ -36,6 +36,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.batch_size_actor=${BATCH_SIZE_ACTOR} \
     agent.subsamples=${SUBSAMPLE} \
     agent.sink_schedule=0.0 \
-    encoded_fifo_capacity=${BATCH_SIZE_ACTOR} \
-    num_envs=50
+    agent.encoded_fifo_capacity=${BATCH_SIZE_ACTOR} 
 
