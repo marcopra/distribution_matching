@@ -15,6 +15,7 @@ class RandomAgent:
             )
         self.num_actions = int(action_shape[0])
         self.training = False
+        self.requires_replay = False
 
         # pretrain_parallel inspects these schedule attributes.
         self.update_every_steps = 1

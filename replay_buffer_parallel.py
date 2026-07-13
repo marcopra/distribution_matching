@@ -33,13 +33,16 @@ def load_episode(fn):
 
 
 class ReplayBufferStorageParallel:
-    def __init__(self, data_specs, meta_specs, replay_dir, num_envs=1):
+    def __init__(self, data_specs, meta_specs, replay_dir, num_envs=1,
+                 retain_episodes=True):
         self._data_specs = data_specs
         self._meta_specs = meta_specs
         self._replay_dir = replay_dir
         self._num_envs = int(num_envs)
+        self._retain_episodes = bool(retain_episodes)
         replay_dir.mkdir(exist_ok=True)
         self._current_episodes = [defaultdict(list) for _ in range(self._num_envs)]
+        self._has_previous_time_step = [False] * self._num_envs
         self._transition_views = {}
         self._synthetic_first_transition = None
         self._preload()
@@ -49,6 +52,12 @@ class ReplayBufferStorageParallel:
 
     def add(self, time_step, meta, env_id=0):
         env_id = int(env_id)
+        if not self._retain_episodes:
+            if self._has_previous_time_step[env_id]:
+                self._num_transitions += 1
+            self._has_previous_time_step[env_id] = not time_step.last()
+            return
+
         current_episode = self._current_episodes[env_id]
         for key, value in meta.items():
             current_episode[key].append(value)
@@ -250,7 +259,8 @@ ReplayBufferStorage = ReplayBufferStorageParallel
 
 class ReplayBuffer(IterableDataset):
     def __init__(self, storage, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot, first_transition=False, batch_size=None):
+                 fetch_every, save_snapshot, first_transition=False, batch_size=None,
+                 transition_view=False):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -267,10 +277,12 @@ class ReplayBuffer(IterableDataset):
         self._transition_cache = dict()
         self._all_data_cache = None
         self._all_data_cache_key = None
-        self._transition_view_key = self._storage.register_transition_view(
-            self._nstep,
-            self._discount,
-        )
+        self._transition_view_key = None
+        if transition_view:
+            self._transition_view_key = self._storage.register_transition_view(
+                self._nstep,
+                self._discount,
+            )
 
     def _invalidate_transition_views(self):
         self._all_data_cache = None
@@ -444,6 +456,8 @@ class ReplayBuffer(IterableDataset):
     def get_new_transitions_since(self, last_transition_id=None, limit=None):
         # Actor FIFO integration point: this streams only transitions that have
         # not been acknowledged yet and does not rely on saved episode files.
+        if self._transition_view_key is None:
+            raise RuntimeError('Transition stream was not enabled for this replay buffer')
         return self._storage.get_pending_transition_batch(
             self._transition_view_key,
             after_id=last_transition_id,
@@ -451,15 +465,18 @@ class ReplayBuffer(IterableDataset):
         )
 
     def mark_transitions_encoded(self, through_transition_id):
+        if self._transition_view_key is None:
+            raise RuntimeError('Transition stream was not enabled for this replay buffer')
         self._storage.discard_pending_transitions(
             self._transition_view_key,
             through_transition_id,
         )
 
     def get_first_transition(self):
-        first_transition = self._storage.get_first_transition(self._transition_view_key)
-        if first_transition is not None:
-            return tuple(np.expand_dims(field, axis=0) for field in first_transition)
+        if self._transition_view_key is not None:
+            first_transition = self._storage.get_first_transition(self._transition_view_key)
+            if first_transition is not None:
+                return tuple(np.expand_dims(field, axis=0) for field in first_transition)
 
         try:
             self._try_fetch()
@@ -492,7 +509,8 @@ def _worker_init_fn(worker_id):
 
 
 def make_replay_loader(storage, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount, first_transition=False):
+                       save_snapshot, nstep, discount, first_transition=False,
+                       transition_view=False):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(storage,
@@ -503,7 +521,8 @@ def make_replay_loader(storage, max_size, batch_size, num_workers,
                             fetch_every=1000,
                             save_snapshot=save_snapshot,
                             first_transition=first_transition,
-                            batch_size=batch_size if first_transition else None)
+                            batch_size=batch_size if first_transition else None,
+                            transition_view=transition_view)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,

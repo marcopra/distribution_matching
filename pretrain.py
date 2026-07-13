@@ -218,12 +218,16 @@ class Workspace:
 
         # create replay buffer
         first_transition = type(self.agent).__name__ == 'RoverAgent'
+        transition_view = bool(
+            getattr(self.agent, 'requires_transition_view', False)
+        )
         self.replay_loader = make_replay_loader(self.replay_storage,
                                                 cfg.replay_buffer_size,
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
                                                 cfg.save_buffer, cfg.nstep, cfg.discount,
-                                                first_transition=first_transition)
+                                                first_transition=first_transition,
+                                                transition_view=transition_view)
         
         self._replay_iter = None
 

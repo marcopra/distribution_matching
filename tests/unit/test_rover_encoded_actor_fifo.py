@@ -49,6 +49,7 @@ def make_replay(tmp_path, save_snapshot=False):
         discount=0.9,
         fetch_every=1000,
         save_snapshot=save_snapshot,
+        transition_view=True,
     )
     return storage, replay
 

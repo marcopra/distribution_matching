@@ -59,6 +59,8 @@ from agent.rover_visualization.suite import build_debug_visualizer_suite
 # Main Agent
 # ============================================================================
 class RoverAgent:
+    requires_transition_view = True
+
     def __init__(self,
                  name,
                  obs_type,

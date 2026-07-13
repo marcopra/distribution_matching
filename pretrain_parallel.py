@@ -202,6 +202,9 @@ class Workspace:
                                 action_spec,
                                 cfg.num_seed_frames // cfg.action_repeat,
                                 cfg.agent)
+        self.agent_requires_replay = bool(
+            getattr(self.agent, 'requires_replay', True)
+        )
 
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
@@ -223,16 +226,27 @@ class Workspace:
             meta_specs,
             self.work_dir / 'buffer',
             num_envs=self.num_envs,
+            retain_episodes=self.agent_requires_replay or cfg.save_buffer,
         )
 
         # create replay buffer
         first_transition = type(self.agent).__name__ == 'RoverAgent'
-        self.replay_loader = make_replay_loader(self.replay_storage,
-                                                cfg.replay_buffer_size,
-                                                cfg.batch_size,
-                                                cfg.replay_buffer_num_workers,
-                                                cfg.save_buffer, cfg.nstep, cfg.discount,
-                                                first_transition=first_transition)
+        transition_view = bool(
+            getattr(self.agent, 'requires_transition_view', False)
+        )
+        self.replay_loader = None
+        if self.agent_requires_replay:
+            self.replay_loader = make_replay_loader(
+                self.replay_storage,
+                cfg.replay_buffer_size,
+                cfg.batch_size,
+                cfg.replay_buffer_num_workers,
+                cfg.save_buffer,
+                cfg.nstep,
+                cfg.discount,
+                first_transition=first_transition,
+                transition_view=transition_view,
+            )
         
         self._replay_iter = None
 
@@ -288,6 +302,8 @@ class Workspace:
 
     @property
     def replay_iter(self):
+        if self.replay_loader is None:
+            return None
         if self._replay_iter is None:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
@@ -378,7 +394,7 @@ class Workspace:
 
     def _assert_update_schedule_covered(self, logical_steps, update_steps):
         """Catch vector-step regressions that would skip scalar schedule ticks."""
-        if not __debug__:
+        if not __debug__ or not self.agent_requires_replay:
             return
 
         update_steps = set(int(step) for step in update_steps)
@@ -478,7 +494,8 @@ class Workspace:
                 self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
                 if env_id == 0:
                     self.train_video_recorder.record(time_step.image_observation)
-                if not seed_until_step(int(logical_steps[env_id])):
+                if (self.agent_requires_replay and
+                        not seed_until_step(int(logical_steps[env_id]))):
                     update_steps.append(int(logical_steps[env_id]))
 
             self._assert_update_schedule_covered(logical_steps, update_steps)
