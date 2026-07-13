@@ -72,6 +72,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    sticky_actions: float = 0.25
+    "sticky actions"
 
     # RND arguments
     update_proportion: float = 0.25
@@ -122,8 +124,13 @@ class RecordEpisodeStatistics(gym.Wrapper):
         return observations
 
     def _update_montezuma_tracking(self, infos):
-        if not self.is_montezuma or "ram" not in infos:
+        if not self.is_montezuma:
             return
+        if "ram" not in infos:
+            raise RuntimeError(
+                "Montezuma room tracking requires EnvPool Atari RAM in info['ram']. "
+                "Update EnvPool to a version that includes sail-sg/envpool#353."
+            )
 
         room_ids = np.asarray(infos["ram"])[:, self.MONTEZUMA_ROOM_RAM_INDEX].astype(np.int32)
         missing_initial_room = self.montezuma_initial_room < 0
@@ -313,7 +320,7 @@ if __name__ == "__main__":
         episodic_life=True,
         reward_clip=True,
         seed=args.seed,
-        repeat_action_probability=0.25,
+        repeat_action_probability=args.sticky_actions,
     )
     envs.num_envs = args.num_envs
     envs.task_id = args.env_id
