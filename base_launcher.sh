@@ -12,7 +12,7 @@ cd $SLURM_SUBMIT_DIR
 
 # Load environment
 source ~/.bashrc
-conda activate cleanrl
+conda activate cleanrl311
 
 
 export HYDRA_FULL_ERROR=1
