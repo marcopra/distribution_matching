@@ -6,15 +6,15 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpuv
+#SBATCH --partition=gpua
 
 cd $SLURM_SUBMIT_DIR
 
 # Load environment
 source ~/.bashrc
-conda activate dist_matching
+conda activate cleanrl
 
 
 export HYDRA_FULL_ERROR=1
 
-python train_offline.py agent=ddpg_discrete_with_learned_encoder replay_buffer_dir=/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/smm env=pong_score_masked use_wandb=true agent.feature_dim=50 seed=1 num_grad_steps=500000 +encoder_path=/home/mprattico/distribution_matching/data_offline/pong_score_masked/1M/smm/164128_smm/models/pixels/gym/smm/2/snapshot.pt grayscale=false
+python cleanrl_rnd_ppo.py --track --wandb_project_name "montezouma_nystrom" --seed 0

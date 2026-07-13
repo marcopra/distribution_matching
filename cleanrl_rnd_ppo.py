@@ -40,7 +40,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "MontezumaRevenge-v5"
     """the id of the environment"""
-    total_timesteps: int = 2000000000
+    total_timesteps: int = 200000000
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
@@ -95,11 +95,19 @@ class Args:
 
 
 class RecordEpisodeStatistics(gym.Wrapper):
+    MONTEZUMA_ROOM_RAM_INDEX = 3
+
     def __init__(self, env, deque_size=100):
         super().__init__(env)
         self.num_envs = getattr(env, "num_envs", 1)
         self.episode_returns = None
         self.episode_lengths = None
+        self.is_montezuma = "MontezumaRevenge" in str(getattr(env, "spec", "")) or "MontezumaRevenge" in str(
+            getattr(env, "task_id", "")
+        )
+        self.montezuma_initial_room = None
+        self.montezuma_max_room = None
+        self.montezuma_visited_second_room = None
 
     def reset(self, **kwargs):
         observations = super().reset(**kwargs)
@@ -108,14 +116,37 @@ class RecordEpisodeStatistics(gym.Wrapper):
         self.lives = np.zeros(self.num_envs, dtype=np.int32)
         self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
         self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        self.montezuma_initial_room = np.full(self.num_envs, -1, dtype=np.int32)
+        self.montezuma_max_room = np.full(self.num_envs, -1, dtype=np.int32)
+        self.montezuma_visited_second_room = np.zeros(self.num_envs, dtype=bool)
         return observations
+
+    def _update_montezuma_tracking(self, infos):
+        if not self.is_montezuma or "ram" not in infos:
+            return
+
+        room_ids = np.asarray(infos["ram"])[:, self.MONTEZUMA_ROOM_RAM_INDEX].astype(np.int32)
+        missing_initial_room = self.montezuma_initial_room < 0
+        self.montezuma_initial_room[missing_initial_room] = room_ids[missing_initial_room]
+        self.montezuma_max_room = np.maximum(self.montezuma_max_room, room_ids)
+        self.montezuma_visited_second_room |= room_ids != self.montezuma_initial_room
+
+        infos["montezuma_room_id"] = room_ids
+        infos["montezuma_max_room_id"] = self.montezuma_max_room.copy()
+        infos["montezuma_visited_second_room"] = self.montezuma_visited_second_room.copy()
 
     def step(self, action):
         observations, rewards, dones, infos = super().step(action)
+        self._update_montezuma_tracking(infos)
         self.episode_returns += infos["reward"]
         self.episode_lengths += 1
         self.returned_episode_returns[:] = self.episode_returns
         self.returned_episode_lengths[:] = self.episode_lengths
+        if self.is_montezuma and "ram" in infos:
+            reset_mask = infos["terminated"].astype(bool)
+            self.montezuma_initial_room[reset_mask] = -1
+            self.montezuma_max_room[reset_mask] = -1
+            self.montezuma_visited_second_room[reset_mask] = False
         self.episode_returns *= 1 - infos["terminated"]
         self.episode_lengths *= 1 - infos["terminated"]
         infos["r"] = self.returned_episode_returns
@@ -285,6 +316,7 @@ if __name__ == "__main__":
         repeat_action_probability=0.25,
     )
     envs.num_envs = args.num_envs
+    envs.task_id = args.env_id
     envs.single_action_space = envs.action_space
     envs.single_observation_space = envs.observation_space
     envs = RecordEpisodeStatistics(envs)
@@ -386,6 +418,18 @@ if __name__ == "__main__":
                         global_step,
                     )
                     writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
+                    if "montezuma_visited_second_room" in info:
+                        writer.add_scalar(
+                            "charts/montezuma_visited_second_room",
+                            float(info["montezuma_visited_second_room"][idx]),
+                            global_step,
+                        )
+                    if "montezuma_max_room_id" in info:
+                        writer.add_scalar(
+                            "charts/montezuma_max_room_id",
+                            int(info["montezuma_max_room_id"][idx]),
+                            global_step,
+                        )
 
         curiosity_reward_per_env = np.array(
             [discounted_reward.update(reward_per_step) for reward_per_step in curiosity_rewards.cpu().data.numpy().T]
