@@ -322,13 +322,13 @@ if __name__ == "__main__":
         seed=args.seed,
         repeat_action_probability=args.sticky_actions,
     )
-    envs.num_envs = args.num_envs
+    # envs.num_envs = args.num_envs
     envs.task_id = args.env_id
-    envs.single_action_space = envs.action_space
-    envs.single_observation_space = envs.observation_space
+    # envs.single_action_space = envs.action_space
+    # envs.single_observation_space = envs.observation_space
     envs = RecordEpisodeStatistics(envs)
-    assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
+    print("envs.single_action_space", envs.single_action_space)
+    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     agent = Agent(envs).to(device)
     rnd_model = RNDModel(4, envs.single_action_space.n).to(device)
     combined_parameters = list(agent.parameters()) + list(rnd_model.predictor.parameters())

@@ -17,4 +17,4 @@ conda activate cleanrl
 
 export HYDRA_FULL_ERROR=1
 
-python cleanrl_rnd_ppo.py --track --wandb_project_name "montezouma_nystrom" --seed 0
+python cleanrl_rnd_ppo.py --track --wandb_project_name "montezouma_nystrom" --seed 2
