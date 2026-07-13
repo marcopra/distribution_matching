@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import envpool
 import gym
+import gymnasium
 import numpy as np
 import torch
 import torch.nn as nn
@@ -112,7 +113,8 @@ class RecordEpisodeStatistics(gym.Wrapper):
         self.montezuma_visited_second_room = None
 
     def reset(self, **kwargs):
-        observations = super().reset(**kwargs)
+        reset_out = super().reset(**kwargs)
+        observations = reset_out[0] if isinstance(reset_out, tuple) else reset_out
         self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
         self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
         self.lives = np.zeros(self.num_envs, dtype=np.int32)
@@ -143,7 +145,14 @@ class RecordEpisodeStatistics(gym.Wrapper):
         infos["montezuma_visited_second_room"] = self.montezuma_visited_second_room.copy()
 
     def step(self, action):
-        observations, rewards, dones, infos = super().step(action)
+        step_out = super().step(action)
+        if len(step_out) == 5:
+            observations, rewards, terminated, truncated, infos = step_out
+            dones = np.logical_or(terminated, truncated)
+            infos.setdefault("terminated", terminated)
+            infos.setdefault("truncated", truncated)
+        else:
+            observations, rewards, dones, infos = step_out
         self._update_montezuma_tracking(infos)
         self.episode_returns += infos["reward"]
         self.episode_lengths += 1
@@ -164,6 +173,13 @@ class RecordEpisodeStatistics(gym.Wrapper):
             dones,
             infos,
         )
+
+    def close(self):
+        try:
+            return super().close()
+        except AttributeError as exc:
+            if "'closed'" not in str(exc):
+                raise
 
 
 # ALGO LOGIC: initialize agent here:
@@ -327,8 +343,8 @@ if __name__ == "__main__":
     # envs.single_action_space = envs.action_space
     # envs.single_observation_space = envs.observation_space
     envs = RecordEpisodeStatistics(envs)
-    print("envs.single_action_space", envs.single_action_space)
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    print("envs.single_action_space", envs.single_action_space, type(envs.single_action_space))
+    assert isinstance(envs.single_action_space, gymnasium.spaces.Discrete), "only discrete action space is supported"
     agent = Agent(envs).to(device)
     rnd_model = RNDModel(4, envs.single_action_space.n).to(device)
     combined_parameters = list(agent.parameters()) + list(rnd_model.predictor.parameters())
