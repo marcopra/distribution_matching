@@ -113,6 +113,7 @@ class RoverAgent:
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
+                 max_pending_transitions: Optional[int] = None,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_mult: Optional[float] = None,
@@ -210,6 +211,10 @@ class RoverAgent:
             self.encoded_fifo_capacity = min_fifo_capacity
         self.encoded_fifo_encode_batch_size = int(encoded_fifo_encode_batch_size)
         self.encoded_fifo_cuda_oom_splits = int(encoded_fifo_cuda_oom_splits)
+        self.max_pending_transitions = (
+            None if max_pending_transitions is None
+            else int(max_pending_transitions)
+        )
         self._encoded_actor_fifo = EncodedTransitionFIFO(self.encoded_fifo_capacity)
         self._encoded_fifo_replay_marker = None
         
@@ -1261,6 +1266,10 @@ class RoverAgent:
 
         self._insert_first_transition_if_available(replay_buffer)
         return inserted > 0 or len(self._encoded_actor_fifo) > 0
+
+    def drain_encoded_actor_fifo(self, replay_buffer):
+        """Encode pending replay transitions without running actor/encoder update."""
+        return self._update_encoded_actor_fifo(replay_buffer)
 
     def _sample_encoded_actor_data(self, size, include_first):
         encoded = self._encoded_actor_fifo.sample(

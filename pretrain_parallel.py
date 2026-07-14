@@ -246,6 +246,10 @@ class Workspace:
                 cfg.discount,
                 first_transition=first_transition,
                 transition_view=transition_view,
+                max_pending_transitions=getattr(self.agent, 'max_pending_transitions', None),
+                drop_oldest_pending_on_overflow=(
+                    getattr(self.agent, 'max_pending_transitions', None) is not None
+                ),
             )
         
         self._replay_iter = None
@@ -392,6 +396,32 @@ class Workspace:
         self.logger.log_metrics(metrics, self.global_frame, ty='train')
         return metrics
 
+    def _pending_transition_count(self):
+        if self.replay_loader is None:
+            return 0
+        replay_dataset = self.replay_loader.dataset
+        if not hasattr(replay_dataset, "pending_transition_count"):
+            return 0
+        return int(replay_dataset.pending_transition_count())
+
+    def _drain_encoded_actor_fifo_if_due(self, logical_steps, force=False):
+        if not self.agent_requires_replay or self.replay_loader is None:
+            return False
+        if not hasattr(self.agent, "drain_encoded_actor_fifo"):
+            return False
+
+        if not force:
+            update_every_steps = int(getattr(self.agent, "update_every_steps", 1))
+            force = any(int(step) % update_every_steps == 0 for step in logical_steps)
+        if not force:
+            max_pending = getattr(self.agent, "max_pending_transitions", None)
+            if max_pending is not None:
+                force = self._pending_transition_count() >= int(max_pending)
+        if not force:
+            return False
+
+        return bool(self.agent.drain_encoded_actor_fifo(self.replay_loader.dataset))
+
     def _assert_update_schedule_covered(self, logical_steps, update_steps):
         """Catch vector-step regressions that would skip scalar schedule ticks."""
         if not __debug__ or not self.agent_requires_replay:
@@ -499,6 +529,7 @@ class Workspace:
                     update_steps.append(int(logical_steps[env_id]))
 
             self._assert_update_schedule_covered(logical_steps, update_steps)
+            self._drain_encoded_actor_fifo_if_due(logical_steps)
             self._global_step += self.num_envs
 
             for logical_step in update_steps:

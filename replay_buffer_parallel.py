@@ -88,7 +88,8 @@ class ReplayBufferStorageParallel:
         for env_id, (time_step, meta) in enumerate(zip(time_steps, metas)):
             self.add(time_step, meta, env_id=env_id)
 
-    def register_transition_view(self, nstep, discount):
+    def register_transition_view(self, nstep, discount, max_pending_transitions=None,
+                                 drop_oldest_on_overflow=False):
         """Register a lightweight stream of new transitions for actor-side encoders.
 
         This does not change the replay-buffer sampling API. It only keeps raw
@@ -101,6 +102,11 @@ class ReplayBufferStorageParallel:
                 'pending': deque(),
                 'next_id': 0,
                 'first_transition': None,
+                'max_pending_transitions': (
+                    None if max_pending_transitions is None
+                    else int(max_pending_transitions)
+                ),
+                'drop_oldest_on_overflow': bool(drop_oldest_on_overflow),
             }
         return key
 
@@ -174,8 +180,22 @@ class ReplayBufferStorageParallel:
             transition_id = view['next_id']
             view['next_id'] += 1
             view['pending'].append((transition_id, transition))
+            self._enforce_pending_transition_limit(view)
             if view['first_transition'] is None:
                 view['first_transition'] = transition
+
+    def _enforce_pending_transition_limit(self, view):
+        max_pending = view.get('max_pending_transitions')
+        if max_pending is None:
+            return
+        if max_pending <= 0:
+            raise ValueError("max_pending_transitions must be positive when provided")
+        if not view.get('drop_oldest_on_overflow', False):
+            return
+
+        pending = view['pending']
+        while len(pending) > max_pending:
+            pending.popleft()
 
     def _build_transition_from_episode(self, episode, start_idx, nstep, discount):
         obs = episode['observation'][start_idx]
@@ -227,6 +247,12 @@ class ReplayBufferStorageParallel:
         while pending and pending[0][0] <= through_id:
             pending.popleft()
 
+    def pending_transition_count(self, view_key):
+        view = self._transition_views.get(view_key)
+        if view is None:
+            raise KeyError(f'Unknown transition view: {view_key}')
+        return len(view['pending'])
+
     def get_first_transition(self, view_key):
         if self._synthetic_first_transition is not None:
             return self._synthetic_first_transition
@@ -260,7 +286,8 @@ ReplayBufferStorage = ReplayBufferStorageParallel
 class ReplayBuffer(IterableDataset):
     def __init__(self, storage, max_size, num_workers, nstep, discount,
                  fetch_every, save_snapshot, first_transition=False, batch_size=None,
-                 transition_view=False):
+                 transition_view=False, max_pending_transitions=None,
+                 drop_oldest_pending_on_overflow=False):
         self._storage = storage
         self._size = 0
         self._max_size = max_size
@@ -282,6 +309,8 @@ class ReplayBuffer(IterableDataset):
             self._transition_view_key = self._storage.register_transition_view(
                 self._nstep,
                 self._discount,
+                max_pending_transitions=max_pending_transitions,
+                drop_oldest_on_overflow=drop_oldest_pending_on_overflow,
             )
 
     def _invalidate_transition_views(self):
@@ -472,6 +501,11 @@ class ReplayBuffer(IterableDataset):
             through_transition_id,
         )
 
+    def pending_transition_count(self):
+        if self._transition_view_key is None:
+            return 0
+        return self._storage.pending_transition_count(self._transition_view_key)
+
     def get_first_transition(self):
         if self._transition_view_key is not None:
             first_transition = self._storage.get_first_transition(self._transition_view_key)
@@ -510,7 +544,8 @@ def _worker_init_fn(worker_id):
 
 def make_replay_loader(storage, max_size, batch_size, num_workers,
                        save_snapshot, nstep, discount, first_transition=False,
-                       transition_view=False):
+                       transition_view=False, max_pending_transitions=None,
+                       drop_oldest_pending_on_overflow=False):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(storage,
@@ -522,7 +557,9 @@ def make_replay_loader(storage, max_size, batch_size, num_workers,
                             save_snapshot=save_snapshot,
                             first_transition=first_transition,
                             batch_size=batch_size if first_transition else None,
-                            transition_view=transition_view)
+                            transition_view=transition_view,
+                            max_pending_transitions=max_pending_transitions,
+                            drop_oldest_pending_on_overflow=drop_oldest_pending_on_overflow)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,

@@ -79,6 +79,7 @@ agent:
   batch_size_actor: 50000
   update_actor_every_steps: 25000
   update_every_steps: 1000
+  max_pending_transitions: 5000
   T_init_steps: 10000
 
 hydra:
@@ -95,4 +96,3 @@ hydra:
   #   mem_gb: 160
   #   nodes: 1
   #   submitit_folder: ./exp_sweep_parallel/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}/.slurm
-
