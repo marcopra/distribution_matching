@@ -71,6 +71,7 @@ agent:
   pmd_eta_mode: backtracking
   compute_dtype: float64
   sink_schedule: "linear(0.0, 0.001, 2_000_000)"
+  subsampling_strategy: pivoted_cholesky
   kernel_type: inner_product
   nystrom_synthetic_subsamples: false
   pca_truncation: 5000
