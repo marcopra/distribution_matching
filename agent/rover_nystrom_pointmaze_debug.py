@@ -120,6 +120,7 @@ class RoverAgent:
                  subsampling_strategy: str = "random",
                  nystrom_candidate_multiplier: float = 5.0,
                  nystrom_cholesky_tolerance: float = 1e-6,
+                 nystrom_cholesky_progress: bool = True,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  nystrom_exact_grid: bool = False,
@@ -191,6 +192,7 @@ class RoverAgent:
             )
         self.nystrom_candidate_multiplier = float(nystrom_candidate_multiplier)
         self.nystrom_cholesky_tolerance = float(nystrom_cholesky_tolerance)
+        self.nystrom_cholesky_progress = bool(nystrom_cholesky_progress)
         if self.nystrom_candidate_multiplier < 1.0:
             raise ValueError("nystrom_candidate_multiplier must be at least 1")
         if self.nystrom_cholesky_tolerance < 0.0:
@@ -1328,6 +1330,7 @@ class RoverAgent:
             kernel_type=self.kernel_type,
             kernel_bandwidth=self.kernel_bandwidth,
             kernel_bandwidth_mult=self.kernel_bandwidth_mult,
+            cholesky_progress=self.nystrom_cholesky_progress,
         )
         if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
             bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth

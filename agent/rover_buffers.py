@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from sampling import sample_time_steps
 
@@ -162,6 +163,7 @@ class EncodedTransitionFIFO:
         kernel_type="inner_product",
         actions=None,
         bandwidth=None,
+        show_progress=True,
     ):
         """Select diverse rows for an inner-product or Gaussian Nyström approximation."""
         features = features.detach().to(device="cpu", dtype=torch.float32).reshape(features.shape[0], -1)
@@ -193,41 +195,60 @@ class EncodedTransitionFIFO:
         selected = []
         pivot_residuals = []
 
-        for column_index in range(target):
-            if column_index == 0 and force_first:
-                pivot = 0
-            else:
-                scores = residual.masked_fill(~available, -torch.inf)
-                pivot = int(torch.argmax(scores).item())
-                if float(scores[pivot].item()) <= stop_threshold:
-                    break
+        with tqdm(
+            total=target,
+            desc=f"Pivoted Cholesky ({kernel_type})",
+            unit="pivot",
+            leave=False,
+            disable=not bool(show_progress),
+        ) as progress:
+            progress.set_postfix(candidates=count, threshold=f"{stop_threshold:.2e}")
+            for column_index in range(target):
+                if column_index == 0 and force_first:
+                    pivot = 0
+                else:
+                    scores = residual.masked_fill(~available, -torch.inf)
+                    pivot = int(torch.argmax(scores).item())
+                    if float(scores[pivot].item()) <= stop_threshold:
+                        progress.set_postfix(
+                            candidates=count,
+                            residual=f"{float(scores[pivot].item()):.2e}",
+                            stopped="tolerance",
+                        )
+                        break
 
-            pivot_residual = max(float(residual[pivot].item()), 0.0)
-            selected.append(pivot)
-            pivot_residuals.append(pivot_residual)
-            available[pivot] = False
+                pivot_residual = max(float(residual[pivot].item()), 0.0)
+                selected.append(pivot)
+                pivot_residuals.append(pivot_residual)
+                available[pivot] = False
+                progress.update(1)
+                progress.set_postfix(
+                    candidates=count,
+                    residual=f"{pivot_residual:.2e}",
+                    threshold=f"{stop_threshold:.2e}",
+                )
 
-            # A forced initial point can have zero kernel norm. Keep it in row
-            # zero for alpha support, but do not use it as a Cholesky direction.
-            if pivot_residual <= torch.finfo(features.dtype).eps:
+                # A forced initial point can have zero kernel norm. Keep it in row
+                # zero for alpha support, but do not use it as a Cholesky direction.
+                if pivot_residual <= torch.finfo(features.dtype).eps:
+                    residual[pivot] = 0.0
+                    continue
+
+                if kernel_type == "inner_product":
+                    kernel_column = features @ features[pivot]
+                else:
+                    squared_distance = torch.sum(
+                        (features - features[pivot]).square(), dim=1
+                    )
+                    kernel_column = torch.exp(
+                        -squared_distance / (2.0 * float(bandwidth) ** 2)
+                    )
+                    kernel_column *= actions == actions[pivot]
+                if column_index:
+                    kernel_column -= factor[:, :column_index] @ factor[pivot, :column_index]
+                factor[:, column_index] = kernel_column / np.sqrt(pivot_residual)
+                residual.sub_(factor[:, column_index].square()).clamp_(min=0.0)
                 residual[pivot] = 0.0
-                continue
-
-            if kernel_type == "inner_product":
-                kernel_column = features @ features[pivot]
-            else:
-                squared_distance = torch.sum(
-                    (features - features[pivot]).square(), dim=1
-                )
-                kernel_column = torch.exp(
-                    -squared_distance / (2.0 * float(bandwidth) ** 2)
-                )
-                kernel_column *= actions == actions[pivot]
-            if column_index:
-                kernel_column -= factor[:, :column_index] @ factor[pivot, :column_index]
-            factor[:, column_index] = kernel_column / np.sqrt(pivot_residual)
-            residual.sub_(factor[:, column_index].square()).clamp_(min=0.0)
-            residual[pivot] = 0.0
 
         return (
             torch.as_tensor(selected, dtype=torch.long),
@@ -244,6 +265,7 @@ class EncodedTransitionFIFO:
         kernel_type,
         kernel_bandwidth,
         kernel_bandwidth_mult,
+        show_progress,
     ):
         if size <= 0:
             raise ValueError("sample size must be positive")
@@ -300,6 +322,7 @@ class EncodedTransitionFIFO:
             kernel_type=kernel_type,
             actions=actions,
             bandwidth=bandwidth,
+            show_progress=show_progress,
         )
         selected = candidate_indices[local_indices]
         self.last_pivoted_cholesky_residuals = residuals
@@ -320,6 +343,7 @@ class EncodedTransitionFIFO:
         kernel_type="inner_product",
         kernel_bandwidth=None,
         kernel_bandwidth_mult=None,
+        cholesky_progress=True,
     ):
         strategy = str(strategy).lower()
         self.last_pivoted_cholesky_residuals = None
@@ -343,6 +367,7 @@ class EncodedTransitionFIFO:
                 kernel_type,
                 kernel_bandwidth,
                 kernel_bandwidth_mult,
+                cholesky_progress,
             )
         if strategy not in ("gamma_h", "reverse_gamma_h"):
             raise ValueError(

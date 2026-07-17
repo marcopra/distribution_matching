@@ -18,6 +18,7 @@ debug_fixed_dataset_updates: false
 subsampling_strategy: random # [random, gamma_h, reverse_gamma_h, pivoted_cholesky]
 nystrom_candidate_multiplier: 5.0
 nystrom_cholesky_tolerance: 1e-6
+nystrom_cholesky_progress: true
 
 # Missing GridWorld state IDs. one_action removes only excluded_action;
 # all_actions removes all four state-action pairs for each listed state.

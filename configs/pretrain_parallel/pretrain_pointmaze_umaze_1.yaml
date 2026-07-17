@@ -51,18 +51,19 @@ agent:
   embeddings: false
   lr_actor: 10
   pmd_steps: 10
-  update_every_steps: 1
+  update_every_steps: 100
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64
-  sink_schedule: 1.0
-  debug_fixed_dataset_updates: true
-  kernel_bandwidth: 0.15
+  sink_schedule: linear(0.0, 0.5, 100_000)
+  debug_fixed_dataset_updates: false
+  kernel_bandwidth: null
+  kernel_bandwidth_mult: 0.3
   nystrom_exact_grid: true
   subsamples: 16000
   lambda_reg: 1e-6
   batch_size_actor: 16000
-  update_actor_every_steps: 1
+  update_actor_every_steps: 1000
   T_init_steps: 5000
 
 # misc

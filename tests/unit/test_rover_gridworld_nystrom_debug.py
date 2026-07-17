@@ -177,6 +177,7 @@ class PointMazeSamplingStrategyTest(unittest.TestCase):
         agent.discount = 0.9
         agent.nystrom_candidate_multiplier = 1.0
         agent.nystrom_cholesky_tolerance = 1e-6
+        agent.nystrom_cholesky_progress = False
         agent.kernel_type = "inner_product"
         agent.kernel_bandwidth = None
         agent.kernel_bandwidth_mult = None
