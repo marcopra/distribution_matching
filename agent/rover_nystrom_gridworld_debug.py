@@ -226,37 +226,19 @@ class RoverAgent(PointMazeRoverAgent):
         nystrom_cholesky_tolerance=1e-6,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args,
+            subsampling_strategy=subsampling_strategy,
+            nystrom_candidate_multiplier=nystrom_candidate_multiplier,
+            nystrom_cholesky_tolerance=nystrom_cholesky_tolerance,
+            **kwargs,
+        )
         self.synthetic_dataset_exclude_state_idxs = synthetic_dataset_exclude_state_idxs or []
         self.synthetic_dataset_exclusion_mode = str(synthetic_dataset_exclusion_mode).lower()
         self.synthetic_dataset_excluded_action = int(synthetic_dataset_excluded_action)
         self.synthetic_subsample_exclude_state_idxs = synthetic_subsample_exclude_state_idxs or []
         self.synthetic_subsample_exclusion_mode = str(synthetic_subsample_exclusion_mode).lower()
         self.synthetic_subsample_excluded_action = int(synthetic_subsample_excluded_action)
-        self.subsampling_strategy = str(subsampling_strategy).lower()
-        if self.subsampling_strategy not in (
-            "random", "gamma_h", "reverse_gamma_h", "pivoted_cholesky"
-        ):
-            raise ValueError(
-                "subsampling_strategy must be random, gamma_h, reverse_gamma_h, "
-                "or pivoted_cholesky"
-            )
-        self.nystrom_candidate_multiplier = float(nystrom_candidate_multiplier)
-        self.nystrom_cholesky_tolerance = float(nystrom_cholesky_tolerance)
-        if self.nystrom_candidate_multiplier < 1.0:
-            raise ValueError("nystrom_candidate_multiplier must be at least 1")
-        if self.nystrom_cholesky_tolerance < 0.0:
-            raise ValueError("nystrom_cholesky_tolerance must be non-negative")
-        if self.subsampling_strategy == "pivoted_cholesky":
-            # Selector supports kernels whose candidate Gram columns it can
-            # reproduce exactly. Gaussian bandwidth is fitted from candidate
-            # pool before selection, then reused by actor update so geometries
-            # cannot silently differ. Extend this assertion together with FIFO
-            # kernel-column computation when adding another kernel.
-            assert self.kernel_type in ("inner_product", "gaussian"), (
-                "pivoted_cholesky subsampling currently requires kernel_type "
-                "inner_product or gaussian"
-            )
         if self.n_actions != 4:
             raise ValueError("GridWorld Nyström debug agent requires exactly four actions")
         self.nystrom_debug = GridWorldSyntheticData(self)
@@ -272,62 +254,6 @@ class RoverAgent(PointMazeRoverAgent):
 
     def _synthetic_actor_subsample_batch(self):
         return self.nystrom_debug.subsample_actor_batch()
-
-    def _update_encoded_actor_fifo(self, replay_buffer):
-        if replay_buffer is None or not hasattr(replay_buffer, "get_new_transitions_since"):
-            return False
-        self._sync_policy_encoder()
-        inserted = 0
-        encode_batch_size = max(1, self.encoded_fifo_encode_batch_size)
-        while True:
-            transition_ids, transitions = replay_buffer.get_new_transitions_since(
-                self._encoded_fifo_replay_marker,
-                limit=encode_batch_size,
-            )
-            if transition_ids is None:
-                break
-            terminal_mask = np.asarray(transitions[3]).reshape(len(transition_ids), -1).min(axis=1) <= 0.0
-            encoded = self._encode_actor_transition_batch_with_retries(transitions)
-            self._encoded_actor_fifo.add(transition_ids, encoded, terminal_mask=terminal_mask)
-            self._encoded_fifo_replay_marker = int(transition_ids[-1])
-            if hasattr(replay_buffer, "mark_transitions_encoded"):
-                replay_buffer.mark_transitions_encoded(self._encoded_fifo_replay_marker)
-            inserted += int(len(transition_ids))
-        self._insert_first_transition_if_available(replay_buffer)
-        return inserted > 0 or len(self._encoded_actor_fifo) > 0
-
-    def _sample_encoded_actor_data(self, size, include_first):
-        encoded = self._encoded_actor_fifo.sample_by_strategy(
-            int(size),
-            self.device,
-            strategy=self.subsampling_strategy,
-            gamma=self.discount,
-            include_first=include_first,
-            candidate_multiplier=self.nystrom_candidate_multiplier,
-            cholesky_tolerance=self.nystrom_cholesky_tolerance,
-            kernel_type=self.kernel_type,
-            kernel_bandwidth=self.kernel_bandwidth,
-            kernel_bandwidth_mult=self.kernel_bandwidth_mult,
-        )
-        if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
-            bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
-            self.kernel_fn.bandwidth = bandwidth
-            self.distribution_matcher.kernel_fn.bandwidth = bandwidth
-        return encoded, encoded.get("reward")
-
-    def _fit_state_kernel_bandwidth(self, X, Y):
-        if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
-            bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
-            if bandwidth is not None:
-                self.kernel_fn.bandwidth = bandwidth
-                self.distribution_matcher.kernel_fn.bandwidth = bandwidth
-                utils.ColorPrint.yellow(
-                    f"Using pivoted-Cholesky candidate-pool Gaussian bandwidth={bandwidth:.6g}."
-                )
-                return
-            # Synthetic/fixed landmark paths bypass FIFO candidate selection.
-            # Preserve their existing Gaussian bandwidth behavior.
-        super()._fit_state_kernel_bandwidth(X, Y)
 
     def _encoded_fifo_actor_update_data(self, replay_buffer):
         if not self._update_encoded_actor_fifo(replay_buffer):

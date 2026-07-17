@@ -9,6 +9,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from agent.rover_buffers import EncodedTransitionFIFO
+from agent.rover_nystrom_pointmaze_debug import RoverAgent as PointMazeRoverAgent
 from agent.rover_nystrom_gridworld_debug import GridWorldSyntheticData, RoverAgent
 from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
 from sampling import sample_time_steps
@@ -167,6 +168,82 @@ class TrajectoryFIFOTest(unittest.TestCase):
         self.assertEqual(sample["phi_obs"].shape[0], 2)
         self.assertEqual(torch.argmax(sample["E"], dim=1).tolist(), [0, 1])
         self.assertEqual(fifo.last_pivoted_cholesky_bandwidth, 1.0)
+
+
+class PointMazeSamplingStrategyTest(unittest.TestCase):
+    def make_agent(self):
+        agent = PointMazeRoverAgent.__new__(PointMazeRoverAgent)
+        agent.device = "cpu"
+        agent.discount = 0.9
+        agent.nystrom_candidate_multiplier = 1.0
+        agent.nystrom_cholesky_tolerance = 1e-6
+        agent.kernel_type = "inner_product"
+        agent.kernel_bandwidth = None
+        agent.kernel_bandwidth_mult = None
+        agent._encoded_actor_fifo = EncodedTransitionFIFO(8)
+        agent._encoded_actor_fifo.add(
+            np.arange(5),
+            encoded(np.arange(5)),
+            terminal_mask=np.array([False, True, False, False, True]),
+        )
+        return agent
+
+    def test_pointmaze_uses_all_fifo_sampling_strategies(self):
+        expected_sizes = {
+            "random": 4,
+            "gamma_h": 4,
+            "reverse_gamma_h": 4,
+        }
+        for strategy, expected_size in expected_sizes.items():
+            with self.subTest(strategy=strategy):
+                agent = self.make_agent()
+                agent.subsampling_strategy = strategy
+                sampled, _ = agent._sample_encoded_actor_data(4, include_first=True)
+                self.assertEqual(sampled["phi_obs"].shape[0], expected_size)
+                self.assertEqual(float(sampled["phi_obs"][0]), 0.0)
+
+        agent = self.make_agent()
+        agent.subsampling_strategy = "pivoted_cholesky"
+        sampled, _ = agent._sample_encoded_actor_data(4, include_first=True)
+        self.assertGreaterEqual(sampled["phi_obs"].shape[0], 1)
+        self.assertLessEqual(sampled["phi_obs"].shape[0], 4)
+        self.assertEqual(float(sampled["phi_obs"][0]), 0.0)
+
+    def test_pointmaze_fifo_update_records_episode_boundaries(self):
+        agent = PointMazeRoverAgent.__new__(PointMazeRoverAgent)
+        agent._encoded_actor_fifo = EncodedTransitionFIFO(8)
+        agent._encoded_fifo_replay_marker = None
+        agent.encoded_fifo_encode_batch_size = 8
+        agent._sync_policy_encoder = lambda: None
+        agent._insert_first_transition_if_available = lambda replay: None
+        agent._encode_actor_transition_batch_with_retries = (
+            lambda transitions: encoded(np.arange(transitions[0].shape[0]))
+        )
+
+        ids = np.arange(5)
+        transitions = (
+            np.zeros((5, 1), dtype=np.float32),
+            np.zeros((5, 1), dtype=np.int64),
+            np.zeros((5, 1), dtype=np.float32),
+            np.array([[1.0], [0.0], [1.0], [1.0], [0.0]], dtype=np.float32),
+            np.zeros((5, 1), dtype=np.float32),
+        )
+
+        class Replay:
+            marked = None
+
+            def get_new_transitions_since(self, marker, limit=None):
+                del limit
+                return (ids, transitions) if marker is None else (None, None)
+
+            def mark_transitions_encoded(self, marker):
+                self.marked = marker
+
+        replay = Replay()
+        self.assertTrue(agent._update_encoded_actor_fifo(replay))
+        _, trajectory_ids, _ = agent._encoded_actor_fifo._all_with_trajectory_metadata()
+        self.assertEqual(trajectory_ids.tolist(), [0, 0, 1, 1, 1])
+        self.assertEqual(replay.marked, 4)
 
 
 class FakeGridWorld:
