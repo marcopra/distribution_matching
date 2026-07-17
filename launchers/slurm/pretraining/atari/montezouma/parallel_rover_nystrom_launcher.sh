@@ -19,7 +19,7 @@ feature_dims=(
     256
     # 512
     # 1024
-)\
+)
 for seed in $seeds; do
     for batch_size_actor in "${batch_sizes_actor[@]}"; do
         for subsample in "${subsamples[@]}"; do
