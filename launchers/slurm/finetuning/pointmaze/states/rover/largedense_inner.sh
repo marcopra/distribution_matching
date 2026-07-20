@@ -28,4 +28,5 @@ python train.py --config-name=train/finetune_maze \
     use_wandb=true \
     wandb_project=pointmaze_ft \
     wandb_tag=rover_largedense \
+    hydra.run.dir="exp_local/pointmaze_ft/${SLURM_JOB_ID}" \
     device=cuda
