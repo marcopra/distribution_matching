@@ -7,11 +7,11 @@ ENVS=(
 )
 SPECS=(
     "ddpg_discrete|none|10000"
-    "cic_discrete|/home/mprattico-iit.local/distribution_matching/models/pointmaze/umaze/states/cic/models/states/gym/cic/0/snapshot_1000200.pt|30000"
-    "icm_apt_discrete|/home/mprattico-iit.local/distribution_matching/models/pointmaze/umaze/states/icm_apt/models/states/gym/icm_apt/0/snapshot_1000200.pt|30000"
-    "rnd_discrete|/home/mprattico-iit.local/distribution_matching/models/pointmaze/umaze/states/rnd/models/states/gym/rnd/0/snapshot_1000200.pt|30000"
-    "smm_discrete|/home/mprattico-iit.local/distribution_matching/models/pointmaze/umaze/states/smm/models/states/gym/smm/0/snapshot_1000200.pt|30000"
-    "maxent_discrete|/home/mprattico-iit.local/distribution_matching/models/pointmaze/umaze/states/maxent/models/states/gym/maxent/0/snapshot_500100.pt|30000"
+    "cic_discrete|/home/mprattico/distribution_matching/models/pointmaze/umaze/states/cic/models/states/gym/cic/0/snapshot_1000200.pt|30000"
+    "icm_apt_discrete|/home/mprattico/distribution_matching/models/pointmaze/umaze/states/icm_apt/models/states/gym/icm_apt/0/snapshot_1000200.pt|30000"
+    "rnd_discrete|/home/mprattico/distribution_matching/models/pointmaze/umaze/states/rnd/models/states/gym/rnd/0/snapshot_1000200.pt|30000"
+    "smm_discrete|/home/mprattico/distribution_matching/models/pointmaze/umaze/states/smm/models/states/gym/smm/0/snapshot_1000200.pt|30000"
+    "maxent_discrete|/home/mprattico/distribution_matching/models/pointmaze/umaze/states/maxent/models/states/gym/maxent/0/snapshot_500100.pt|30000"
 )
 
 for seed in 0 1 2; do

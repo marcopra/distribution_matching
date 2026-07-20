@@ -1,5 +1,5 @@
 '''
-python eval_occupancy_heatmaps.py --snapshot /home/mprattico-iit.local/distribution_matching/exp_local/2026.05.02/233058_518739_dist_matching/models/discrete_states/gym/dist_matching/1/snapshot.pt --env-config configs/env/gridworld/middle_room.yaml --obs-type=pixels
+python eval_occupancy_heatmaps.py --snapshot /home/mprattico/distribution_matching/exp_local/2026.05.02/233058_518739_dist_matching/models/discrete_states/gym/dist_matching/1/snapshot.pt --env-config configs/env/gridworld/middle_room.yaml --obs-type=pixels
 '''
 from __future__ import annotations
 

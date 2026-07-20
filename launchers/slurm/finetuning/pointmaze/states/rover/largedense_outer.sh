@@ -1,6 +1,6 @@
 #!/bin/bash
 INNER="launchers/slurm/finetuning/pointmaze/states/rover/largedense_inner.sh"
-MODEL_PATH="/home/mprattico-iit.local/distribution_matching/models/pointmaze/largedense/states/rover/models/states/gym/dist_matching/1/snapshot.pt"
+MODEL_PATH="/home/mprattico/distribution_matching/models/pointmaze/largedense/states/rover/models/states/gym/dist_matching/1/snapshot.pt"
 ENVS=(
     pointmaze/pointmaze_largedense_goal_1
     #pointmaze/pointmaze_largedense_goal_2
