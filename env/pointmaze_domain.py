@@ -50,7 +50,10 @@ class PointMazeDiscreteActions(gym.ActionWrapper):
         return self.action_scale * self.ACTIONS[action_idx].copy()
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeDirectVelocityActions(gym.Wrapper):
@@ -111,7 +114,10 @@ class PointMazeDirectVelocityActions(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class FixedPointMazeResetWrapper(gym.Wrapper):
@@ -233,7 +239,10 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         }
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeTopDownCameraWrapper(gym.Wrapper):
@@ -298,7 +307,10 @@ class PointMazeTopDownCameraWrapper(gym.Wrapper):
         return render_fn() if callable(render_fn) else self.env.render()
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeGoalMaskWrapper(gym.Wrapper):
@@ -338,7 +350,10 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
         return self.env.step(action)
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeXYObservationWrapper(gym.Wrapper):
@@ -371,7 +386,10 @@ class PointMazeXYObservationWrapper(gym.Wrapper):
         return self._xy_observation(obs), reward, terminated, truncated, info
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 def wrap_point_maze_env(env, pointmaze_kwargs):

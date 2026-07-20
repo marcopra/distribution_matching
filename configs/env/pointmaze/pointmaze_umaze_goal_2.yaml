@@ -11,4 +11,4 @@ env:
     only_xy_position: true
     start_position: [1.0, 0.0]
     start_position_variance: 0.0
-    goal_position: [1.0, 0.0]
+    goal_position: [-1.0, -1.0]

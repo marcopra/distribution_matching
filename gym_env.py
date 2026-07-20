@@ -104,7 +104,10 @@ class ResizeRendering(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ExtendedTimeStep(NamedTuple):
@@ -179,7 +182,10 @@ class DiscreteObservationWrapper(gym.Wrapper):
         return self._obs_to_onehot(obs), reward, terminated, truncated, info
     
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ActionRepeatWrapper(gym.Wrapper):
@@ -372,7 +378,10 @@ class ActionRepeatWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class FrameStackWrapper(gym.Wrapper):
@@ -444,7 +453,10 @@ class FrameStackWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ActionDTypeWrapper(gym.Wrapper):
@@ -468,7 +480,10 @@ class ActionDTypeWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class IgnoreSuccessTerminationWrapper(gym.Wrapper):
@@ -483,7 +498,10 @@ class IgnoreSuccessTerminationWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
     
 class ExtendedTimeStepWrapper(gym.Wrapper):
     def __init__(self, env):
@@ -525,7 +543,10 @@ class ExtendedTimeStepWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ExtendedTimeStepGymAdapter(gym.Env):
@@ -571,7 +592,10 @@ class ExtendedTimeStepGymAdapter(gym.Env):
         return self.env.render()
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 @dataclass

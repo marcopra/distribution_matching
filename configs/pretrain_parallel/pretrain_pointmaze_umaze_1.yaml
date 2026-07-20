@@ -55,7 +55,7 @@ agent:
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64
-  sink_schedule: linear(0.0, 0.5, 100_000)
+  sink_schedule: linear(0.0, 0.8, 500_000)
   debug_fixed_dataset_updates: false
   kernel_bandwidth: null
   kernel_bandwidth_mult: 0.3
@@ -63,7 +63,7 @@ agent:
   subsamples: 16000
   lambda_reg: 1e-6
   batch_size_actor: 16000
-  update_actor_every_steps: 1000
+  update_actor_every_steps: 10000
   T_init_steps: 5000
 
 # misc
