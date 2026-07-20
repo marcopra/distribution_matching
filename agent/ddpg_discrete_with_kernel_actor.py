@@ -93,6 +93,7 @@ class DDPGAgent:
                  dataset_dim,
                  eta,
                  feature_dim,
+                 embeddings,
                  hidden_dim,
                  critic_target_tau,
                  num_expl_steps,
@@ -122,6 +123,7 @@ class DDPGAgent:
         self.eps_schedule = eps_schedule
         self.init_critic = init_critic
         self.feature_dim = feature_dim
+        self.embeddings = embeddings
         self.solved_meta = None
         self.update_actor_after_critic_steps = num_expl_steps + update_actor_after_critic_steps
         self.dataset_dim = dataset_dim
@@ -137,13 +139,18 @@ class DDPGAgent:
             self.obs_dim = feature_dim + meta_dim
         else:
             self.aug = nn.Identity()
-            self.encoder = Encoder(
-                obs_shape, 
-                hidden_dim, 
-                self.feature_dim
-            ).to(self.device) # KernelEncoder(obs_shape).to(device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
-            # self.obs_dim = self.obs_shape[0] + meta_dim
+            if self.embeddings:
+                self.encoder = Encoder(
+                    obs_shape,
+                    hidden_dim,
+                    self.feature_dim,
+                ).to(self.device)
+                self.obs_dim = self.encoder.repr_dim + meta_dim
+            else:
+                self.encoder = nn.Identity().to(self.device)
+                self.feature_dim = obs_shape[0]
+                self.obs_dim = self.obs_shape[0] + meta_dim
+                ColorPrint.yellow("Using identity encoder for state observations")
 
         self.actor = KernelActor(obs_type, self.obs_dim, self.dataset_dim, self.action_dim, self.eta).to(device)
 
@@ -215,8 +222,16 @@ class DDPGAgent:
                 )
 
             source_encoder = other.policy_encoder if hasattr(other, 'policy_encoder') else other.encoder
-            self.encoder.load_state_dict(source_encoder.state_dict())
-            print("✓ Encoder loaded from RoverAgent policy encoder")
+            if getattr(other, "embeddings", True):
+                self.encoder.load_state_dict(source_encoder.state_dict())
+                print("✓ Encoder loaded from RoverAgent policy encoder")
+            elif not self.embeddings:
+                print("✓ Rover and DDPG use identity state encoders")
+            else:
+                raise ValueError(
+                    "Cannot initialize an embedding DDPG encoder from a Rover snapshot "
+                    "trained with embeddings=false. Set agent.embeddings=false."
+                )
 
             E = other.E
 
@@ -350,10 +365,9 @@ class DDPGAgent:
 
     def aug_and_encode(self, obs, project=False):
         obs = self.aug(obs)
-        if project:
+        if project and self.embeddings:
             return self.encoder.encode_and_project(obs)
-        else:
-            return self.encoder(obs)
+        return self.encoder(obs)
 
     def update(self, replay_iter, step):
         metrics = dict()

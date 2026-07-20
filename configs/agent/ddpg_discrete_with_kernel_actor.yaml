@@ -18,6 +18,7 @@ hidden_dim: 1024
 dataset_dim: 556
 eta: 0.5
 feature_dim: 50
+embeddings: true
 eps_schedule: linear(0.3, 0.01, 30000)
 nstep: 1
 batch_size: 1024 # 256 for pixels
