@@ -19,7 +19,12 @@ def pop_point_maze_kwargs(env_kwargs):
 def prepare_point_maze_make_kwargs(name, env_kwargs, url=False):
     del name
     pointmaze_kwargs = pop_point_maze_kwargs(env_kwargs)
-    env_kwargs["reward_type"] = "dense"
+    reward_type = str(pointmaze_kwargs.get("reward_type", "dense")).lower()
+    if reward_type not in ("dense", "sparse"):
+        raise ValueError(
+            f"pointmaze.reward_type must be 'dense' or 'sparse', got {reward_type!r}"
+        )
+    env_kwargs["reward_type"] = reward_type
     env_kwargs["reset_target"] = True
     env_kwargs.setdefault("continuing_task", False)
     if url:
@@ -394,6 +399,7 @@ class PointMazeXYObservationWrapper(gym.Wrapper):
 
 def wrap_point_maze_env(env, pointmaze_kwargs):
     pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
+    reward_type = str(pointmaze_kwargs.pop("reward_type", "dense")).lower()
     goal_position = pointmaze_kwargs.pop("goal_position", None)
     start_position = pointmaze_kwargs.pop("start_position", None)
     start_position_variance = pointmaze_kwargs.pop("start_position_variance", 0.0)
@@ -451,7 +457,7 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
 
     warning = (
         "Warning: PointMaze environment uses fixed goal and initial position, "
-        f"{action_description}, dense reward, and goal-hidden pixel observations."
+        f"{action_description}, {reward_type} reward, and goal-hidden pixel observations."
     )
     if only_xy_position:
         warning += " State observations are masked to agent XY position only."

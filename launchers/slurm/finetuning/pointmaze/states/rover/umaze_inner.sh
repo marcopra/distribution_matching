@@ -16,6 +16,7 @@ export HYDRA_FULL_ERROR=1
 python train.py --config-name=train/finetune_maze \
     agent=ddpg_discrete_with_kernel_actor \
     env="${ENV}" \
+    env.pointmaze.reward_type=sparse \
     p_path="${MODEL_PATH}" \
     agent.feature_dim=256 \
     agent.embeddings=false \
