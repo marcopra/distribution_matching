@@ -1,6 +1,4 @@
 #!/bin/bash
-set -euo pipefail
-
 INNER="launchers/slurm/finetuning/pointmaze/states/baselines/umaze_inner.sh"
 ENVS=(
     pointmaze/pointmaze_umaze_goal_1

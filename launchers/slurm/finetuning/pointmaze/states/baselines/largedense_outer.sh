@@ -1,6 +1,4 @@
 #!/bin/bash
-set -euo pipefail
-
 INNER="launchers/slurm/finetuning/pointmaze/states/baselines/largedense_inner.sh"
 ENVS=(
     pointmaze/pointmaze_largedense_goal_1

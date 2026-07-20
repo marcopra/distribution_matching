@@ -8,7 +8,6 @@
 #SBATCH --error=%j.err
 #SBATCH --partition=gpuv
 
-set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 source ~/.bashrc
 conda activate dist_matching
