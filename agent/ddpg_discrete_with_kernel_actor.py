@@ -94,6 +94,8 @@ class DDPGAgent:
                  eta,
                  feature_dim,
                  embeddings,
+                 kernel_type,
+                 kernel_bandwidth,
                  hidden_dim,
                  critic_target_tau,
                  num_expl_steps,
@@ -126,8 +128,11 @@ class DDPGAgent:
         self.embeddings = embeddings
         self.solved_meta = None
         self.update_actor_after_critic_steps = num_expl_steps + update_actor_after_critic_steps
-        self.dataset_dim = dataset_dim
+        self.dataset_dim = None if dataset_dim is None else int(dataset_dim)
         self.eta = eta
+        self.kernel_type = str(kernel_type or "inner_product")
+        self.kernel_bandwidth = kernel_bandwidth
+        self.snapshot_actor_metadata = None
 
         # raise NotImplementedError("DDPGAgent with Kernel Actor is not fully implemented yet.")
         # Bisogna modificare l'inizializzazione del kernel actor (al momento lavorare con identità)
@@ -152,7 +157,17 @@ class DDPGAgent:
                 self.obs_dim = self.obs_shape[0] + meta_dim
                 ColorPrint.yellow("Using identity encoder for state observations")
 
-        self.actor = KernelActor(obs_type, self.obs_dim, self.dataset_dim, self.action_dim, self.eta).to(device)
+        initial_dataset_dim = self.dataset_dim if self.dataset_dim is not None else 1
+        initial_kernel_type = self.kernel_type if self.kernel_type != "auto" else "inner_product"
+        self.actor = KernelActor(
+            obs_type,
+            self.obs_dim,
+            initial_dataset_dim,
+            self.action_dim,
+            self.eta,
+            kernel_type=initial_kernel_type,
+            kernel_bandwidth=self.kernel_bandwidth,
+        ).to(device)
 
         self.critic = Critic(obs_type, self.obs_dim, self.action_dim,
                              feature_dim, hidden_dim).to(device)
@@ -173,6 +188,71 @@ class DDPGAgent:
         self.encoder.train(training)
         self.actor.train(training)
         self.critic.train(training)
+
+    @staticmethod
+    def _snapshot_kernel_parameters(other):
+        kernel_type = str(
+            getattr(other, "kernel_type", "inner_product") or "inner_product"
+        ).lower()
+        kernel_fn = getattr(other, "kernel_fn", None)
+        kernel_bandwidth = getattr(kernel_fn, "bandwidth", None)
+        if kernel_bandwidth is None:
+            kernel_bandwidth = getattr(other, "kernel_bandwidth", None)
+        if isinstance(kernel_bandwidth, torch.Tensor):
+            kernel_bandwidth = float(kernel_bandwidth.detach().cpu().item())
+        elif kernel_bandwidth is not None:
+            kernel_bandwidth = float(kernel_bandwidth)
+        return kernel_type, kernel_bandwidth
+
+    def _initialize_actor_from_snapshot(self, other, eta):
+        phi_dataset = other._phi_all_obs
+        gradient_coeff = other.gradient_coeff
+        E = other.E
+        dataset_dim = int(phi_dataset.shape[0])
+        input_dim = int(phi_dataset.shape[1]) - 1
+        action_dim = int(E.shape[1])
+        kernel_type, kernel_bandwidth = self._snapshot_kernel_parameters(other)
+
+        if input_dim != self.obs_dim:
+            raise ValueError(
+                f"Snapshot kernel input_dim={input_dim}, but DDPG encoder emits "
+                f"obs_dim={self.obs_dim}. Check agent.embeddings and feature dimensions."
+            )
+        if action_dim != self.action_dim:
+            raise ValueError(
+                f"Snapshot policy has {action_dim} actions, but environment exposes "
+                f"{self.action_dim}."
+            )
+
+        self.actor = KernelActor(
+            self.obs_type,
+            input_dim,
+            dataset_dim,
+            action_dim,
+            eta,
+            kernel_type=kernel_type,
+            kernel_bandwidth=kernel_bandwidth,
+        ).to(self.device)
+        self.actor.initialize_from_pretrained(
+            phi_dataset=phi_dataset.to(self.device),
+            gradient_coeff=gradient_coeff.to(self.device),
+            eta=eta,
+            E=E.to(self.device),
+        )
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
+        self.dataset_dim = dataset_dim
+        self.kernel_type = kernel_type
+        self.kernel_bandwidth = kernel_bandwidth
+        self.eta = float(eta)
+        self.snapshot_actor_metadata = {
+            "dataset_dim": dataset_dim,
+            "input_dim": input_dim,
+            "action_dim": action_dim,
+            "kernel_type": kernel_type,
+            "kernel_bandwidth": kernel_bandwidth,
+            "eta": float(eta),
+        }
+        print(f"✓ Auto-loaded kernel actor metadata: {self.snapshot_actor_metadata}")
 
     def init_from(self, other):
         # Caso 1: Altro DDPGAgent (comportamento esistente)
@@ -198,12 +278,7 @@ class DDPGAgent:
 
             E = other.E
 
-            self.actor.initialize_from_pretrained(
-                phi_dataset=other._phi_all_obs.to(self.device),
-                gradient_coeff=other.gradient_coeff.to(self.device),
-                eta=other.lr_actor,
-                E=E.to(self.device)
-            )
+            self._initialize_actor_from_snapshot(other, eta=other.lr_actor)
             try:
                 print("✓ KernelActorDiscrete initialized from DistMatchingEmbeddingAgent weights")
                 print(f"  Dataset size: {other.dataset.size}")
@@ -237,12 +312,7 @@ class DDPGAgent:
 
             # Rover stores PMD step size inside gradient_coeff updates already, so the
             # closed-form policy used for loading is softmax(-logits), i.e. eta = 1.
-            self.actor.initialize_from_pretrained(
-                phi_dataset=other._phi_all_obs.to(self.device),
-                gradient_coeff=other.gradient_coeff.to(self.device),
-                eta=1.0,
-                E=E.to(self.device)
-            )
+            self._initialize_actor_from_snapshot(other, eta=1.0)
             try:
                 dataset_size = getattr(other, "batch_size_actor", other._phi_all_obs.shape[0])
                 print("✓ KernelActorDiscrete initialized from RoverAgent weights")
@@ -302,6 +372,14 @@ class DDPGAgent:
                         # sample the discrete action uniformly during initial exploration
                         action = np.random.randint(self.action_dim)
         return action
+
+    def compute_action_probs(self, obs):
+        obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+        if obs.ndim == len(self.obs_shape):
+            obs = obs.unsqueeze(0)
+        with torch.no_grad():
+            encoded = self.aug_and_encode(obs, project=True)
+            return self.actor(encoded).cpu().numpy()
     
 
     def update_critic(self, obs, action, reward, discount, next_obs, step):

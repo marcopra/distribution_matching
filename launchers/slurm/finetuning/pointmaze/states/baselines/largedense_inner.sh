@@ -16,6 +16,7 @@ export HYDRA_FULL_ERROR=1
 python train.py --config-name=train/finetune_maze \
     agent="${AGENT}" \
     env="${ENV}" \
+    +env.continuing_task=false \
     env.pointmaze.reward_type=sparse \
     p_path="${MODEL_PATH}" \
     agent.actor_lr=1e-4 \
