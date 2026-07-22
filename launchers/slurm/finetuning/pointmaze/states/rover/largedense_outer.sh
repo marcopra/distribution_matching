@@ -5,7 +5,7 @@ ENVS=(
     pointmaze/pointmaze_largedense_goal_1
     #pointmaze/pointmaze_largedense_goal_2
 )
-ACTOR_LRS=(1e-7 1e-4)
+ACTOR_LRS=(1e-7 1e-5 1e-4)
 
 for seed in 0 1 2; do
     for env in "${ENVS[@]}"; do

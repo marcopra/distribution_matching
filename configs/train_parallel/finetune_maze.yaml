@@ -26,7 +26,7 @@ num_seed_frames: 2000
 update_actor_after_critic_steps: 7999
 num_agent_updates_per_env_step: 1
 
-eval_every_frames: 10000
+eval_every_frames: 50000
 num_eval_episodes: 1
 
 snapshot_ts: 0
