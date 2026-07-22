@@ -1,0 +1,72 @@
+# @package _global_
+defaults:
+  - /agent: ddpg_discrete
+  - /env: gridworld/maze_108_seed7_env
+  - _self_
+
+reward_free: false
+domain: gym
+task_name: ${env.name}
+obs_type: pixels
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+
+num_envs: 4
+base_seed: ${seed}
+async_vector_env: true
+parallel_attach_eval_env_for_debug: false
+
+num_train_frames: 50000
+num_seed_frames: 2000
+update_actor_after_critic_steps: 7999
+num_agent_updates_per_env_step: 1
+
+eval_every_frames: 10000
+num_eval_episodes: 1
+
+snapshot_ts: 0
+snapshot_base_dir: ./pretrained_models
+p_path: none
+snapshots: [50000]
+snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
+
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: false
+
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+save_buffer: false
+save_snapshot: false
+save_log: true
+use_tb: false
+use_wandb: true
+wandb_id: null
+wandb_project: finetune_maze
+wandb_entity: urlb
+wandb_tag: null
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_gym_${task_name}_nenv${num_envs}
+wandb_mode: online
+seed_trajectory_dir: seed_trajectories
+
+experiment: parallel
+
+agent:
+  actor_lr: 1e-7
+  eps_schedule: linear(0.3, 0.01, 30000)
+
+hydra:
+  run:
+    dir: ./exp_local_parallel/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}_${experiment}
+  sweep:
+    dir: ./exp_sweep_parallel/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
+    subdir: ${hydra.job.num}

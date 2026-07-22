@@ -13,7 +13,7 @@ source ~/.bashrc
 conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
-python train.py --config-name=train/finetune_maze \
+python train_parallel.py --config-name=train_parallel/finetune_maze \
     agent="${AGENT}" \
     env="${ENV}" \
     +env.continuing_task=false \
@@ -24,6 +24,7 @@ python train.py --config-name=train/finetune_maze \
     obs_type=states \
     num_train_frames=500000 \
     num_seed_frames=70000 \
+    num_envs=4 \
     update_actor_after_critic_steps="${ACTOR_UPDATE_THRESHOLD}" \
     use_wandb=true \
     wandb_project=pointmaze_ft \
