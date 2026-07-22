@@ -152,6 +152,9 @@ class Workspace:
         self.logger = Logger(self.work_dir,
                              use_tb=cfg.use_tb,
                              use_wandb=cfg.use_wandb)
+        if cfg.use_wandb:
+            wandb.define_metric('train/frame')
+            wandb.define_metric('train/*', step_metric='train/frame')
         # create envs
         env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
         env_kwargs.pop('name', None)
@@ -622,8 +625,14 @@ class Workspace:
 
             update_steps = []
             for env_id, time_step in enumerate(next_time_steps):
+                transition_frame = (
+                    int(logical_steps[env_id]) + 1
+                ) * int(self.cfg.action_repeat)
                 episode_rewards[env_id] += float(time_step.reward)
                 episode_steps[env_id] += 1
+                self.logger.log_scalar(
+                    'train/step_reward', float(time_step.reward), transition_frame
+                )
                 self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
                 self._collect_seed_trajectory_point(
                     time_step, logical_steps[env_id], env_id
@@ -671,11 +680,14 @@ class Workspace:
 
                 for env_id in np.flatnonzero(done):
                     self._global_episode += 1
+                    episode_end_frame = (
+                        int(logical_steps[env_id]) + 1
+                    ) * int(self.cfg.action_repeat)
                     if env_id == 0:
                         self.train_video_recorder.save(f'{self.global_frame}.mp4')
                     if metrics is not None or True:
                         episode_frame = int(episode_steps[env_id]) * self.cfg.action_repeat
-                        with self.logger.log_and_dump_ctx(self.global_frame,
+                        with self.logger.log_and_dump_ctx(episode_end_frame,
                                                         ty='train') as log:
                             log('fps', train_fps)
                             log('total_time', total_time)
