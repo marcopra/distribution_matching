@@ -163,7 +163,7 @@ class Workspace:
             getattr(self.cfg, "parallel_attach_eval_env_for_debug", False)
         )
 
-        self.train_env = gym_env.make_async_vector_env(
+        self.collection_env = gym_env.make_async_vector_env(
             self.num_envs,
             self.base_seed,
             self.cfg.task_name,
@@ -175,6 +175,18 @@ class Workspace:
             url=True,
             **env_kwargs,
         )
+        self.train_env = gym_env.make_async_vector_env(
+            self.num_envs,
+            self.base_seed,
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=False,
+            **env_kwargs,
+        )
         self.eval_env = gym_env.make(
             self.cfg.task_name,
             self.cfg.obs_type,
@@ -183,7 +195,7 @@ class Workspace:
             seed=self.cfg.seed,
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
-            url=True,
+            url=False,
             **env_kwargs,
         )
 
@@ -385,12 +397,12 @@ class Workspace:
             for env_id in range(len(required_mask))
         ]
 
-    def _reset_done_envs(self, done_mask):
+    def _reset_done_envs(self, env, done_mask):
         try:
-            return self.train_env.reset(options={"reset_mask": done_mask.astype(np.bool_)})
+            return env.reset(options={"reset_mask": done_mask.astype(np.bool_)})
         except (TypeError, AssertionError, NotImplementedError):
             if np.all(done_mask):
-                return self.train_env.reset()
+                return env.reset()
             raise RuntimeError(
                 "This Gymnasium AsyncVectorEnv does not support partial reset_mask; "
                 "upgrade Gymnasium or use num_envs=1."
@@ -538,7 +550,19 @@ class Workspace:
         eval_every_step = utils.Every(self.cfg.eval_every_frames,
                                       self.cfg.action_repeat)
 
-        observations, infos = self.train_env.reset(
+        num_seed_frames = int(self.cfg.num_seed_frames)
+        action_repeat = int(self.cfg.action_repeat)
+        if num_seed_frames % action_repeat != 0:
+            raise ValueError('num_seed_frames must be divisible by action_repeat')
+        seed_steps = num_seed_frames // action_repeat
+        if seed_steps % self.num_envs != 0:
+            raise ValueError(
+                'num_seed_frames/action_repeat must be divisible by num_envs so '
+                'URL collection ends exactly at the requested frame count'
+            )
+        collecting = seed_steps > 0
+        active_env = self.collection_env if collecting else self.train_env
+        observations, infos = active_env.reset(
             seed=[self.base_seed + env_id for env_id in range(self.num_envs)]
         )
         time_steps = self._time_steps_from_infos(infos)
@@ -592,7 +616,7 @@ class Workspace:
                         for env_id in range(self.num_envs)
                     ])
 
-            next_observations, rewards, terminated, truncated, infos = self.train_env.step(actions)
+            next_observations, rewards, terminated, truncated, infos = active_env.step(actions)
             done = np.logical_or(terminated, truncated)
             next_time_steps = self._time_steps_from_infos(infos)
 
@@ -614,6 +638,27 @@ class Workspace:
             self._drain_encoded_actor_fifo_if_due(logical_steps)
             self._global_step += self.num_envs
             self._maybe_log_seed_trajectories()
+
+            if collecting and self.global_step >= seed_steps:
+                for env_id in range(self.num_envs):
+                    self.replay_storage.end_episode(env_id)
+                observations, infos = self.train_env.reset(
+                    seed=[self.base_seed + env_id for env_id in range(self.num_envs)]
+                )
+                time_steps = self._time_steps_from_infos(infos)
+                metas = [self.agent.init_meta() for _ in range(self.num_envs)]
+                for env_id, time_step in enumerate(time_steps):
+                    self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
+                episode_steps.fill(0)
+                episode_rewards.fill(0.0)
+                active_env = self.train_env
+                collecting = False
+                self.train_video_recorder.init(time_steps[0].image_observation)
+                print(
+                    f'Switched from URL collection env to normal train env at '
+                    f'{self.global_frame} frames'
+                )
+                continue
 
             for logical_step in update_steps:
                 metrics = self._update_agent_once(logical_step)
@@ -641,7 +686,7 @@ class Workspace:
                             log('step', self.global_step)
                             self._log_montezuma_episode_metrics(log, next_time_steps[env_id])
 
-                reset_observations, reset_infos = self._reset_done_envs(done)
+                reset_observations, reset_infos = self._reset_done_envs(active_env, done)
                 reset_time_steps = self._time_steps_from_infos(reset_infos, required_mask=done)
                 observations = reset_observations
                 for env_id in range(self.num_envs):
@@ -749,7 +794,7 @@ class Workspace:
             if recorder is not None and hasattr(recorder, "frames"):
                 recorder.frames = []
 
-        for env_name in ("eval_env", "train_env"):
+        for env_name in ("eval_env", "train_env", "collection_env"):
             env = getattr(self, env_name, None)
             close = getattr(env, "close", None)
             if callable(close):

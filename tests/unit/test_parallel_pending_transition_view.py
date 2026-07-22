@@ -82,6 +82,24 @@ class FakeAgent:
 
 
 class ParallelPendingTransitionViewTest(unittest.TestCase):
+    def test_end_episode_stores_partial_stream_without_fake_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = make_storage(tmp)
+            storage.add(FakeTimeStep(0), {})
+            storage.add(FakeTimeStep(1), {})
+            storage.add(FakeTimeStep(2), {})
+
+            storage.end_episode(0)
+
+            self.assertEqual(len(storage), 2)
+            episode_files = list(Path(tmp).glob('*.npz'))
+            self.assertEqual(len(episode_files), 1)
+            with np.load(episode_files[0]) as episode:
+                np.testing.assert_array_equal(
+                    episode['observation'][:, 0, 0, 0],
+                    np.array([0, 1, 2], dtype=np.uint8),
+                )
+
     def test_pending_transition_count_stays_bounded_by_hard_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = make_storage(tmp)

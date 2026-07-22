@@ -88,6 +88,30 @@ class ReplayBufferStorageParallel:
         for env_id, (time_step, meta) in enumerate(zip(time_steps, metas)):
             self.add(time_step, meta, env_id=env_id)
 
+    def end_episode(self, env_id):
+        """Finalize one in-progress stream without adding a fake transition."""
+        env_id = int(env_id)
+        current_episode = self._current_episodes[env_id]
+        if not self._retain_episodes:
+            self._has_previous_time_step[env_id] = False
+            return
+        if not current_episode or len(current_episode.get('observation', ())) <= 1:
+            self._current_episodes[env_id] = defaultdict(list)
+            self._has_previous_time_step[env_id] = False
+            return
+
+        episode = {}
+        for spec in self._data_specs:
+            episode[spec.name] = np.asarray(current_episode[spec.name], dtype=spec.dtype)
+        for spec in self._meta_specs:
+            episode[spec.name] = np.asarray(current_episode[spec.name], dtype=spec.dtype)
+        episode['env_id'] = np.full(
+            next(iter(episode.values())).shape[0], env_id, dtype=np.int64
+        )
+        self._current_episodes[env_id] = defaultdict(list)
+        self._has_previous_time_step[env_id] = False
+        self._store_episode(episode, env_id)
+
     def register_transition_view(self, nstep, discount, max_pending_transitions=None,
                                  drop_oldest_on_overflow=False):
         """Register a lightweight stream of new transitions for actor-side encoders.
