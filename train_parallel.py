@@ -605,17 +605,32 @@ class Workspace:
                     time_steps[env_id],
                 )
 
+            action_steps = logical_steps
+            if collecting:
+                # Loaded agents often force uniform actions while
+                # step < num_expl_steps. Shift only policy-facing steps so URL
+                # collection samples from pretrained policy instead. Replay and
+                # logging retain true logical steps.
+                action_steps = logical_steps + int(
+                    getattr(self.agent, 'num_expl_steps', seed_steps)
+                )
+
             with torch.no_grad(), utils.eval_mode(self.agent):
                 if hasattr(self.agent, "act_parallel"):
                     actions = self.agent.act_parallel(
                         observations,
                         metas,
-                        logical_steps,
+                        action_steps,
                         eval_mode=False,
                     )
                 else:
                     actions = np.asarray([
-                        self.agent.act(observations[env_id], metas[env_id], int(logical_steps[env_id]), eval_mode=False)
+                        self.agent.act(
+                            observations[env_id],
+                            metas[env_id],
+                            int(action_steps[env_id]),
+                            eval_mode=False,
+                        )
                         for env_id in range(self.num_envs)
                     ])
 
