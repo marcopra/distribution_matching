@@ -51,7 +51,7 @@ agent:
   embeddings: true
   lr_actor: 1000
   pmd_steps: 10
-  update_every_steps: 1000
+  update_every_steps: 100
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64
@@ -63,8 +63,8 @@ agent:
   subsamples: 8000
   lambda_reg: 1e-6
   batch_size_actor: 16000
-  update_actor_every_steps: 10000
-  T_init_steps: 10000
+  update_actor_every_steps: 1500
+  T_init_steps: 1000
 
 # misc
 seed: 1

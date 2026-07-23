@@ -185,17 +185,6 @@ class Logger(object):
             if ty == 'train':
                 self._try_sw_log(f'{ty}/{key}', value, step)
 
-    def log_scalar(self, key, value, step):
-        """Log one scalar immediately, without episode-meter aggregation."""
-        if type(value) == torch.Tensor:
-            value = value.item()
-        value = float(value)
-        step = int(step)
-        self._try_sw_log(key, value, step)
-        if self.use_wandb:
-            prefix = key.split('/', 1)[0]
-            wandb.log({key: value, f'{prefix}/frame': step})
-
     def dump(self, step, ty=None):
         if ty is None or ty == 'eval':
             self._eval_mg.dump(step, 'eval')

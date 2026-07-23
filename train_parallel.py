@@ -640,14 +640,8 @@ class Workspace:
 
             update_steps = []
             for env_id, time_step in enumerate(next_time_steps):
-                transition_frame = (
-                    int(logical_steps[env_id]) + 1
-                ) * int(self.cfg.action_repeat)
                 episode_rewards[env_id] += float(time_step.reward)
                 episode_steps[env_id] += 1
-                self.logger.log_scalar(
-                    'train/step_reward', float(time_step.reward), transition_frame
-                )
                 self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
                 self._collect_seed_trajectory_point(
                     time_step, logical_steps[env_id], env_id
@@ -695,9 +689,8 @@ class Workspace:
 
                 for env_id in np.flatnonzero(done):
                     self._global_episode += 1
-                    episode_end_frame = (
-                        int(logical_steps[env_id]) + 1
-                    ) * int(self.cfg.action_repeat)
+                    episode_end_step = int(logical_steps[env_id]) + 1
+                    episode_end_frame = episode_end_step * int(self.cfg.action_repeat)
                     if env_id == 0:
                         self.train_video_recorder.save(f'{self.global_frame}.mp4')
                     if metrics is not None or True:
@@ -710,7 +703,7 @@ class Workspace:
                             log('episode_length', episode_frame)
                             log('episode', self.global_episode)
                             log('buffer_size', len(self.replay_storage))
-                            log('step', self.global_step)
+                            log('step', episode_end_step)
                             self._log_montezuma_episode_metrics(log, next_time_steps[env_id])
 
                 reset_observations, reset_infos = self._reset_done_envs(active_env, done)
