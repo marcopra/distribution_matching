@@ -3,6 +3,7 @@
 env:
   name: "PointMaze_UMaze-v3"
   render_mode: rgb_array
+  max_episode_steps: 1000
   pointmaze:
     top_down_camera: true
     discrete_actions: true

@@ -42,20 +42,21 @@ update_encoder: true
 agent:
   feature_dim: 256
   embeddings: false
-  lr_actor: 10
-  pmd_steps: 10
-  update_every_steps: 1
+  lr_actor: 100
+  pmd_steps: 5
+  update_every_steps: 1000
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64
   sink_schedule: 1.0
-  debug_fixed_dataset_updates: true
-  kernel_bandwidth: 0.15
   nystrom_exact_grid: true
-  subsamples: 16000
+  nystrom_synthetic_subsamples: true
+  debug_fixed_dataset_updates: true
+  kernel_bandwidth: 0.2
+  subsamples: 8000
   lambda_reg: 1e-6
-  batch_size_actor: 16000
-  update_actor_every_steps: 1
+  batch_size_actor: 8000
+  update_actor_every_steps: 1000
   T_init_steps: 5000
 
 

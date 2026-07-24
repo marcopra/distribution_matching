@@ -39,7 +39,9 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "BowlingNoFrameskip-v4": 25,
         "MarioBrosNoFrameskip-v4": 7,
         "ALE/MarioBros-v5": 7,
-        "ALE/MontezumaRevenge-v5": 0,
+        # AtariPreprocessing maps Montezuma's score and life indicators into
+        # rows 0-9 of the 84x84 observation. Gameplay begins below this band.
+        "ALE/MontezumaRevenge-v5": 10,
     }
 
     def __init__(self, env, band_height=None, color=255):

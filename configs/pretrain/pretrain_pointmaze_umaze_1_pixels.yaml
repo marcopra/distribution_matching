@@ -49,7 +49,7 @@ agent:
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64
-  sink_schedule: linear(0.0, 0.8, 500_000)
+  sink_schedule: 0.8
   nystrom_synthetic_subsamples: true
   debug_fixed_dataset_updates: true
   kernel_bandwidth: null
