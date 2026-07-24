@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_montezouma_debug
   - /env: atari/montezoumarevenge_score_masked
   # - override hydra/launcher: submitit_local
   

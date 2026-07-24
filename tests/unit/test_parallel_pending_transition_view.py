@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from dm_env import specs
@@ -81,6 +82,31 @@ class FakeAgent:
         return True
 
 
+class FakeMetricLogger:
+    def __init__(self):
+        self.buffered = []
+        self.immediate = []
+
+    def log_metrics(self, metrics, step, ty):
+        self.buffered.append((metrics, step, ty))
+
+    def log_immediate_metrics(self, metrics, step, ty):
+        self.immediate.append((metrics, step, ty))
+
+
+class FakeMetricAgent:
+    def update(self, replay_iter, step):
+        return {
+            "actor_loss": 1.0,
+            "unique_images_actor_batch": 17,
+            "unique_images_subsamples": 11,
+        }
+
+
+class FakeDrainMetricAgent(FakeAgent):
+    unique_images_all_training = 23
+
+
 class ParallelPendingTransitionViewTest(unittest.TestCase):
     def test_end_episode_stores_partial_stream_without_fake_transition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,6 +174,49 @@ class ParallelPendingTransitionViewTest(unittest.TestCase):
         self.assertTrue(drained)
         self.assertEqual(workspace.agent.drain_calls, 1)
         self.assertEqual(workspace.replay_loader.dataset.pending_transition_count(), 0)
+
+    def test_actor_unique_metrics_log_immediately(self):
+        from pretrain_parallel import Workspace
+
+        workspace = Workspace.__new__(Workspace)
+        workspace.agent = FakeMetricAgent()
+        workspace.replay_loader = None
+        workspace._replay_iter = None
+        workspace._global_step = 7
+        workspace.cfg = SimpleNamespace(action_repeat=4)
+        workspace.logger = FakeMetricLogger()
+
+        workspace._update_agent_once(logical_step=7)
+
+        self.assertEqual(
+            workspace.logger.buffered,
+            [({"actor_loss": 1.0}, 28, "train")],
+        )
+        self.assertEqual(
+            workspace.logger.immediate,
+            [({
+                "unique_images_actor_batch": 17,
+                "unique_images_subsamples": 11,
+            }, 28, "train")],
+        )
+
+    def test_lifetime_unique_metric_logs_after_fifo_drain(self):
+        from pretrain_parallel import Workspace
+
+        workspace = Workspace.__new__(Workspace)
+        workspace.agent_requires_replay = True
+        workspace.agent = FakeDrainMetricAgent()
+        workspace.replay_loader = FakeReplayLoader(FakeReplayDataset(pending_count=5))
+        workspace._global_step = 9
+        workspace.cfg = SimpleNamespace(action_repeat=4)
+        workspace.logger = FakeMetricLogger()
+
+        workspace._drain_encoded_actor_fifo_if_due([5])
+
+        self.assertEqual(
+            workspace.logger.immediate,
+            [({"unique_images_all_training": 23}, 36, "train")],
+        )
 
     def test_random_and_non_nystrom_paths_do_not_register_transition_view(self):
         with tempfile.TemporaryDirectory() as tmp:

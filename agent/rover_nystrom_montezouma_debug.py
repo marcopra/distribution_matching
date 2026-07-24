@@ -53,6 +53,7 @@ handler.setFormatter(formatter)
 
 logger.addHandler(handler)
 from agent.rover_buffers import EncodedTransitionFIFO
+from agent.image_uniqueness import BoundedUniqueCounter, last_frame_fingerprints
 from agent.rover_matchers import DistributionMatcher
 from agent.rover_networks import CNNEncoder, Encoder, ProjectSA
 from agent.rover_visualization.exploration import ExplorationVisualizer
@@ -114,6 +115,8 @@ class RoverAgent:
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
                  max_pending_transitions: Optional[int] = None,
+                 unique_image_exact_limit: int = 5_000_000,
+                 unique_image_hll_precision: int = 14,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_mult: Optional[float] = None,
@@ -245,6 +248,10 @@ class RoverAgent:
         )
         self._encoded_actor_fifo = EncodedTransitionFIFO(self.encoded_fifo_capacity)
         self._encoded_fifo_replay_marker = None
+        self._unique_image_counter = BoundedUniqueCounter(
+            exact_limit=unique_image_exact_limit,
+            precision=unique_image_hll_precision,
+        )
         
 
         # Track unique state-action pairs from previous dataset
@@ -1249,6 +1256,24 @@ class RoverAgent:
             encoded["debug_xy"] = obs.detach().reshape(obs.shape[0], -1)[:, :2]
         return encoded
 
+    def _image_fingerprints(self, observations):
+        if self.obs_type != "pixels":
+            return None
+        return last_frame_fingerprints(observations, self.image_channels)
+
+    def _attach_image_fingerprints(self, encoded, observations, track_lifetime=True):
+        fingerprints = self._image_fingerprints(observations)
+        if fingerprints is None:
+            return encoded
+        encoded["image_hash"] = torch.from_numpy(fingerprints)
+        if track_lifetime:
+            self._unique_image_counter.update(fingerprints)
+        return encoded
+
+    @property
+    def unique_images_all_training(self):
+        return self._unique_image_counter.count()
+
     def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
         splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
         batch_size = transitions[0].shape[0]
@@ -1276,6 +1301,9 @@ class RoverAgent:
         except RuntimeError:
             return
         encoded = self._encode_actor_transition_batch_with_retries(first_transition)
+        encoded = self._attach_image_fingerprints(
+            encoded, first_transition[0], track_lifetime=True
+        )
         self._encoded_actor_fifo.add(np.array([0], dtype=np.int64), encoded)
 
     def _update_encoded_actor_fifo(self, replay_buffer):
@@ -1301,6 +1329,9 @@ class RoverAgent:
                 <= 0.0
             )
             encoded = self._encode_actor_transition_batch_with_retries(transitions)
+            encoded = self._attach_image_fingerprints(
+                encoded, transitions[0], track_lifetime=True
+            )
             self._encoded_actor_fifo.add(
                 transition_ids,
                 encoded,
@@ -1683,8 +1714,35 @@ class RoverAgent:
         self._save_actor_full_dataset_plot(actor_data, step)
         self._save_actor_nystrom_subsample_plot(actor_data, step)
 
+        image_metrics = {}
+        if self.obs_type == "pixels":
+            if isinstance(actor_data, EncodedActorUpdateData):
+                full_hashes = actor_data.full.get("image_hash")
+                subsample_hashes = (
+                    actor_data.subsample.get("image_hash")
+                    if actor_data.subsample is not None
+                    else None
+                )
+            else:
+                full_hashes = torch.from_numpy(
+                    self._image_fingerprints(actor_data.full[0])
+                )
+                subsample_hashes = (
+                    torch.from_numpy(self._image_fingerprints(actor_data.subsample[0]))
+                    if actor_data.subsample is not None
+                    else None
+                )
+            if full_hashes is not None:
+                image_metrics["unique_images_actor_batch"] = int(
+                    torch.unique(full_hashes.detach().cpu()).numel()
+                )
+            if subsample_hashes is not None:
+                image_metrics["unique_images_subsamples"] = int(
+                    torch.unique(subsample_hashes.detach().cpu()).numel()
+                )
+
         if isinstance(actor_data, EncodedActorUpdateData):
-            return self.update_actor_nystrom(
+            metrics = self.update_actor_nystrom(
                 None,
                 None,
                 None,
@@ -1694,22 +1752,24 @@ class RoverAgent:
                 encoded_full=actor_data.full,
                 encoded_sub=actor_data.subsample,
             )
-
-        obs, action, next_obs, reward = actor_data.full
-        sub_obs = sub_action = sub_next_obs = sub_reward = None
-        if actor_data.subsample is not None:
-            sub_obs, sub_action, sub_next_obs, sub_reward = actor_data.subsample
-        return self.update_actor_nystrom(
-            obs,
-            action,
-            next_obs,
-            step=step,
-            rewards=reward,
-            sub_obs=sub_obs,
-            sub_action=sub_action,
-            sub_next_obs=sub_next_obs,
-            sub_rewards=sub_reward,
-        )
+        else:
+            obs, action, next_obs, reward = actor_data.full
+            sub_obs = sub_action = sub_next_obs = sub_reward = None
+            if actor_data.subsample is not None:
+                sub_obs, sub_action, sub_next_obs, sub_reward = actor_data.subsample
+            metrics = self.update_actor_nystrom(
+                obs,
+                action,
+                next_obs,
+                step=step,
+                rewards=reward,
+                sub_obs=sub_obs,
+                sub_action=sub_action,
+                sub_next_obs=sub_next_obs,
+                sub_rewards=sub_reward,
+            )
+        metrics.update(image_metrics)
+        return metrics
 
     def _build_debug_visualizer_batch(self, obs, max_observations=2000):
         if obs is None:
@@ -1875,5 +1935,4 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
-        exit(0)  # TEMP DEBUG: remove this line to allow training to continue after first actor update
         return metrics

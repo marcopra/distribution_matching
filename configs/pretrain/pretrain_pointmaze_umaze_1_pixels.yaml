@@ -1,0 +1,98 @@
+# @package _global_
+defaults:
+  - /agent: rover_nystrom_pointmaze_debug
+  - /env: pointmaze/pointmaze_umaze_goal_1
+  - _self_
+  # - override hydra/launcher: submitit_local
+
+# mode
+reward_free: true
+
+# task settings
+domain: gym
+task_name: ${env.name}
+obs_type: pixels
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+# train settings
+num_train_frames: 2_000_000
+num_seed_frames: 1000
+
+# eval
+eval_every_frames: 10000
+num_eval_episodes: 1
+
+# snapshot
+snapshots: [3000, 50000, 100000, 200000, 500000, 1000000, 2000000]
+snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
+
+# replay buffer
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+
+agent:
+  feature_dim: 16
+  embeddings: true
+  lr_actor: 100
+  pmd_steps: 10
+  update_every_steps: 100
+  pmd_eta_mode: backtracking
+  pca_truncation: 4500
+  compute_dtype: float64
+  sink_schedule: linear(0.0, 0.8, 500_000)
+  nystrom_synthetic_subsamples: true
+  debug_fixed_dataset_updates: true
+  kernel_bandwidth: null
+  kernel_bandwidth_mult: 0.3
+  nystrom_exact_grid: true
+  subsamples: 8000
+  lambda_reg: 1e-6
+  batch_size_actor: 8000
+  update_actor_every_steps: 1500
+  T_init_steps: 5000
+
+# misc
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+save_buffer: false
+save_snapshot: false
+use_tb: true
+use_wandb: false
+save_log: true
+wandb_project: "pretrain_pointmaze"
+wandb_entity: "urlb"
+wandb_tag: none
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${task_name}
+wandb_id: none
+
+# experiment
+experiment: exp
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${task_name}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}
+    subdir: ${hydra.job.num}
+  # launcher:
+  #   timeout_min: 4300
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   tasks_per_node: 1
+  #   mem_gb: 160
+  #   nodes: 1
+  #   submitit_folder: ./exp_sweep_parallel/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}/.slurm
+
+

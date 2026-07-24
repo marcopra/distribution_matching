@@ -7,7 +7,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpua-longrun
 
 cd $SLURM_SUBMIT_DIR
 
@@ -30,5 +30,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.subsamples=${SUBSAMPLE} \
     agent.sink_schedule=0.0 \
     agent.encoded_fifo_capacity=${BATCH_SIZE_ACTOR} \
-    wandb_project=montezouma_hp
+    wandb_project=montezouma_unique
 

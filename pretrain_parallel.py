@@ -393,7 +393,25 @@ class Workspace:
             )
         else:
             metrics = self.agent.update(self.replay_iter, int(logical_step))
-        self.logger.log_metrics(metrics, self.global_frame, ty='train')
+        immediate_metric_names = {
+            "unique_images_actor_batch",
+            "unique_images_subsamples",
+        }
+        immediate_metrics = {
+            key: value for key, value in metrics.items()
+            if key in immediate_metric_names
+        }
+        buffered_metrics = {
+            key: value for key, value in metrics.items()
+            if key not in immediate_metric_names
+        }
+        self.logger.log_metrics(buffered_metrics, self.global_frame, ty='train')
+        if immediate_metrics:
+            self.logger.log_immediate_metrics(
+                immediate_metrics,
+                self.global_frame,
+                ty='train',
+            )
         return metrics
 
     def _pending_transition_count(self):
@@ -420,7 +438,17 @@ class Workspace:
         if not force:
             return False
 
-        return bool(self.agent.drain_encoded_actor_fifo(self.replay_loader.dataset))
+        drained = bool(self.agent.drain_encoded_actor_fifo(self.replay_loader.dataset))
+        if drained and hasattr(self.agent, "unique_images_all_training"):
+            self.logger.log_immediate_metrics(
+                {
+                    "unique_images_all_training":
+                        self.agent.unique_images_all_training,
+                },
+                self.global_frame,
+                ty="train",
+            )
+        return drained
 
     def _assert_update_schedule_covered(self, logical_steps, update_steps):
         """Catch vector-step regressions that would skip scalar schedule ticks."""
