@@ -30,6 +30,11 @@ parallel_attach_eval_env_for_debug: false
 num_train_frames: 5_000_000_000
 num_seed_frames: 100000
 
+# unique-image coverage
+unique_image_exact_limit: 5000000
+unique_image_hll_precision: 14
+unique_image_log_every_frames: 4000
+
 # eval
 eval_every_frames: 500_000
 num_eval_episodes: 1
@@ -77,4 +82,3 @@ hydra:
   #   mem_gb: 160
   #   nodes: 1
   #   submitit_folder: ./exp_sweep_parallel/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}/.slurm
-

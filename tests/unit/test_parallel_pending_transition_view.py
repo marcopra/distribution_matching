@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 from dm_env import specs
 
+from agent.image_uniqueness import BoundedUniqueCounter
 from replay_buffer_parallel import ReplayBuffer, ReplayBufferStorageParallel
 
 
@@ -216,6 +217,33 @@ class ParallelPendingTransitionViewTest(unittest.TestCase):
         self.assertEqual(
             workspace.logger.immediate,
             [({"unique_images_all_training": 23}, 36, "train")],
+        )
+
+    def test_random_agent_workspace_tracker_logs_lifetime_uniques(self):
+        from pretrain_parallel import Workspace
+
+        workspace = Workspace.__new__(Workspace)
+        workspace._workspace_unique_image_counter = BoundedUniqueCounter(
+            exact_limit=100,
+            precision=10,
+        )
+        workspace._last_unique_image_log_frame = 0
+        workspace._global_step = 1_000
+        workspace.cfg = SimpleNamespace(
+            action_repeat=4,
+            grayscale=True,
+            unique_image_log_every_frames=4_000,
+        )
+        workspace.logger = FakeMetricLogger()
+        observations = np.zeros((3, 3, 8, 8), dtype=np.uint8)
+        observations[1, -1] = 1
+
+        workspace._track_workspace_unique_images(observations)
+        workspace._maybe_log_workspace_unique_images()
+
+        self.assertEqual(
+            workspace.logger.immediate,
+            [({"unique_images_all_training": 2}, 4_000, "train")],
         )
 
     def test_random_and_non_nystrom_paths_do_not_register_transition_view(self):
