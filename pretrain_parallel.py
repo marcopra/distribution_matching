@@ -20,7 +20,6 @@ from dm_env import specs
 import gym_env
 
 import utils
-from agent.image_uniqueness import BoundedUniqueCounter, last_frame_fingerprints
 from logger import Logger
 from replay_buffer_parallel import ReplayBufferStorageParallel, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
@@ -206,22 +205,6 @@ class Workspace:
         self.agent_requires_replay = bool(
             getattr(self.agent, 'requires_replay', True)
         )
-        self._workspace_unique_image_counter = None
-        self._last_unique_image_log_frame = 0
-        if (
-            self.is_montezuma
-            and self.cfg.obs_type == "pixels"
-            and not hasattr(self.agent, "unique_images_all_training")
-        ):
-            self._workspace_unique_image_counter = BoundedUniqueCounter(
-                exact_limit=int(
-                    getattr(self.cfg, "unique_image_exact_limit", 5_000_000)
-                ),
-                precision=int(
-                    getattr(self.cfg, "unique_image_hll_precision", 14)
-                ),
-            )
-
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
         time_step = self.eval_env.reset()
@@ -291,53 +274,6 @@ class Workspace:
         self._last_train_log_frame = 0
 
     @property
-    def is_montezuma(self):
-        return 'MontezumaRevenge' in str(self.cfg.task_name)
-
-    def _get_time_step_info(self, time_step):
-        info = getattr(time_step, 'info', None)
-        return info if isinstance(info, dict) else {}
-
-    def _track_workspace_unique_images(self, observations):
-        if self._workspace_unique_image_counter is None:
-            return
-        image_channels = 1 if self.cfg.grayscale else 3
-        fingerprints = last_frame_fingerprints(observations, image_channels)
-        self._workspace_unique_image_counter.update(fingerprints)
-
-    def _maybe_log_workspace_unique_images(self, force=False):
-        if self._workspace_unique_image_counter is None:
-            return
-        log_every_frames = int(
-            getattr(self.cfg, "unique_image_log_every_frames", 4_000)
-        )
-        if (
-            not force
-            and self.global_frame - self._last_unique_image_log_frame
-            < log_every_frames
-        ):
-            return
-        self._last_unique_image_log_frame = self.global_frame
-        self.logger.log_immediate_metrics(
-            {
-                "unique_images_all_training":
-                    self._workspace_unique_image_counter.count(),
-            },
-            self.global_frame,
-            ty="train",
-        )
-
-    def _log_montezuma_episode_metrics(self, log, time_step):
-        if not self.is_montezuma:
-            return
-        info = self._get_time_step_info(time_step)
-        if 'montezuma_visited_second_room' in info:
-            log('montezuma_visited_second_room',
-                float(info['montezuma_visited_second_room']))
-        if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
-            log('montezuma_max_room_id', info['montezuma_max_room_id'])
-
-    @property
     def global_step(self):
         return self._global_step
 
@@ -398,14 +334,6 @@ class Workspace:
             log('episode_length', step * self.cfg.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
-            if self.is_montezuma and episode > 0:
-                info = self._get_time_step_info(time_step)
-                if 'montezuma_visited_second_room' in info:
-                    log('montezuma_visited_second_room',
-                        float(info['montezuma_visited_second_room']))
-                if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
-                    log('montezuma_max_room_id', info['montezuma_max_room_id'])
-
     def _time_steps_from_infos(self, infos, required_mask=None):
         time_steps = infos.get("time_step")
         if time_steps is None:
@@ -438,25 +366,7 @@ class Workspace:
             )
         else:
             metrics = self.agent.update(self.replay_iter, int(logical_step))
-        immediate_metric_names = {
-            "unique_images_actor_batch",
-            "unique_images_subsamples",
-        }
-        immediate_metrics = {
-            key: value for key, value in metrics.items()
-            if key in immediate_metric_names
-        }
-        buffered_metrics = {
-            key: value for key, value in metrics.items()
-            if key not in immediate_metric_names
-        }
-        self.logger.log_metrics(buffered_metrics, self.global_frame, ty='train')
-        if immediate_metrics:
-            self.logger.log_immediate_metrics(
-                immediate_metrics,
-                self.global_frame,
-                ty='train',
-            )
+        self.logger.log_metrics(metrics, self.global_frame, ty='train')
         return metrics
 
     def _pending_transition_count(self):
@@ -483,17 +393,7 @@ class Workspace:
         if not force:
             return False
 
-        drained = bool(self.agent.drain_encoded_actor_fifo(self.replay_loader.dataset))
-        if drained and hasattr(self.agent, "unique_images_all_training"):
-            self.logger.log_immediate_metrics(
-                {
-                    "unique_images_all_training":
-                        self.agent.unique_images_all_training,
-                },
-                self.global_frame,
-                ty="train",
-            )
-        return drained
+        return bool(self.agent.drain_encoded_actor_fifo(self.replay_loader.dataset))
 
     def _assert_update_schedule_covered(self, logical_steps, update_steps):
         """Catch vector-step regressions that would skip scalar schedule ticks."""
@@ -535,7 +435,6 @@ class Workspace:
         observations, infos = self.train_env.reset(
             seed=[self.base_seed + env_id for env_id in range(self.num_envs)]
         )
-        self._track_workspace_unique_images(observations)
         time_steps = self._time_steps_from_infos(infos)
         first_time_step = time_steps[0]
         if self.cfg.obs_type == 'pixels' and hasattr(first_time_step.observation, 'shape'):
@@ -588,7 +487,6 @@ class Workspace:
                     ])
 
             next_observations, rewards, terminated, truncated, infos = self.train_env.step(actions)
-            self._track_workspace_unique_images(next_observations)
             done = np.logical_or(terminated, truncated)
             next_time_steps = self._time_steps_from_infos(infos)
 
@@ -606,8 +504,6 @@ class Workspace:
             self._assert_update_schedule_covered(logical_steps, update_steps)
             self._drain_encoded_actor_fifo_if_due(logical_steps)
             self._global_step += self.num_envs
-            self._maybe_log_workspace_unique_images()
-
             for logical_step in update_steps:
                 metrics = self._update_agent_once(logical_step)
 
@@ -632,10 +528,8 @@ class Workspace:
                             log('episode', self.global_episode)
                             log('buffer_size', len(self.replay_storage))
                             log('step', self.global_step)
-                            self._log_montezuma_episode_metrics(log, next_time_steps[env_id])
 
                 reset_observations, reset_infos = self._reset_done_envs(done)
-                self._track_workspace_unique_images(reset_observations[done])
                 reset_time_steps = self._time_steps_from_infos(reset_infos, required_mask=done)
                 observations = reset_observations
                 for env_id in range(self.num_envs):
@@ -673,11 +567,6 @@ class Workspace:
                 return
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode']
-        if self._workspace_unique_image_counter is not None:
-            keys_to_save.extend([
-                '_workspace_unique_image_counter',
-                '_last_unique_image_log_frame',
-            ])
         payload = {k: self.__dict__[k] for k in keys_to_save}
 
         agent = payload['agent']

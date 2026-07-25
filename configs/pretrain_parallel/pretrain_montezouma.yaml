@@ -31,7 +31,7 @@ num_train_frames: 5_000_000_000
 num_seed_frames: 100000
 
 # eval
-eval_every_frames: 500_000
+eval_every_frames: 1_000_000
 num_eval_episodes: 1
 
 # snapshot
@@ -70,10 +70,8 @@ agent:
   pmd_steps: 10
   pmd_eta_mode: backtracking
   compute_dtype: float64
-  sink_schedule: "linear(0.0, 0.001, 2_000_000)"
+  sink_schedule: 0.0
   subsampling_strategy: pivoted_cholesky
-  kernel_type: inner_product
-  nystrom_synthetic_subsamples: false
   pca_truncation: 5000
   subsamples: 10000
   lambda_reg: 1e-6

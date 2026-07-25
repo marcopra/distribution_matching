@@ -15,10 +15,10 @@ subsamples: 4000
 pca_truncation: 500
 nystrom_synthetic_subsamples: false
 debug_fixed_dataset_updates: false
-subsampling_strategy: random
+subsampling_strategy: pivoted_cholesky
 nystrom_candidate_multiplier: 5.0
 nystrom_cholesky_tolerance: 1e-6
-nystrom_cholesky_progress: true
+nystrom_cholesky_progress: false
 encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
@@ -52,7 +52,7 @@ pmd_backtrack_factor: 0.25
 pmd_backtrack_max_trials: 12
 sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15
-mode: l1
+mode: l2
 reward: false
 embeddings: true
 use_tb: ${use_tb}
