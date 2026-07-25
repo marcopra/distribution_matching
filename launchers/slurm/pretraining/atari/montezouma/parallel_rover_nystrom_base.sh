@@ -31,5 +31,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.kernel_bandwidth_mult=${KERNEL_BANDWIDTH_MULTIPLIER} \
     agent.sink_schedule=0.0 \
     agent.encoded_fifo_capacity=${BATCH_SIZE_ACTOR} \
-    wandb_project=montezouma_unique
+    wandb_project=montezouma_hp
 
