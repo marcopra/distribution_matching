@@ -23,8 +23,6 @@ encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 max_pending_transitions: null
-unique_image_exact_limit: 5000000
-unique_image_hll_precision: 14
 kernel_type: gaussian
 kernel_bandwidth: null
 kernel_bandwidth_mult: null
