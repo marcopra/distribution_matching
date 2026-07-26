@@ -18,17 +18,25 @@ conda activate dist_matching
 
 export HYDRA_FULL_ERROR=1
 
+kernel_args=(
+    "agent.kernel_type=${KERNEL_TYPE}"
+)
+if [[ "$KERNEL_TYPE" == "gaussian" ]]; then
+    kernel_args+=("agent.kernel_bandwidth_mult=${KERNEL_BANDWIDTH_MULTIPLIER}")
+else
+    kernel_args+=("agent.kernel_bandwidth_mult=null")
+fi
+
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_montezouma \
-    wandb_tag="operator_bw${KERNEL_BANDWIDTH_MULTIPLIER}_linear${LINEAR_PROJECTION}" \
+    wandb_tag="operator_${KERNEL_TYPE}_bw${KERNEL_BANDWIDTH_MULTIPLIER}_linear${LINEAR_PROJECTION}" \
     use_wandb=true \
     seed="${SEED}" \
     discount=0.99 \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     agent.subsamples="${SUBSAMPLE}" \
-    agent.kernel_type=gaussian \
-    agent.kernel_bandwidth_mult="${KERNEL_BANDWIDTH_MULTIPLIER}" \
+    "${kernel_args[@]}" \
     agent.linear_projection="${LINEAR_PROJECTION}" \
     agent.sink_schedule=0.001 \
     agent.subsampling_strategy=pivoted_cholesky \
