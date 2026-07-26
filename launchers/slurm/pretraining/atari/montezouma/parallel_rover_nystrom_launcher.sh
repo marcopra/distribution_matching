@@ -15,15 +15,16 @@ subsamples=(
 )
 
 feature_dims=(
-    64
+    # 64
     256
-    # 512
+    512
     # 1024
 )
 
 kernel_bandwidth_multipliers=(
+    0.1
     0.5
-    1.0
+    # 1.0
     # 2.0
 )
 

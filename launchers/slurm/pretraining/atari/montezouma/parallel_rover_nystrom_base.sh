@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --gres=gpu:1
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
 #SBATCH --partition=gpua-longrun

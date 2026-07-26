@@ -528,6 +528,13 @@ class Workspace:
             for logical_step in update_steps:
                 metrics = self._update_agent_once(logical_step)
 
+            # Vectorized stepping advances global_frame by
+            # num_envs * action_repeat, so a configured snapshot frame may be
+            # crossed without ever being hit exactly. Check after every vector
+            # step instead of tying snapshots to episode boundaries.
+            if self.snapshot_steps and self.global_frame >= self.snapshot_steps[0]:
+                self.save_snapshot()
+
             if np.any(done):
                 elapsed_time, total_time = self.timer.reset()
                 frames_since_last_log = max(1, self.global_frame - self._last_train_log_frame)
@@ -582,7 +589,7 @@ class Workspace:
     def save_snapshot(self):
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)
         snapshot_dir.mkdir(exist_ok=True, parents=True)
-        if self.global_frame >= self.snapshot_steps[0]:
+        if self.snapshot_steps and self.global_frame >= self.snapshot_steps[0]:
             snapshot = snapshot_dir / f'snapshot_{self.global_frame}.pt'
             self.snapshot_steps.pop(0)
             print(f'saving snapshot to {snapshot} at frame {self.global_frame}')
