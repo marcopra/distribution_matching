@@ -1333,10 +1333,31 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
             extent=[lower[0], upper[0], lower[1], upper[1]],
             cmap="viridis",
         )
+        trajectories = getattr(self, "_last_trajectories", ())
+        colors = plt.get_cmap("tab10")
+        for trajectory_idx, trajectory in enumerate(trajectories):
+            ax.plot(
+                trajectory[:, 0],
+                trajectory[:, 1],
+                color=colors(trajectory_idx % 10),
+                linewidth=0.8,
+                alpha=0.65,
+                zorder=2,
+            )
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title(f"{self.title_prefix} rollout coverage at step {step} (n samples: {coords.shape[0]})")
+        if trajectories:
+            horizon = getattr(self, "_last_rollout_horizon", "?")
+            ax.set_title(
+                f"{self.title_prefix} rollout coverage at step {step} "
+                f"({len(trajectories)} trajectories, horizon={horizon})"
+            )
+        else:
+            ax.set_title(
+                f"{self.title_prefix} rollout coverage at step {step} "
+                f"(n samples: {coords.shape[0]})"
+            )
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
@@ -1363,6 +1384,8 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class PointMazeCoverageVisualizer(XYCoverageVisualizer):
+    NUM_TRAJECTORIES = 10
+
     def __init__(
         self,
         agent,
@@ -1384,6 +1407,53 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
 
     def _use_env_plot_bounds(self) -> bool:
         return False
+
+    def _environment_horizon(self) -> int:
+        current = self.env
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            spec = getattr(current, "spec", None)
+            horizon = getattr(spec, "max_episode_steps", None)
+            if horizon is None:
+                horizon = getattr(current, "_max_episode_steps", None)
+            if horizon is not None:
+                return int(horizon)
+            current = getattr(current, "env", None)
+        raise RuntimeError("PointMaze environment does not expose max_episode_steps")
+
+    def _sample_policy_rollout(self, step: int) -> np.ndarray:
+        rng = np.random.default_rng(int(step))
+        horizon = self._environment_horizon()
+        trajectories = []
+
+        for trajectory_idx in range(self.NUM_TRAJECTORIES):
+            time_step = self.env.reset(seed=int(step) + trajectory_idx)
+            trajectory = []
+            for _ in range(horizon):
+                coord = self._extract_coordinates(time_step)
+                if coord is not None:
+                    trajectory.append(coord)
+
+                probs = np.asarray(
+                    self.agent.compute_action_probs(time_step.observation),
+                    dtype=np.float64,
+                )
+                probs = np.clip(probs, 0.0, None)
+                probs = probs / max(probs.sum(), 1e-12)
+                action = rng.choice(self.agent.n_actions, p=probs)
+                time_step = self.env.step(action)
+                if time_step.last():
+                    break
+
+            if trajectory:
+                trajectories.append(np.asarray(trajectory, dtype=np.float32))
+
+        self._last_trajectories = trajectories
+        self._last_rollout_horizon = horizon
+        if not trajectories:
+            return np.zeros((0, 0), dtype=np.float32)
+        return np.concatenate(trajectories, axis=0)
 
     def _policy_probe_points(self) -> Optional[np.ndarray]:
         n_points = int(self.policy_eval_points)
