@@ -226,7 +226,4 @@ _rooms
 exp_config.yaml
 *.log
 runs/*
-runs/MontezumaRevenge-v5__cleanrl_rnd_ppo__1__1783938659/events.out.tfevents.1783938659.gnode06.priv.franklin.lan.45522.0
-runs/MontezumaRevenge-v5__cleanrl_rnd_ppo__1__1783938698/events.out.tfevents.1783938698.gnode06.priv.franklin.lan.45698.0
-runs/MontezumaRevenge-v5__cleanrl_rnd_ppo__1__1783938773/events.out.tfevents.1783938773.gnode06.priv.franklin.lan.46223.0
-runs/MontezumaRevenge-v5__cleanrl_rnd_ppo__1__1783938807/events.out.tfevents.1783938807.gnode06.priv.franklin.lan.46376.0
+exp_*

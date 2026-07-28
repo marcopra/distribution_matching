@@ -15,6 +15,8 @@ from sklearn.manifold import TSNE
 import torch
 import torch.nn.functional as F
 
+import utils
+
 
 class DiscreteStateVisualizationAdapter:
     """Small adapter that turns different discrete env APIs into one plotting surface."""
@@ -506,7 +508,7 @@ class EmbeddingDistributionVisualizerV2:
             f"γ = {self.agent.discount}\n"
             f"η = {self.agent.lr_actor}\n"
             f"λ = {self.agent.lambda_reg}\n"
-            f"sink notm = {utils.schedule(self.agent.sink_schedule, step):.6f}\n"
+            f"sink norm = {utils.schedule(self.agent.sink_schedule, step):.6f}\n"
             f"PMD steps = {self.agent.pmd_steps}\n"
             
         )
