@@ -4,9 +4,10 @@
 seeds="1"
 
 envs=(
-    # "gridworld/maze_108_seed7_env"
-    "gridworld/maze_200_seed7_env"
-    "gridworld/maze_500_seed7_env"
+    "gridworld/maze_108_seed7_env"
+    "gridworld/maze_1000_env"
+    # "gridworld/maze_200_seed7_env"
+    # "gridworld/maze_500_seed7_env"
 )
 
 agents=(
