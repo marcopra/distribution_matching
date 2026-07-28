@@ -23,7 +23,7 @@ encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 max_pending_transitions: null
-kernel_type: gaussian
+kernel_type: inner_product
 kernel_bandwidth: null
 kernel_bandwidth_mult: null
 nystrom_grid_border_margin: 0.01
@@ -51,7 +51,7 @@ pmd_backtrack_factor: 0.25
 pmd_backtrack_max_trials: 12
 sink_schedule: "linear(0.0, 0.005, 100_000)"
 epsilon_schedule: 0.15
-mode: l2
+mode: l1
 reward: false
 embeddings: true
 use_tb: ${use_tb}

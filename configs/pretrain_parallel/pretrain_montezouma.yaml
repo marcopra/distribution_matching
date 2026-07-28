@@ -72,7 +72,7 @@ agent:
   compute_dtype: float64
   sink_schedule: 0.0
   subsampling_strategy: random
-  pca_truncation: 5000
+  pca_truncation: 10000
   subsamples: 10000
   lambda_reg: 1e-6
   batch_size_actor: 50000

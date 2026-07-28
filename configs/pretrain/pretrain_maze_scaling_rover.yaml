@@ -25,7 +25,7 @@ num_train_frames: 100_000
 num_seed_frames: 2_000
 eval_every_frames: 10_000
 num_eval_episodes: 50
-plot_eval_trajectories: false
+plot_eval_trajectories: true
 eval_trajectory_plot_dir: eval_trajectory_plots
 eval_trajectory_plot_episodes: [20, 25, 35]
 eval_trajectory_plot_styles: [suite, occupancy, small_multiples]

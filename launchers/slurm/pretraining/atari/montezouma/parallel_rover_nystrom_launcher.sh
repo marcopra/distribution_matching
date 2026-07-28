@@ -22,7 +22,7 @@ kernel_bandwidth_multipliers=(
 )
 
 kernel_types=(
-    gaussian
+    # gaussian
     inner_product
 )
 
