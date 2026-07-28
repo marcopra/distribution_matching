@@ -155,5 +155,5 @@ class MazeEnv(BaseRoomEnv):
 gym.register(
     id="Maze-v0",
     entry_point="env.maze:MazeEnv",
-    max_episode_steps=300,
+    max_episode_steps=None,
 )
