@@ -38,7 +38,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.subsamples="${SUBSAMPLE}" \
     "${kernel_args[@]}" \
     agent.linear_projection="${LINEAR_PROJECTION}" \
-    agent.sink_schedule=0.001 \
+    agent.sink_schedule=0.0 \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.lambda_reg=1e-4 \
     agent.encoded_fifo_capacity="${BATCH_SIZE_ACTOR}" \
