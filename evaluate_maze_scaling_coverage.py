@@ -1,10 +1,7 @@
 """Evaluate discrete-maze state coverage across scaling checkpoints.
 
-For every algorithm and maze size, sample 50 trajectories for each evaluation
-seed, compute unique-state coverage, and report mean ± standard error.
-
-Maze-108 baseline checkpoints missing from the scaling tree automatically fall
-back to models/maze/108/pixels/<algorithm>.
+For every algorithm and maze size, sample 50 trajectories in parallel for each
+evaluation seed, compute unique-state coverage, and report mean ± standard error.
 """
 
 from __future__ import annotations
@@ -29,24 +26,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 
+import gym_env
 import utils
 from plot_pointmaze_snapshot_trajectories import (
     find_run_config,
     load_config,
     load_snapshot,
-    make_env,
     snapshot_step,
 )
 
 
-MAZE_SIZES = (108, 200, 500)
-ENV_CONFIGS = {
-    108: Path("configs/env/gridworld/maze_108_seed7_env.yaml"),
-    200: Path("configs/env/gridworld/maze_200_seed7_env.yaml"),
-    500: Path("configs/env/gridworld/maze_500_seed7_env.yaml"),
-}
+MAZE_SIZES = (108, 200, 500, 1000)
 DISPLAY_NAMES = {
     "random": "Random",
     "rover": "Rover",
@@ -159,60 +150,6 @@ def discover_scaling_specs(root: Path) -> list[PolicySpec]:
     return specs
 
 
-def discover_legacy_108_specs(
-    root: Path, algorithms: set[str], existing: set[tuple[str, int]]
-) -> list[PolicySpec]:
-    specs: list[PolicySpec] = []
-    for algorithm in sorted(algorithms, key=algorithm_sort_key):
-        if algorithm == "rover" or (algorithm, 108) in existing:
-            continue
-        algorithm_root = root / algorithm
-        snapshot = find_final_snapshot(algorithm_root) if algorithm_root.exists() else None
-        config = algorithm_root / ".hydra" / "config.yaml"
-        if snapshot is None or not config.exists():
-            print(
-                f"Warning: missing legacy pixel checkpoint/config for {algorithm} at {algorithm_root}",
-                file=sys.stderr,
-            )
-            continue
-        specs.append(
-            PolicySpec(
-                algorithm=algorithm,
-                maze_size=108,
-                model_seed=int(OmegaConf.load(config).get("seed", 0)),
-                snapshot_path=snapshot,
-                config_path=config,
-                source="legacy-108-pixels",
-            )
-        )
-    return specs
-
-
-def discrete_env(env):
-    current = env
-    visited: set[int] = set()
-    while current is not None and id(current) not in visited:
-        visited.add(id(current))
-        if all(hasattr(current, name) for name in ("n_states", "state_to_idx", "idx_to_state")):
-            return current
-        current = getattr(current, "env", None)
-    raise AttributeError("Could not find discrete maze environment under wrappers")
-
-
-def current_state_index(env, time_step) -> int:
-    info = getattr(time_step, "info", None)
-    if isinstance(info, Mapping) and "state_index" in info:
-        return int(info["state_index"])
-    base = discrete_env(env)
-    location = getattr(base, "_agent_location", None)
-    if location in base.state_to_idx:
-        return int(base.state_to_idx[location])
-    observation = np.asarray(time_step.observation)
-    if observation.ndim == 1 and observation.size == base.n_states:
-        return int(np.argmax(observation))
-    raise ValueError("Could not infer current discrete state index")
-
-
 def latent_probabilities(agent, dimension: int) -> np.ndarray:
     for name in ("z_probs", "z_prob", "p_z", "pz", "skill_probs", "p_skill"):
         value = getattr(agent, name, None)
@@ -253,20 +190,59 @@ def sample_episode_meta(agent, rng: np.random.Generator):
     return sampled, fixed
 
 
-def random_action(env, rng: np.random.Generator):
-    action_space = env.action_space
-    seed_fn = getattr(action_space, "seed", None)
-    if callable(seed_fn):
-        seed_fn(int(rng.integers(0, 2**31 - 1)))
-    return action_space.sample()
+def time_steps_from_infos(infos, required_mask=None):
+    time_steps = infos.get("time_step")
+    if time_steps is None:
+        raise RuntimeError(
+            "AsyncVectorEnv did not return ExtendedTimeStep objects in infos['time_step']"
+        )
+    if required_mask is None:
+        required_mask = np.ones(len(time_steps), dtype=bool)
+    return [
+        time_steps[env_id] if required_mask[env_id] else None
+        for env_id in range(len(required_mask))
+    ]
 
 
-def environment_horizon(env) -> int:
-    base = discrete_env(env)
-    return int(getattr(base, "max_steps", 300))
+def state_index_from_time_step(time_step) -> int:
+    info = getattr(time_step, "info", None)
+    if not isinstance(info, Mapping) or "state_index" not in info:
+        raise ValueError("Vector time step has no info['state_index']")
+    return int(info["state_index"])
 
 
-def collect_coverage(
+def make_parallel_env(cfg, num_envs: int, base_seed: int):
+    env_kwargs = dict(cfg.env)
+    from omegaconf import OmegaConf
+
+    env_kwargs = OmegaConf.to_container(cfg.env, resolve=True)
+    env_kwargs.pop("name", None)
+    env_kwargs.pop("synthetic_first_transition", None)
+    return gym_env.make_async_vector_env(
+        num_envs,
+        base_seed,
+        cfg.task_name,
+        cfg.obs_type,
+        frame_stack=int(cfg.frame_stack),
+        action_repeat=int(cfg.action_repeat),
+        resolution=int(cfg.resolution),
+        grayscale=bool(getattr(cfg, "grayscale", False)),
+        url=True,
+        **env_kwargs,
+    )
+
+
+def reset_done_envs(env, done_mask):
+    try:
+        return env.reset(options={"reset_mask": done_mask.astype(np.bool_)})
+    except (TypeError, AssertionError, NotImplementedError) as exc:
+        raise RuntimeError(
+            "Gymnasium AsyncVectorEnv lacks partial reset_mask support. "
+            "Upgrade Gymnasium or run with --num-envs 1."
+        ) from exc
+
+
+def collect_coverage_parallel(
     agent,
     env,
     *,
@@ -274,45 +250,120 @@ def collect_coverage(
     evaluation_seed: int,
     policy_step: int,
     horizon_override: int | None,
+    maze_size: int,
+    num_envs: int,
 ) -> tuple[int, int, int]:
-    base = discrete_env(env)
-    horizon = horizon_override or environment_horizon(env)
+    horizon = int(horizon_override or 0)
     visited_states: set[int] = set()
+    completed = 0
+    base_seed = evaluation_seed * 1_000_003
+    observations, infos = env.reset(
+        seed=[base_seed + env_id for env_id in range(num_envs)]
+    )
+    time_steps = time_steps_from_infos(infos)
+    if horizon <= 0:
+        info = getattr(time_steps[0], "info", {})
+        horizon = int(info.get("max_steps", 0)) if isinstance(info, Mapping) else 0
+        if horizon <= 0:
+            # Maze configs expose max_steps; caller supplies it through cfg below.
+            horizon = 300
 
-    for episode in range(trajectories):
-        episode_seed = evaluation_seed * 1_000_003 + episode
-        time_step = env.reset(seed=episode_seed)
-        visited_states.add(current_state_index(env, time_step))
-        meta, fixed_meta = sample_episode_meta(
-            agent, np.random.default_rng(episode_seed + 17)
+    episode_steps = np.zeros(num_envs, dtype=np.int64)
+    episode_states = [
+        {state_index_from_time_step(time_step)} for time_step in time_steps
+    ]
+    episode_serial = np.arange(num_envs, dtype=np.int64)
+    metas = []
+    fixed_metas = []
+    for env_id in range(num_envs):
+        meta, fixed = sample_episode_meta(
+            agent, np.random.default_rng(base_seed + env_id + 17)
         )
-        action_rng = np.random.default_rng(episode_seed + 31)
+        metas.append(meta)
+        fixed_metas.append(fixed)
 
-        for _ in range(horizon):
-            if agent is None:
-                action = random_action(env, action_rng)
-            else:
-                with torch.no_grad(), utils.eval_mode(agent):
-                    action = agent.act(
-                        time_step.observation,
-                        meta,
-                        policy_step,
+    while completed < trajectories:
+        if agent is None:
+            rng = np.random.default_rng(base_seed + int(episode_steps.sum()) + completed * 31)
+            actions = rng.integers(0, env.single_action_space.n, size=num_envs)
+        else:
+            with torch.no_grad(), utils.eval_mode(agent):
+                if callable(getattr(agent, "act_parallel", None)):
+                    actions = agent.act_parallel(
+                        observations,
+                        metas,
+                        np.full(num_envs, policy_step, dtype=np.int64),
                         eval_mode=False,
                     )
-            time_step = env.step(action)
-            visited_states.add(current_state_index(env, time_step))
-            update_meta = getattr(agent, "update_meta", None) if agent is not None else None
-            if callable(update_meta) and not fixed_meta:
-                meta = update_meta(meta, policy_step, time_step)
-            if time_step.last():
-                break
+                else:
+                    actions = np.asarray(
+                        [
+                            agent.act(
+                                observations[env_id],
+                                metas[env_id],
+                                policy_step,
+                                eval_mode=False,
+                            )
+                            for env_id in range(num_envs)
+                        ]
+                    )
 
-    return len(visited_states), int(base.n_states), horizon
+        next_observations, _, terminated, truncated, infos = env.step(actions)
+        next_time_steps = time_steps_from_infos(infos)
+        episode_steps += 1
+        done = np.logical_or(terminated, truncated)
+        if horizon_override is not None:
+            done = np.logical_or(done, episode_steps >= horizon)
+
+        for env_id, time_step in enumerate(next_time_steps):
+            episode_states[env_id].add(state_index_from_time_step(time_step))
+            update_meta = getattr(agent, "update_meta", None) if agent is not None else None
+            if callable(update_meta) and not fixed_metas[env_id]:
+                metas[env_id] = update_meta(metas[env_id], policy_step, time_step)
+
+        if not np.any(done):
+            observations = next_observations
+            time_steps = next_time_steps
+            continue
+
+        for env_id in np.flatnonzero(done):
+            if completed >= trajectories:
+                break
+            visited_states.update(episode_states[env_id])
+            completed += 1
+
+        if completed >= trajectories:
+            break
+
+        reset_observations, reset_infos = reset_done_envs(env, done)
+        reset_time_steps = time_steps_from_infos(reset_infos, required_mask=done)
+        observations = reset_observations
+        for env_id in range(num_envs):
+            if done[env_id]:
+                episode_serial[env_id] += num_envs
+                serial = int(episode_serial[env_id])
+                time_steps[env_id] = reset_time_steps[env_id]
+                episode_steps[env_id] = 0
+                episode_states[env_id] = {
+                    state_index_from_time_step(reset_time_steps[env_id])
+                }
+                meta, fixed = sample_episode_meta(
+                    agent, np.random.default_rng(base_seed + serial + 17)
+                )
+                metas[env_id] = meta
+                fixed_metas[env_id] = fixed
+            else:
+                time_steps[env_id] = next_time_steps[env_id]
+
+    return len(visited_states), maze_size, horizon
 
 
 def evaluate_policy(
-    spec: PolicySpec | None,
+    spec: PolicySpec,
     *,
+    env,
+    configured_horizon: int,
+    worker_count: int,
     algorithm: str,
     maze_size: int,
     evaluation_seed: int,
@@ -320,32 +371,27 @@ def evaluate_policy(
     horizon: int | None,
     device: torch.device,
 ) -> SeedResult:
-    if spec is None:
-        cfg = load_config((REPO_ROOT / ENV_CONFIGS[maze_size]).resolve())
-        source = "random"
-        model_seed = None
+    source = "random" if algorithm == "random" else spec.source
+    model_seed = None if algorithm == "random" else spec.model_seed
+    if algorithm == "random":
         agent = None
         payload: Any = {}
     else:
-        cfg = load_config(spec.config_path.resolve())
-        source = spec.source
-        model_seed = spec.model_seed
         agent, payload = load_snapshot(spec.snapshot_path.resolve(), device)
 
-    env = make_env(cfg, seed=evaluation_seed)
     try:
         policy_step = (
-            0
-            if spec is None
-            else snapshot_step(spec.snapshot_path, payload)
+            0 if algorithm == "random" else snapshot_step(spec.snapshot_path, payload)
         )
-        visited, total, used_horizon = collect_coverage(
+        visited, total, used_horizon = collect_coverage_parallel(
             agent,
             env,
             trajectories=trajectories,
             evaluation_seed=evaluation_seed,
             policy_step=policy_step,
-            horizon_override=horizon,
+            horizon_override=horizon or configured_horizon,
+            maze_size=maze_size,
+            num_envs=worker_count,
         )
         return SeedResult(
             algorithm=algorithm,
@@ -360,9 +406,6 @@ def evaluate_policy(
             source=source,
         )
     finally:
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
         del agent, payload
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -424,8 +467,8 @@ def write_markdown(rows: list[dict[str, Any]], args, path: Path) -> None:
             f"{len(args.eval_seeds)} evaluation seeds ({', '.join(map(str, args.eval_seeds))})."
         ),
         "",
-        "| Algorithm | |S| = 108 | |S| = 200 | |S| = 500 |",
-        "|---|---:|---:|---:|",
+        "| Algorithm | " + " | ".join(f"|S| = {size}" for size in MAZE_SIZES) + " |",
+        "|---|" + "---:|" * len(MAZE_SIZES),
     ]
     for algorithm in algorithms:
         values = []
@@ -452,9 +495,8 @@ def write_markdown(rows: list[dict[str, Any]], args, path: Path) -> None:
     lines.extend(
         [
             "",
-            "Maze-108 non-Rover baselines use legacy pixel-observation checkpoints when "
-            "no scaling checkpoint exists. Random uses the same maze, horizon, trajectory "
-            "count, and evaluation seeds as trained policies.",
+            "Random uses the same maze, horizon, trajectory count, worker count, and "
+            "evaluation seeds as trained policies.",
             "",
         ]
     )
@@ -490,7 +532,8 @@ def write_plot(rows: list[dict[str, Any]], output_dir: Path) -> None:
     ax.set_xlabel(r"Number of states $|S|$")
     ax.set_ylabel("State coverage (%)")
     ax.set_xticks(MAZE_SIZES)
-    ax.set_xlim(90, 520)
+    margin = 0.03 * (max(MAZE_SIZES) - min(MAZE_SIZES))
+    ax.set_xlim(min(MAZE_SIZES) - margin, max(MAZE_SIZES) + margin)
     ax.set_ylim(0, 100)
     ax.grid(True, alpha=0.25)
     ax.legend(frameon=False, ncol=2)
@@ -506,12 +549,15 @@ def parse_args() -> argparse.Namespace:
         "--models-root", type=Path, default=Path("models/maze/maze_scaling")
     )
     parser.add_argument(
-        "--legacy-108-root", type=Path, default=Path("models/maze/108/pixels")
-    )
-    parser.add_argument(
         "--output-dir", type=Path, default=Path("outputs/maze_scaling_coverage")
     )
     parser.add_argument("--num-trajectories", type=int, default=50)
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=10,
+        help="AsyncVectorEnv workers per checkpoint (default: 10).",
+    )
     parser.add_argument("--eval-seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument(
         "--episode-steps",
@@ -537,6 +583,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.num_trajectories < 1:
         parser.error("--num-trajectories must be positive")
+    if args.num_envs < 1:
+        parser.error("--num-envs must be positive")
     if not args.eval_seeds:
         parser.error("--eval-seeds cannot be empty")
     if args.episode_steps is not None and args.episode_steps < 1:
@@ -558,13 +606,8 @@ def main() -> None:
     if not discovered_algorithms and not random_requested:
         raise RuntimeError("No trained algorithms discovered for requested filters")
 
-    existing = {(spec.algorithm, spec.maze_size) for spec in scaling_specs}
-    legacy_specs = discover_legacy_108_specs(
-        args.legacy_108_root, discovered_algorithms, existing
-    )
-    all_specs = scaling_specs + legacy_specs
     grouped_specs: dict[tuple[str, int], list[PolicySpec]] = defaultdict(list)
-    for spec in all_specs:
+    for spec in scaling_specs:
         if spec.algorithm not in discovered_algorithms or spec.maze_size not in args.maze_sizes:
             continue
         grouped_specs[(spec.algorithm, spec.maze_size)].append(spec)
@@ -582,34 +625,68 @@ def main() -> None:
                 tasks.append((algorithm, maze_size, evaluation_seed, specs[seed_index % len(specs)]))
     if random_requested:
         for maze_size in sorted(args.maze_sizes):
+            environment_specs = [
+                spec
+                for spec in scaling_specs
+                if spec.maze_size == maze_size
+            ]
+            if not environment_specs:
+                print(
+                    f"Warning: skipping random |S|={maze_size}; no scaling config available",
+                    file=sys.stderr,
+                )
+                continue
+            reference_spec = environment_specs[0]
             for evaluation_seed in args.eval_seeds:
-                tasks.append(("random", maze_size, evaluation_seed, None))
+                tasks.append(("random", maze_size, evaluation_seed, reference_spec))
+
+    worker_count = min(args.num_envs, args.num_trajectories)
+    environment_pools = {}
+    for maze_size in sorted({task[1] for task in tasks}):
+        reference_spec = next(task[3] for task in tasks if task[1] == maze_size)
+        cfg = load_config(reference_spec.config_path.resolve())
+        print(
+            f"Allocating {worker_count} environment workers once for |S|={maze_size}",
+            flush=True,
+        )
+        environment_pools[maze_size] = {
+            "env": make_parallel_env(cfg, worker_count, base_seed=0),
+            "horizon": int(cfg.env.get("max_steps", 300)),
+        }
 
     results: list[SeedResult] = []
-    for index, (algorithm, maze_size, evaluation_seed, spec) in enumerate(tasks, start=1):
-        model_text = "random" if spec is None else f"model seed {spec.model_seed}"
-        print(
-            f"[{index}/{len(tasks)}] {DISPLAY_NAMES.get(algorithm, algorithm)} "
-            f"|S|={maze_size}, eval seed={evaluation_seed}, {model_text}",
-            flush=True,
-        )
-        np.random.seed(evaluation_seed)
-        torch.manual_seed(evaluation_seed)
-        result = evaluate_policy(
-            spec,
-            algorithm=algorithm,
-            maze_size=maze_size,
-            evaluation_seed=evaluation_seed,
-            trajectories=args.num_trajectories,
-            horizon=args.episode_steps,
-            device=device,
-        )
-        results.append(result)
-        print(
-            f"  coverage={result.coverage_pct:.2f}% "
-            f"({result.visited_states}/{result.total_states})",
-            flush=True,
-        )
+    try:
+        for index, (algorithm, maze_size, evaluation_seed, spec) in enumerate(tasks, start=1):
+            model_text = "random" if algorithm == "random" else f"model seed {spec.model_seed}"
+            print(
+                f"[{index}/{len(tasks)}] {DISPLAY_NAMES.get(algorithm, algorithm)} "
+                f"|S|={maze_size}, eval seed={evaluation_seed}, {model_text}",
+                flush=True,
+            )
+            np.random.seed(evaluation_seed)
+            torch.manual_seed(evaluation_seed)
+            pool = environment_pools[maze_size]
+            result = evaluate_policy(
+                spec,
+                env=pool["env"],
+                configured_horizon=pool["horizon"],
+                worker_count=worker_count,
+                algorithm=algorithm,
+                maze_size=maze_size,
+                evaluation_seed=evaluation_seed,
+                trajectories=args.num_trajectories,
+                horizon=args.episode_steps,
+                device=device,
+            )
+            results.append(result)
+            print(
+                f"  coverage={result.coverage_pct:.2f}% "
+                f"({result.visited_states}/{result.total_states})",
+                flush=True,
+            )
+    finally:
+        for pool in environment_pools.values():
+            pool["env"].close()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rows = aggregate(results)

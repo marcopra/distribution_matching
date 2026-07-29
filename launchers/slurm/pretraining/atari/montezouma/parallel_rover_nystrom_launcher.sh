@@ -31,6 +31,14 @@ linear_projections=(
     false
 )
 
+# Indices into the sink_schedules array defined in parallel_rover_nystrom_base.sh:
+#   0 -> "linear(0.0, 0.001,  15_000_000)"
+#   1 -> "linear(0.0, 0.01,   15_000_000)"
+#   2 -> "linear(0.0, 0.1,    15_000_000)"
+#   3 -> "linear(0.0, 1,      15_000_000)"
+#   4 -> "linear(0.0, 1,      100_000_000)"
+sink_idxs=(0 2) # 3 4)
+
 for seed in $seeds; do
     for batch_size_actor in "${batch_sizes_actor[@]}"; do
         for subsample in "${subsamples[@]}"; do
@@ -45,9 +53,11 @@ for seed in $seeds; do
                     fi
                     for kernel_bandwidth_multiplier in "${bandwidths[@]}"; do
                         for linear_projection in "${linear_projections[@]}"; do
-                            sbatch \
-                                --export=ALL,SEED="$seed",BATCH_SIZE_ACTOR="$batch_size_actor",SUBSAMPLE="$subsample",FEATURE_DIM="$feature_dim",KERNEL_TYPE="$kernel_type",KERNEL_BANDWIDTH_MULTIPLIER="$kernel_bandwidth_multiplier",LINEAR_PROJECTION="$linear_projection" \
-                                launchers/slurm/pretraining/atari/montezouma/parallel_rover_nystrom_base.sh
+                            for sink_idx in "${sink_idxs[@]}"; do
+                                sbatch \
+                                    --export=ALL,SEED="$seed",BATCH_SIZE_ACTOR="$batch_size_actor",SUBSAMPLE="$subsample",FEATURE_DIM="$feature_dim",KERNEL_TYPE="$kernel_type",KERNEL_BANDWIDTH_MULTIPLIER="$kernel_bandwidth_multiplier",LINEAR_PROJECTION="$linear_projection",SINK_IDX="$sink_idx" \
+                                    launchers/slurm/pretraining/atari/montezouma/parallel_rover_nystrom_base.sh
+                            done
                         done
                     done
                 done

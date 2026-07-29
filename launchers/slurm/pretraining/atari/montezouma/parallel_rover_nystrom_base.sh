@@ -18,6 +18,16 @@ conda activate dist_matching
 
 export HYDRA_FULL_ERROR=1
 
+# Decode sink_schedule from index to avoid quoting issues in sbatch --export
+sink_schedules=(
+    "linear(0.0, 0.001,  15_000_000)"
+    "linear(0.0, 0.01,   15_000_000)"
+    "linear(0.0, 0.1,    15_000_000)"
+    "linear(0.0, 1,      15_000_000)"
+    "linear(0.0, 1,      100_000_000)"
+)
+SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
+
 kernel_args=(
     "agent.kernel_type=${KERNEL_TYPE}"
 )
@@ -38,8 +48,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.subsamples="${SUBSAMPLE}" \
     "${kernel_args[@]}" \
     agent.linear_projection="${LINEAR_PROJECTION}" \
-    agent.sink_schedule=0.0 \
+    "agent.sink_schedule='${SINK_SCHEDULE}'" \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.lambda_reg=1e-4 \
-    agent.encoded_fifo_capacity="${BATCH_SIZE_ACTOR}" \
+    agent.encoded_fifo_capacity= 1_000_000\
     wandb_project=montezouma_hp
