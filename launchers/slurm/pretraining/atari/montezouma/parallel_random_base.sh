@@ -22,4 +22,5 @@ python pretrain_parallel.py \
     agent=random \
     wandb_tag=parallel_random \
     use_wandb=true \
+    wandb_project=montezouma_hp \
     seed="${SEED}"
