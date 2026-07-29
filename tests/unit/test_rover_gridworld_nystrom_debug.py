@@ -169,6 +169,31 @@ class TrajectoryFIFOTest(unittest.TestCase):
         self.assertEqual(torch.argmax(sample["E"], dim=1).tolist(), [0, 1])
         self.assertEqual(fifo.last_pivoted_cholesky_bandwidth, 1.0)
 
+    def test_compact_inner_product_pivoted_cholesky_uses_action_ids(self):
+        fifo = EncodedTransitionFIFO(4)
+        values = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        compact = {
+            "phi_obs": values,
+            "phi_next": values,
+            "action": torch.tensor([[0], [1], [0]]),
+            "reward": torch.zeros(3, 1),
+        }
+        fifo.add(np.arange(3), compact)
+
+        sample = fifo.sample_by_strategy(
+            3,
+            "cpu",
+            "pivoted_cholesky",
+            candidate_multiplier=1.0,
+            cholesky_tolerance=0.0,
+            kernel_type="inner_product",
+        )
+
+        self.assertNotIn("psi", sample)
+        self.assertNotIn("E", sample)
+        self.assertEqual(sample["phi_obs"].shape[0], 3)
+        self.assertEqual(set(sample["action"].reshape(-1).tolist()), {0, 1})
+
 
 class PointMazeSamplingStrategyTest(unittest.TestCase):
     def make_agent(self):

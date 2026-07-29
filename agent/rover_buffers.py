@@ -170,14 +170,15 @@ class EncodedTransitionFIFO:
         kernel_type = str(kernel_type).lower()
         if kernel_type not in ("inner_product", "gaussian"):
             raise ValueError("pivoted Cholesky supports inner_product and gaussian kernels")
+        if actions is not None:
+            actions = torch.as_tensor(actions, dtype=torch.long, device="cpu").reshape(-1)
+            if actions.shape[0] != features.shape[0]:
+                raise ValueError("actions must align with pivoted Cholesky features")
         if kernel_type == "gaussian":
             if bandwidth is None or bandwidth <= 0.0:
                 raise ValueError("Gaussian pivoted Cholesky requires a positive bandwidth")
             if actions is None:
                 raise ValueError("Gaussian pivoted Cholesky requires action indices")
-            actions = torch.as_tensor(actions, dtype=torch.long, device="cpu").reshape(-1)
-            if actions.shape[0] != features.shape[0]:
-                raise ValueError("actions must align with pivoted Cholesky features")
         count = int(features.shape[0])
         target = min(int(size), count)
         if target <= 0:
@@ -236,6 +237,11 @@ class EncodedTransitionFIFO:
 
                 if kernel_type == "inner_product":
                     kernel_column = features @ features[pivot]
+                    # For compact state-action data, ψ(s,a) is represented by
+                    # φ(s) plus an action id. Its inner product is zero across
+                    # different actions.
+                    if actions is not None:
+                        kernel_column *= actions == actions[pivot]
                 else:
                     squared_distance = torch.sum(
                         (features - features[pivot]).square(), dim=1
@@ -275,7 +281,7 @@ class EncodedTransitionFIFO:
             raise ValueError("pivoted Cholesky tolerance must be non-negative")
 
         encoded, _, _ = self._all_with_trajectory_metadata()
-        total = int(encoded["psi"].shape[0])
+        total = int(encoded["phi_obs"].shape[0])
         target = min(int(size), total)
         force_first = bool(include_first and self._first is not None)
         candidate_count = min(
@@ -295,12 +301,22 @@ class EncodedTransitionFIFO:
         candidates = self._index(encoded, candidate_indices)
         kernel_type = str(kernel_type).lower()
         if kernel_type == "inner_product":
-            features = candidates["psi"]
-            actions = None
+            if "psi" in candidates:
+                features = candidates["psi"]
+                actions = None
+            elif "action" in candidates:
+                features = candidates["phi_obs"]
+                actions = candidates["action"].reshape(-1)
+            else:
+                raise KeyError("encoded FIFO requires either psi or compact action data")
             bandwidth = None
         elif kernel_type == "gaussian":
             features = candidates["phi_obs"]
-            actions = torch.argmax(candidates["E"], dim=1)
+            actions = (
+                candidates["action"].reshape(-1)
+                if "action" in candidates
+                else torch.argmax(candidates["E"], dim=1)
+            )
             if kernel_bandwidth is not None:
                 bandwidth = float(kernel_bandwidth)
                 if bandwidth <= 0.0:

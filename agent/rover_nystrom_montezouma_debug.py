@@ -1133,22 +1133,37 @@ class RoverAgent:
         return torch.cat([tensor, zeros_col], dim=-1)
 
     def _cache_encoded_features(self, encoded_full, encoded_sub=None):
+        def materialize(encoded):
+            phi_obs = encoded["phi_obs"].to(dtype=self.compute_dtype, device=self.device)
+            phi_next = encoded["phi_next"].to(dtype=self.compute_dtype, device=self.device)
+            if "action" in encoded:
+                actions = encoded["action"].to(device=self.device, dtype=torch.long).reshape(-1)
+                E = F.one_hot(actions, self.n_actions).to(dtype=self.compute_dtype)
+                psi = self._encode_state_action(phi_obs, actions)
+            else:
+                E = encoded["E"].to(dtype=self.compute_dtype, device=self.device)
+                actions = torch.argmax(E, dim=1).long()
+                psi = encoded["psi"].to(dtype=self.compute_dtype, device=self.device)
+            return phi_obs, phi_next, psi, E, actions
+
         with torch.no_grad():
-            self._phi_all_obs = self._append_zero_feature_column(encoded_full["phi_obs"].to(dtype=self.compute_dtype, device=self.device))
-            self._phi_all_next = self._append_zero_feature_column(encoded_full["phi_next"].to(dtype=self.compute_dtype, device=self.device))
-            self._psi_all = self._append_zero_feature_column(encoded_full["psi"].to(dtype=self.compute_dtype, device=self.device))
+            phi_obs, phi_next, psi, E, actions = materialize(encoded_full)
+            self._phi_all_obs = self._append_zero_feature_column(phi_obs)
+            self._phi_all_next = self._append_zero_feature_column(phi_next)
+            self._psi_all = self._append_zero_feature_column(psi)
 
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self._phi_all_next.dtype)
             self._alpha[0] = 1.0
 
-            self.E = encoded_full["E"].to(dtype=self.compute_dtype, device=self.device)
-            self._all_actions = torch.argmax(encoded_full["E"], dim=1).long().detach().cpu()
+            self.E = E
+            self._all_actions = actions.detach().cpu()
 
             if encoded_sub is not None:
-                self._phi_sub_obs = self._append_zero_feature_column(encoded_sub["phi_obs"].to(dtype=self.compute_dtype, device=self.device))
-                self._phi_sub_next = self._append_zero_feature_column(encoded_sub["phi_next"].to(dtype=self.compute_dtype, device=self.device))
-                self._psi_sub = self._append_zero_feature_column(encoded_sub["psi"].to(dtype=self.compute_dtype, device=self.device))
-                self._sub_actions = torch.argmax(encoded_sub["E"], dim=1).long().detach().cpu()
+                sub_phi_obs, sub_phi_next, sub_psi, _, sub_actions = materialize(encoded_sub)
+                self._phi_sub_obs = self._append_zero_feature_column(sub_phi_obs)
+                self._phi_sub_next = self._append_zero_feature_column(sub_phi_next)
+                self._psi_sub = self._append_zero_feature_column(sub_psi)
+                self._sub_actions = sub_actions.detach().cpu()
 
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
                 self._sub_alpha[0] = 1.0
@@ -1229,17 +1244,13 @@ class RoverAgent:
         with torch.no_grad():
             phi_obs = self._encode_with_module(self.policy_encoder, obs, project=True)
             phi_next = self._encode_with_module(self.policy_encoder, next_obs, project=True)
-            psi = self._encode_state_action(phi_obs, action)
-            action_onehot = F.one_hot(
-                action.long(),
-                self.n_actions,
-            ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
+        # FIFO lives on CPU. Store compact float32 features and action ids;
+        # dense ψ=φ⊗e_a and E are rebuilt only for sampled actor batches.
         encoded = {
-            "phi_obs": phi_obs,
-            "phi_next": phi_next,
-            "psi": psi,
-            "E": action_onehot,
-            "reward": reward,
+            "phi_obs": phi_obs.to(dtype=torch.float32),
+            "phi_next": phi_next.to(dtype=torch.float32),
+            "action": action.long().reshape(-1, 1),
+            "reward": reward.to(dtype=torch.float32),
         }
         # TEMP DEBUG: carry PointMaze XY through encoded FIFO so actor dataset
         # plots still work when using real replay data instead of synthetic
@@ -1559,33 +1570,64 @@ class RoverAgent:
         if not self._update_encoded_actor_fifo(replay_buffer):
             return None
 
+        # Actor support is always a bounded random sample from CPU FIFO.
+        full = self._encoded_actor_fifo.sample(
+            int(self.batch_size_actor),
+            "cpu",
+            include_first=True,
+        )
+        rewards = full.get("reward")
         if self.subsamples is None:
-            full, rewards = self._sample_encoded_actor_data(
-                self.batch_size_actor,
-                include_first=True,
-            )
             return EncodedActorUpdateData(
                 full=full,
                 rewards=rewards,
                 source=(
-                    f"encoded FIFO {self.subsampling_strategy} sample of "
+                    f"random encoded FIFO sample of "
                     f"batch_size_actor={self.batch_size_actor}"
                 ),
             )
 
-        # Nyström uses the whole encoded FIFO as support and a smaller landmark set.
+        # Select Nyström landmarks from actor support, never from the full FIFO.
         count = self._nystrom_subsample_count()
-        full, rewards = self._all_encoded_actor_data(include_first=True)
         if self.nystrom_synthetic_subsamples:
             subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
             subsample_source = "fixed PointMaze Nyström landmarks"
         else:
-            subsample, subsample_rewards = self._sample_encoded_actor_data(
-                count,
-                include_first=True,
+            actor_fifo = EncodedTransitionFIFO(max(1, self._encoded_batch_size(full)))
+            actor_fifo.add(
+                np.arange(self._encoded_batch_size(full), dtype=np.int64),
+                full,
             )
+            subsample = actor_fifo.sample_by_strategy(
+                count,
+                "cpu",
+                strategy=self.subsampling_strategy,
+                gamma=self.discount,
+                include_first=True,
+                candidate_multiplier=self.nystrom_candidate_multiplier,
+                cholesky_tolerance=self.nystrom_cholesky_tolerance,
+                kernel_type=self.kernel_type,
+                kernel_bandwidth=self.kernel_bandwidth,
+                kernel_bandwidth_mult=self.kernel_bandwidth_mult,
+                cholesky_progress=self.nystrom_cholesky_progress,
+            )
+            subsample_rewards = subsample.get("reward")
+            if self.subsampling_strategy == "pivoted_cholesky":
+                self._encoded_actor_fifo.last_pivoted_cholesky_residuals = (
+                    actor_fifo.last_pivoted_cholesky_residuals
+                )
+                self._encoded_actor_fifo.last_pivoted_cholesky_candidate_count = (
+                    actor_fifo.last_pivoted_cholesky_candidate_count
+                )
+                self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth = (
+                    actor_fifo.last_pivoted_cholesky_bandwidth
+                )
+                if self.kernel_type == "gaussian":
+                    bandwidth = actor_fifo.last_pivoted_cholesky_bandwidth
+                    self.kernel_fn.bandwidth = bandwidth
+                    self.distribution_matcher.kernel_fn.bandwidth = bandwidth
             subsample_source = (
-                f"encoded FIFO {self.subsampling_strategy} Nyström sample "
+                f"actor batch {self.subsampling_strategy} Nyström sample "
                 f"of subsamples={count}"
             )
         return EncodedActorUpdateData(
@@ -1593,7 +1635,10 @@ class RoverAgent:
             rewards=rewards,
             subsample=subsample,
             subsample_rewards=subsample_rewards,
-            source=f"encoded FIFO full support + {subsample_source}",
+            source=(
+                f"random encoded FIFO actor sample of batch_size_actor="
+                f"{self.batch_size_actor} + {subsample_source}"
+            ),
         )
 
     def _replay_actor_subsample_batch(self, replay_iter, full_batch, replay_buffer):

@@ -37,7 +37,7 @@ else
     kernel_args+=("agent.kernel_bandwidth_mult=null")
 fi
 
-PYTORCH_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_montezouma \
     wandb_tag="operator_${KERNEL_TYPE}_bw${KERNEL_BANDWIDTH_MULTIPLIER}_linear${LINEAR_PROJECTION}" \
     use_wandb=true \
