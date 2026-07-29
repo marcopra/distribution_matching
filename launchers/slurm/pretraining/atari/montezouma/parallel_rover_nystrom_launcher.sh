@@ -27,7 +27,7 @@ kernel_types=(
 )
 
 linear_projections=(
-    true
+    # true
     false
 )
 
