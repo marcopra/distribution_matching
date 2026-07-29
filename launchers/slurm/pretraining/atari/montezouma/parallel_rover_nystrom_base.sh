@@ -37,7 +37,7 @@ else
     kernel_args+=("agent.kernel_bandwidth_mult=null")
 fi
 
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
+PYTORCH_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_montezouma \
     wandb_tag="operator_${KERNEL_TYPE}_bw${KERNEL_BANDWIDTH_MULTIPLIER}_linear${LINEAR_PROJECTION}" \
     use_wandb=true \
@@ -51,5 +51,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.lambda_reg=1e-4 \
-    agent.encoded_fifo_capacity= 1_000_000\
+    agent.encoded_fifo_capacity=1000000 \
     wandb_project=montezouma_hp
