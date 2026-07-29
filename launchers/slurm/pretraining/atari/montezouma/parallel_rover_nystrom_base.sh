@@ -20,11 +20,11 @@ export HYDRA_FULL_ERROR=1
 
 # Decode sink_schedule from index to avoid quoting issues in sbatch --export
 sink_schedules=(
-    "linear(0.0, 0.001,  15_000_000)"
-    "linear(0.0, 0.01,   15_000_000)"
-    "linear(0.0, 0.1,    15_000_000)"
-    "linear(0.0, 1,      15_000_000)"
-    "linear(0.0, 1,      100_000_000)"
+    "linear(0.0, 0.001,  15000000)"
+    "linear(0.0, 0.01,   15000000)"
+    "linear(0.0, 0.1,    15000000)"
+    "linear(0.0, 1,      15000000)"
+    "linear(0.0, 1,      100000000)"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
