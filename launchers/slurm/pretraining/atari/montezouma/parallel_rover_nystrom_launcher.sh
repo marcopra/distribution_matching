@@ -36,8 +36,8 @@ linear_projections=(
 #   1 -> "linear(0.0, 0.01,   15_000_000)"
 #   2 -> "linear(0.0, 0.1,    15_000_000)"
 #   3 -> "linear(0.0, 1,      15_000_000)"
-#   4 -> "linear(0.0, 1,      100_000_000)"
-sink_idxs=(0 2) # 3 4)
+#   4 -> "0.0"
+sink_idxs=(0 4)
 
 for seed in $seeds; do
     for batch_size_actor in "${batch_sizes_actor[@]}"; do

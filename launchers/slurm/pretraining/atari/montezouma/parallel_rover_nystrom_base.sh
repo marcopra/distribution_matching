@@ -24,7 +24,7 @@ sink_schedules=(
     "linear(0.0, 0.01,   15000000)"
     "linear(0.0, 0.1,    15000000)"
     "linear(0.0, 1,      15000000)"
-    "linear(0.0, 1,      100000000)"
+    "0.0"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
@@ -39,7 +39,6 @@ fi
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_montezouma \
-    wandb_tag="operator_${KERNEL_TYPE}_bw${KERNEL_BANDWIDTH_MULTIPLIER}_linear${LINEAR_PROJECTION}" \
     use_wandb=true \
     seed="${SEED}" \
     discount=0.99 \
