@@ -79,6 +79,9 @@ agent:
   update_actor_every_steps: 25000
   update_every_steps: 1000
   max_pending_transitions: 5000
+  use_encoded_fifo: false
+  actor_encode_batch_size: 1024
+  actor_kernel_block_size: 1024
   T_init_steps: 10000
 
 hydra:

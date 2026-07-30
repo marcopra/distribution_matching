@@ -127,6 +127,8 @@ class RoverAgent:
                  device: str = "cpu",
                  ):
 
+        raise NotImplementedError("Montezouma file ha una ottimizzazione nella gestione della memoria. Ora fifo queue è usata metre batch size actor no se subsamle is set \
+                                  I fatto che lì conservo più dati nella fifo e batch size sampla da li in maniera efficiente da testare e vedere se integrare.")
         self.compute_dtype = _resolve_torch_dtype(compute_dtype)
         torch.set_default_dtype(self.compute_dtype)
 
