@@ -199,8 +199,10 @@ class ActionRepeatWrapper(gym.Wrapper):
         self.obs_keys = None
         self._is_montezuma = self._check_is_montezuma()
         self._montezuma_initial_room = None
-        self._montezuma_max_room = None
-        self._montezuma_visited_second_room = False
+        self._montezuma_escaped_first_room = False
+        self._montezuma_rooms_visited = set()
+        self._montezuma_room_route = []
+        self._montezuma_episode_frame = 0
         
         # Expose render_resolution if available
         if hasattr(env, 'render_resolution'):
@@ -227,30 +229,41 @@ class ActionRepeatWrapper(gym.Wrapper):
     def _reset_montezuma_tracking(self):
         room_id = self._get_montezuma_room_id()
         self._montezuma_initial_room = room_id
-        self._montezuma_max_room = room_id
-        self._montezuma_visited_second_room = False
+        self._montezuma_escaped_first_room = False
+        self._montezuma_rooms_visited = set()
+        self._montezuma_room_route = []
+        self._montezuma_episode_frame = 0
+        if room_id is not None:
+            self._montezuma_rooms_visited.add(room_id)
+            self._montezuma_room_route.append((0, room_id))
         return room_id
 
     def _update_montezuma_tracking(self):
+        self._montezuma_episode_frame += 1
         room_id = self._get_montezuma_room_id()
         if room_id is None:
             return None
         if self._montezuma_initial_room is None:
             self._montezuma_initial_room = room_id
-        if self._montezuma_max_room is None:
-            self._montezuma_max_room = room_id
-        else:
-            self._montezuma_max_room = max(self._montezuma_max_room, room_id)
+        self._montezuma_rooms_visited.add(room_id)
+        if not self._montezuma_room_route or self._montezuma_room_route[-1][1] != room_id:
+            self._montezuma_room_route.append(
+                (self._montezuma_episode_frame, room_id)
+            )
         if self._montezuma_initial_room is not None and room_id != self._montezuma_initial_room:
-            self._montezuma_visited_second_room = True
+            self._montezuma_escaped_first_room = True
         return room_id
 
     def _augment_info(self, info, room_id):
         info = dict(info) if info is not None else {}
         if self._is_montezuma:
             info['montezuma_room_id'] = room_id
-            info['montezuma_visited_second_room'] = self._montezuma_visited_second_room
-            info['montezuma_max_room_id'] = self._montezuma_max_room
+            info['montezuma_escaped_first_room'] = self._montezuma_escaped_first_room
+            info['montezuma_unique_rooms_visited'] = len(self._montezuma_rooms_visited)
+            info['montezuma_room_transition_count'] = max(
+                0, len(self._montezuma_room_route) - 1
+            )
+            info['montezuma_room_route'] = tuple(self._montezuma_room_route)
         return info
 
     def _process_proprio_obs(self, obs):

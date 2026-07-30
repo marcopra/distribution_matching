@@ -105,7 +105,7 @@ def main(cfg):
                 project=cfg.wandb_project,
                 name=cfg.wandb_run_name,
                 tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
-                sync_tensorboard=True,
+                sync_tensorboard=False,
                 mode='online')
         else:
             wandb.init(
@@ -113,7 +113,7 @@ def main(cfg):
                 project=cfg.wandb_project,
                 name=cfg.wandb_run_name,
                 tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
-                sync_tensorboard=True,
+                sync_tensorboard=False,
                 mode='online')
                 
     # create envs
