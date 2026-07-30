@@ -26,7 +26,7 @@ class Encoder(nn.Module):
 
     def forward(self, obs):
         obs = obs.view(obs.shape[0], -1)
-        obs = obs.to(dtype=torch.get_default_dtype())
+        obs = obs.to(dtype=next(self.parameters()).dtype)
         h = self.fc(obs)
         h = F.normalize(h, p=1, dim=-1)
         return h
@@ -68,8 +68,7 @@ class CNNEncoder(nn.Module):
         self.apply(utils.weight_init)
 
     def forward(self, obs):
-        obs = obs / 255.
-        obs = obs.to(dtype=torch.get_default_dtype())
+        obs = obs.to(dtype=self.conv[0].weight.dtype) / 255.
         h = self.conv(obs)
         h = self.adaptive_pool(h)
         h = h.view(h.shape[0], -1)
