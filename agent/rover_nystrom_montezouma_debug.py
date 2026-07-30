@@ -1401,12 +1401,18 @@ class RoverAgent:
 
     def _load_first_actor_transition(self, replay_buffer=None, fallback_actor_batch=None):
         if replay_buffer is not None and hasattr(replay_buffer, "get_first_transition"):
-            first_batch = replay_buffer.get_first_transition()
-            first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(
-                first_batch[:5],
-                self.device,
-            )
-            return self._make_actor_batch(first_obs, first_action, first_next_obs, first_reward)
+            try:
+                first_batch = replay_buffer.get_first_transition()
+            except RuntimeError:
+                first_batch = None
+            if first_batch is not None:
+                first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(
+                    first_batch[:5],
+                    self.device,
+                )
+                return self._make_actor_batch(
+                    first_obs, first_action, first_next_obs, first_reward
+                )
 
         if fallback_actor_batch is None:
             return None
@@ -1518,7 +1524,16 @@ class RoverAgent:
         if buffers is None:
             raise RuntimeError("Could not collect fresh actor data")
 
-        first = self._load_first_actor_transition(replay_buffer=replay_buffer)
+        fallback_first = self._make_actor_batch(
+            initial_batch[0][:1],
+            initial_batch[1][:1],
+            initial_batch[4][:1],
+            initial_batch[2][:1],
+        )
+        first = self._load_first_actor_transition(
+            replay_buffer=replay_buffer,
+            fallback_actor_batch=fallback_first,
+        )
         if first is not None:
             first_raw = (
                 first[0],
