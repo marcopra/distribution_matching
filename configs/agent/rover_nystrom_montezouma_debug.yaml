@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.rover_nystrom_montezouma_debug.RoverAgent
+_target_: agent.rover_nystrom_debug.RoverAgent
 name: dist_matching
 obs_type: ???
 obs_shape: ???

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from agent.rover_matchers import DistributionMatcher
 from agent.rover_networks import CNNEncoder, Encoder
-from agent.rover_nystrom_montezouma_debug import RoverAgent
+from agent.rover_nystrom_debug import RoverAgent
 
 
 class CompactBlockwiseNystromTest(unittest.TestCase):

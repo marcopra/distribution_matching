@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -130,6 +131,99 @@ def _prepare_trajectories(trajectories) -> list[np.ndarray]:
         if points:
             prepared.append(np.asarray(points, dtype=np.float32))
     return prepared
+
+
+def pointmaze_free_space_coverage(
+    env,
+    trajectories,
+    grid_size: int = 90,
+    radius: float = 0.08,
+) -> tuple[int, int, float]:
+    """Measure trajectory coverage over a regular grid of PointMaze free space."""
+    if grid_size < 2:
+        raise ValueError("grid_size must be at least 2")
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+
+    prepared = _prepare_trajectories(trajectories)
+    if not prepared:
+        raise ValueError("coverage requires at least one valid trajectory point")
+
+    layout = _get_pointmaze_wall_layout(env)
+    if layout is None:
+        raise AttributeError("PointMaze environment has no valid get_debug_maze_layout()")
+
+    lower = layout["maze_lower"]
+    upper = layout["maze_upper"]
+    walls = layout["wall_rectangles"]
+    xs = np.linspace(lower[0], upper[0], grid_size, dtype=np.float32)
+    ys = np.linspace(lower[1], upper[1], grid_size, dtype=np.float32)
+    grid = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
+
+    inside_wall = np.zeros(len(grid), dtype=bool)
+    if walls.size:
+        x = grid[:, 0:1]
+        y = grid[:, 1:2]
+        inside_wall = (
+            (x >= walls[:, 0])
+            & (x <= walls[:, 0] + walls[:, 2])
+            & (y >= walls[:, 1])
+            & (y <= walls[:, 1] + walls[:, 3])
+        ).any(axis=1)
+    free = grid[~inside_wall]
+    if len(free) == 0:
+        raise ValueError("PointMaze layout contains no free grid points")
+
+    samples = np.concatenate(prepared, axis=0)
+    covered = np.zeros(len(free), dtype=bool)
+    radius_sq = float(radius) ** 2
+    for start in range(0, len(free), 2048):
+        chunk = free[start : start + 2048]
+        distances = ((chunk[:, None, :] - samples[None, :, :]) ** 2).sum(axis=2)
+        covered[start : start + len(chunk)] = distances.min(axis=1) <= radius_sq
+
+    covered_count = int(covered.sum())
+    free_count = int(len(free))
+    return covered_count, free_count, 100.0 * covered_count / free_count
+
+
+@dataclass
+class CoverageProgress:
+    """Track checkpoint-to-checkpoint coverage growth for logging."""
+
+    tolerance: float = 0.25
+    previous_coverage: Optional[float] = None
+    previous_frame: Optional[int] = None
+    best_coverage: float = 0.0
+
+    def update(self, coverage_pct: float, frame: int) -> dict[str, float]:
+        coverage_pct = float(coverage_pct)
+        frame = int(frame)
+        if not np.isfinite(coverage_pct):
+            raise ValueError("coverage_pct must be finite")
+        if frame < 0:
+            raise ValueError("frame must be non-negative")
+        if self.previous_frame is not None and frame <= self.previous_frame:
+            raise ValueError("coverage frames must increase strictly")
+
+        delta = 0.0 if self.previous_coverage is None else coverage_pct - self.previous_coverage
+        frame_delta = 0 if self.previous_frame is None else frame - self.previous_frame
+        gain_per_100k = 0.0 if frame_delta == 0 else delta * 100_000.0 / frame_delta
+        self.best_coverage = max(self.best_coverage, coverage_pct)
+        self.previous_coverage = coverage_pct
+        self.previous_frame = frame
+        return {
+            "coverage_pct": coverage_pct,
+            "coverage_delta": delta,
+            "coverage_best": self.best_coverage,
+            "coverage_gain_per_100k": gain_per_100k,
+            "coverage_expanding": float(delta > self.tolerance),
+        }
+
+
+def pointmaze_evaluation_seed(training_seed: int, frame: int, episode: int = 0) -> int:
+    """Stable per-run, per-checkpoint seed without Python hash randomization."""
+    return int(training_seed) * 1_000_003 + int(frame) + int(episode)
 
 
 def _trajectory_colors(n_trajectories: int) -> list:

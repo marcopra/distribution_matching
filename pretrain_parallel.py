@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+import random
 import sys
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
@@ -25,6 +26,13 @@ from replay_buffer_parallel import ReplayBufferStorageParallel, make_replay_load
 from video import TrainVideoRecorder, VideoRecorder
 import ale_py
 from omegaconf import open_dict
+from agent.utils_debug_visualization import (
+    CoverageProgress,
+    extract_eval_trajectory_point,
+    pointmaze_evaluation_seed,
+    pointmaze_free_space_coverage,
+    save_maze_trajectory_overlay_plot,
+)
 
 
 torch.backends.cudnn.benchmark = True
@@ -128,6 +136,10 @@ class Workspace:
             
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
+        self._coverage_progress = CoverageProgress(
+            tolerance=float(getattr(cfg, "coverage_expansion_tolerance", 0.25))
+        )
+        self._validate_coverage_config()
 
         # create logger
         if cfg.use_wandb:
@@ -299,6 +311,37 @@ class Workspace:
             ty,
         )
 
+    def _validate_coverage_config(self):
+        if not bool(getattr(self.cfg, "coverage_eval_enabled", False)):
+            return
+        if int(getattr(self.cfg, "coverage_num_trajectories", 50)) < 1:
+            raise ValueError("coverage_num_trajectories must be positive")
+        if int(getattr(self.cfg, "coverage_grid_size", 90)) < 2:
+            raise ValueError("coverage_grid_size must be at least 2")
+        if float(getattr(self.cfg, "coverage_radius", 0.08)) <= 0:
+            raise ValueError("coverage_radius must be positive")
+        if float(getattr(self.cfg, "coverage_expansion_tolerance", 0.25)) < 0:
+            raise ValueError("coverage_expansion_tolerance must be non-negative")
+
+    @staticmethod
+    def _evaluation_rng_state():
+        state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.random.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["cuda"] = torch.cuda.get_rng_state_all()
+        return state
+
+    @staticmethod
+    def _restore_evaluation_rng_state(state):
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.random.set_rng_state(state["torch"])
+        if "cuda" in state:
+            torch.cuda.set_rng_state_all(state["cuda"])
+
     @property
     def global_step(self):
         return self._global_step
@@ -332,34 +375,82 @@ class Workspace:
 
     def eval(self):
         step, episode, total_reward = 0, 0, 0
-        eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
-        meta = self.agent.init_meta()
+        coverage_enabled = bool(getattr(self.cfg, "coverage_eval_enabled", False))
+        num_episodes = (
+            int(getattr(self.cfg, "coverage_num_trajectories", 50))
+            if coverage_enabled
+            else int(self.cfg.num_eval_episodes)
+        )
+        eval_until_episode = utils.Until(num_episodes)
+        eval_trajectories = []
         eval_mode = False
-        if eval_mode == False:
+        rng_state = self._evaluation_rng_state()
+        action_probs = getattr(self.agent, "current_action_probs", None)
+        saved_action_probs = list(action_probs) if isinstance(action_probs, list) else None
+        eval_seed = pointmaze_evaluation_seed(self.cfg.seed, self.global_frame)
+        try:
+            utils.set_seed_everywhere(eval_seed)
             utils.ColorPrint.yellow("Evaluating with eval_mode=False")
-        while eval_until_episode(episode):
-            meta = self.agent.init_meta()
-            time_step = self.eval_env.reset()
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
-            while not time_step.last():
-                with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation,
-                                            meta,
-                                            self.global_step,
-                                            eval_mode=eval_mode) # I am not sure we should evaluate with eval_mode=True during pretrain... ORIGINAL CODE: True
-                time_step = self.eval_env.step(action)
-                self.video_recorder.record(self.eval_env)
-                total_reward += time_step.reward
-                step += 1
+            while eval_until_episode(episode):
+                meta = self.agent.init_meta()
+                time_step = self.eval_env.reset(
+                    seed=pointmaze_evaluation_seed(self.cfg.seed, self.global_frame, episode)
+                )
+                trajectory = []
+                point = extract_eval_trajectory_point(self.eval_env, time_step)
+                if point is not None:
+                    trajectory.append(point)
+                self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+                while not time_step.last():
+                    with torch.no_grad(), utils.eval_mode(self.agent):
+                        action = self.agent.act(
+                            time_step.observation,
+                            meta,
+                            self.global_step,
+                            eval_mode=eval_mode,
+                        )
+                    time_step = self.eval_env.step(action)
+                    point = extract_eval_trajectory_point(self.eval_env, time_step)
+                    if point is not None:
+                        trajectory.append(point)
+                    self.video_recorder.record(self.eval_env)
+                    total_reward += time_step.reward
+                    step += 1
 
-            episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+                episode += 1
+                if trajectory:
+                    eval_trajectories.append(trajectory)
+                self.video_recorder.save(f'{self.global_frame}.mp4')
+        finally:
+            if saved_action_probs is not None:
+                self.agent.current_action_probs = saved_action_probs
+            self._restore_evaluation_rng_state(rng_state)
+
+        coverage_metrics = {}
+        if coverage_enabled:
+            _, _, coverage_pct = pointmaze_free_space_coverage(
+                self.eval_env,
+                eval_trajectories,
+                grid_size=int(getattr(self.cfg, "coverage_grid_size", 90)),
+                radius=float(getattr(self.cfg, "coverage_radius", 0.08)),
+            )
+            coverage_metrics = self._coverage_progress.update(coverage_pct, self.global_frame)
+
+            if bool(getattr(self.cfg, "plot_eval_trajectories", False)):
+                save_maze_trajectory_overlay_plot(
+                    trajectories=eval_trajectories,
+                    env=self.eval_env,
+                    step=self.global_frame,
+                    save_dir=self.work_dir / "eval_trajectory_plots",
+                )
 
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             log('episode_reward', total_reward / episode)
             log('episode_length', step * self.cfg.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
+            for key, value in coverage_metrics.items():
+                log(key, value)
             if episode > 0:
                 self._log_montezuma_episode_metrics(log, time_step, ty='eval')
 
@@ -605,7 +696,7 @@ class Workspace:
             if self.save_snapshot_flag == False:
                 return
             snapshot = snapshot_dir / 'snapshot.pt'
-        keys_to_save = ['agent', '_global_step', '_global_episode']
+        keys_to_save = ['agent', '_global_step', '_global_episode', '_coverage_progress']
         payload = {k: self.__dict__[k] for k in keys_to_save}
 
         agent = payload['agent']

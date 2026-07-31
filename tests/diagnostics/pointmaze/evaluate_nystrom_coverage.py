@@ -37,12 +37,12 @@ from omegaconf import OmegaConf
 import utils
 from agent.rover_visualization.domains import (
     extract_eval_trajectory_point,
+    pointmaze_free_space_coverage,
     save_maze_trajectory_overlay_plot,
 )
 from plot_pointmaze_snapshot_trajectories import (
     _agent_latent_probs,
     _pointmaze_wall_rectangles,
-    _points_inside_rectangles,
     _reset_valid_pointmaze_start,
     _sample_one_hot,
     load_config,
@@ -254,38 +254,6 @@ def collect_trajectories(
     return trajectories
 
 
-def free_space_coverage(
-    env, trajectories: list[np.ndarray], grid_size: int, radius: float
-) -> tuple[int, int, float]:
-    layout_fn = getattr(env, "get_debug_maze_layout", None)
-    if not callable(layout_fn):
-        current = env
-        while current is not None and not callable(layout_fn):
-            current = getattr(current, "env", None)
-            layout_fn = getattr(current, "get_debug_maze_layout", None)
-    if not callable(layout_fn):
-        raise AttributeError("PointMaze environment has no get_debug_maze_layout()")
-
-    layout = layout_fn()
-    lower = np.asarray(layout["maze_lower"], dtype=np.float32)
-    upper = np.asarray(layout["maze_upper"], dtype=np.float32)
-    walls = np.asarray(layout["wall_rectangles"], dtype=np.float32).reshape(-1, 4)
-    xs = np.linspace(lower[0], upper[0], grid_size, dtype=np.float32)
-    ys = np.linspace(lower[1], upper[1], grid_size, dtype=np.float32)
-    grid = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
-    free = grid[~_points_inside_rectangles(grid, walls)]
-    samples = np.concatenate(trajectories, axis=0)
-
-    covered = np.zeros(len(free), dtype=bool)
-    radius_sq = radius**2
-    for start in range(0, len(free), 2048):
-        chunk = free[start : start + 2048]
-        distances = ((chunk[:, None, :] - samples[None, :, :]) ** 2).sum(axis=2)
-        covered[start : start + len(chunk)] = distances.min(axis=1) <= radius_sq
-    count = int(covered.sum())
-    return count, int(len(free)), 100.0 * count / len(free)
-
-
 def evaluate_spec(spec: PolicySpec, args, index: int) -> Result:
     cfg = load_config(spec.config_path.resolve())
     env = make_env(cfg, seed=args.seed + index)
@@ -312,7 +280,7 @@ def evaluate_spec(spec: PolicySpec, args, index: int) -> Result:
         )
         if not trajectories:
             raise RuntimeError(f"No trajectories collected for {spec.run_name}")
-        covered, free, percentage = free_space_coverage(
+        covered, free, percentage = pointmaze_free_space_coverage(
             env, trajectories, args.grid_size, args.coverage_radius
         )
         if spec.algorithm == "Rover":

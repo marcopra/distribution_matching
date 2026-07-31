@@ -75,6 +75,8 @@ class Args:
     """the target KL divergence threshold"""
     sticky_actions: float = 0.25
     "sticky actions"
+    action_set: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 11, 12)
+    """ALE action IDs exposed to the policy, matching the ROVER Montezuma config"""
 
     # RND arguments
     update_proportion: float = 0.25
@@ -109,8 +111,9 @@ class RecordEpisodeStatistics(gym.Wrapper):
             getattr(env, "task_id", "")
         )
         self.montezuma_initial_room = None
-        self.montezuma_max_room = None
-        self.montezuma_visited_second_room = None
+        self.montezuma_escaped_first_room = None
+        self.montezuma_rooms_visited = None
+        self.montezuma_room_routes = None
 
     def reset(self, **kwargs):
         reset_out = super().reset(**kwargs)
@@ -121,8 +124,9 @@ class RecordEpisodeStatistics(gym.Wrapper):
         self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
         self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
         self.montezuma_initial_room = np.full(self.num_envs, -1, dtype=np.int32)
-        self.montezuma_max_room = np.full(self.num_envs, -1, dtype=np.int32)
-        self.montezuma_visited_second_room = np.zeros(self.num_envs, dtype=bool)
+        self.montezuma_escaped_first_room = np.zeros(self.num_envs, dtype=bool)
+        self.montezuma_rooms_visited = [set() for _ in range(self.num_envs)]
+        self.montezuma_room_routes = [[] for _ in range(self.num_envs)]
         return observations
 
     def _update_montezuma_tracking(self, infos):
@@ -137,12 +141,26 @@ class RecordEpisodeStatistics(gym.Wrapper):
         room_ids = np.asarray(infos["ram"])[:, self.MONTEZUMA_ROOM_RAM_INDEX].astype(np.int32)
         missing_initial_room = self.montezuma_initial_room < 0
         self.montezuma_initial_room[missing_initial_room] = room_ids[missing_initial_room]
-        self.montezuma_max_room = np.maximum(self.montezuma_max_room, room_ids)
-        self.montezuma_visited_second_room |= room_ids != self.montezuma_initial_room
+        self.montezuma_escaped_first_room |= room_ids != self.montezuma_initial_room
+        episode_frames = self.episode_lengths + 1
+        for env_id, room_id in enumerate(room_ids):
+            room_id = int(room_id)
+            self.montezuma_rooms_visited[env_id].add(room_id)
+            route = self.montezuma_room_routes[env_id]
+            if not route or route[-1][1] != room_id:
+                route.append((int(episode_frames[env_id]), room_id))
 
         infos["montezuma_room_id"] = room_ids
-        infos["montezuma_max_room_id"] = self.montezuma_max_room.copy()
-        infos["montezuma_visited_second_room"] = self.montezuma_visited_second_room.copy()
+        infos["montezuma_escaped_first_room"] = self.montezuma_escaped_first_room.copy()
+        infos["montezuma_unique_rooms_visited"] = np.asarray(
+            [len(rooms) for rooms in self.montezuma_rooms_visited], dtype=np.int32
+        )
+        infos["montezuma_room_transition_count"] = np.asarray(
+            [max(0, len(route) - 1) for route in self.montezuma_room_routes], dtype=np.int32
+        )
+        room_routes = np.empty(self.num_envs, dtype=object)
+        room_routes[:] = [tuple(route) for route in self.montezuma_room_routes]
+        infos["montezuma_room_route"] = room_routes
 
     def step(self, action):
         step_out = super().step(action)
@@ -159,10 +177,14 @@ class RecordEpisodeStatistics(gym.Wrapper):
         self.returned_episode_returns[:] = self.episode_returns
         self.returned_episode_lengths[:] = self.episode_lengths
         if self.is_montezuma and "ram" in infos:
-            reset_mask = infos["terminated"].astype(bool)
-            self.montezuma_initial_room[reset_mask] = -1
-            self.montezuma_max_room[reset_mask] = -1
-            self.montezuma_visited_second_room[reset_mask] = False
+            # EnvPool uses episodic-life terminals. Keep room metrics across lost
+            # lives and reset them only when the whole game ends.
+            reset_mask = infos["terminated"].astype(bool) & (np.asarray(infos["lives"]) == 0)
+            for env_id in np.flatnonzero(reset_mask):
+                self.montezuma_initial_room[env_id] = -1
+                self.montezuma_escaped_first_room[env_id] = False
+                self.montezuma_rooms_visited[env_id].clear()
+                self.montezuma_room_routes[env_id].clear()
         self.episode_returns *= 1 - infos["terminated"]
         self.episode_lengths *= 1 - infos["terminated"]
         infos["r"] = self.returned_episode_returns
@@ -180,6 +202,27 @@ class RecordEpisodeStatistics(gym.Wrapper):
         except AttributeError as exc:
             if "'closed'" not in str(exc):
                 raise
+
+
+class RestrictedActionSet(gym.Wrapper):
+    """Map compact policy action indices to full ALE action IDs."""
+
+    def __init__(self, env, action_set):
+        super().__init__(env)
+        actions = tuple(int(action) for action in action_set)
+        full_action_count = env.single_action_space.n
+        if not actions or len(actions) != len(set(actions)):
+            raise ValueError("action_set must contain unique ALE action IDs")
+        if any(action < 0 or action >= full_action_count for action in actions):
+            raise ValueError(f"action_set IDs must be in [0, {full_action_count - 1}]")
+        self.action_set = np.asarray(actions, dtype=np.int64)
+        self.single_action_space = gymnasium.spaces.Discrete(len(actions))
+
+    def step(self, actions):
+        actions = np.asarray(actions)
+        if np.any(actions < 0) or np.any(actions >= len(self.action_set)):
+            raise ValueError(f"restricted action indices must be in [0, {len(self.action_set) - 1}]")
+        return self.env.step(self.action_set[actions])
 
 
 # ALGO LOGIC: initialize agent here:
@@ -340,6 +383,7 @@ if __name__ == "__main__":
     )
     # envs.num_envs = args.num_envs
     envs.task_id = args.env_id
+    envs = RestrictedActionSet(envs, args.action_set)
     # envs.single_action_space = envs.action_space
     # envs.single_observation_space = envs.observation_space
     envs = RecordEpisodeStatistics(envs)
@@ -441,18 +485,17 @@ if __name__ == "__main__":
                         global_step,
                     )
                     writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
-                    if "montezuma_visited_second_room" in info:
-                        writer.add_scalar(
-                            "charts/montezuma_visited_second_room",
-                            float(info["montezuma_visited_second_room"][idx]),
-                            global_step,
-                        )
-                    if "montezuma_max_room_id" in info:
-                        writer.add_scalar(
-                            "charts/montezuma_max_room_id",
-                            int(info["montezuma_max_room_id"][idx]),
-                            global_step,
-                        )
+                    for info_key, metric_key in (
+                        ("montezuma_escaped_first_room", "escaped_first_room"),
+                        ("montezuma_unique_rooms_visited", "unique_rooms_visited"),
+                        ("montezuma_room_transition_count", "room_transition_count"),
+                    ):
+                        if info_key in info:
+                            writer.add_scalar(
+                                f"train/{metric_key}",
+                                float(info[info_key][idx]),
+                                global_step,
+                            )
 
         curiosity_reward_per_env = np.array(
             [discounted_reward.update(reward_per_step) for reward_per_step in curiosity_rewards.cpu().data.numpy().T]
