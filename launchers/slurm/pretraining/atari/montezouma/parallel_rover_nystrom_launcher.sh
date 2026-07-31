@@ -5,6 +5,8 @@
 seeds="1"
 
 batch_sizes_actor=(
+    2000000
+    100000
     50000
 )
 
@@ -37,7 +39,7 @@ linear_projections=(
 #   2 -> "linear(0.0, 0.1,    15_000_000)"
 #   3 -> "linear(0.0, 1,      15_000_000)"
 #   4 -> "0.0"
-sink_idxs=(0 4)
+sink_idxs=(4)
 
 for seed in $seeds; do
     for batch_size_actor in "${batch_sizes_actor[@]}"; do
