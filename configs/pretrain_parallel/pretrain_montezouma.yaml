@@ -80,7 +80,6 @@ agent:
   update_every_steps: 2500
   max_pending_transitions: 5000
   actor_encode_batch_size: 1024
-  actor_kernel_block_size: 1024
   T_init_steps: 10000
 
 hydra:

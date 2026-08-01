@@ -25,7 +25,6 @@ encoded_fifo_cuda_oom_splits: 4
 use_encoded_fifo: true
 actor_encode_batch_size: 1024
 actor_encode_dtype: float32
-actor_kernel_block_size: 1024
 max_pending_transitions: null
 kernel_type: inner_product
 kernel_bandwidth: null

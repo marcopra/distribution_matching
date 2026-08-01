@@ -5,21 +5,21 @@ BASE="launchers/slurm/pretraining/pointmaze/largedense_rover_nystrom/base.sh"
 seeds=(1)
 
 kernel_bandwidth_multipliers=(
-    0.25
+    0.05
+    0.1
     0.5
-    1.0
-    2.0
+
 )
 
 nystrom_points=(
-    4000
+    # 4000
     8000
-    16000
+    # 12000
 )
 
 batch_sizes_actor=(
-    16000
     32000
+    # 48000
 )
 
 # Indices into sink_schedules in base.sh:
@@ -28,7 +28,7 @@ batch_sizes_actor=(
 #   2 -> linear(0.0, 0.1,   500000)
 #   3 -> linear(0.0, 1.0,   500000)
 #   4 -> 0.0
-sink_idxs=(0 1 2 3 4)
+sink_idxs=(0 2)
 
 for seed in "${seeds[@]}"; do
     for bandwidth_mult in "${kernel_bandwidth_multipliers[@]}"; do

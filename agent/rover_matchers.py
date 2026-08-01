@@ -279,6 +279,9 @@ class DistributionMatcher:
             block_size: int,
         ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build A=K_nm^T K_nm+λK_mm without materializing K_nm or B."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         m = int(phi_sub_obs.shape[0])
         K_mm = self.state_action_kernel(
             phi_sub_obs, phi_sub_obs, sub_actions, sub_actions
@@ -317,6 +320,9 @@ class DistributionMatcher:
             block_size: int,
         ) -> torch.Tensor:
         """Evaluate landmark policy without retaining H[n,m] or dense E[n,a]."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         m = int(phi_sub_next.shape[0])
         logits = torch.zeros(
             (m, int(n_actions)),
@@ -348,6 +354,9 @@ class DistributionMatcher:
             block_size: int,
         ) -> torch.Tensor:
         """Compute B M = A^-1 K_nm^T M using row blocks."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         m = int(phi_sub_obs.shape[0])
         rhs = torch.zeros((m, m), device=A_nystrom.device, dtype=A_nystrom.dtype)
         all_actions_device = all_actions.to(phi_all_obs.device).long()
@@ -375,6 +384,9 @@ class DistributionMatcher:
             block_size: int,
         ) -> torch.Tensor:
         """Compute B^T v = K_nm A^-T v in blocks."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         solved = torch.linalg.solve(A_nystrom.T, vector)
         result = torch.empty(
             (phi_all_obs.shape[0], vector.shape[1]),
@@ -402,6 +414,9 @@ class DistributionMatcher:
             sink_norm: float,
         ) -> torch.Tensor:
         """Compute occupancy from compact features and precomputed BM."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         m, d = int(BM.shape[0]), int(phi_sub_next_obs.shape[1])
         S = torch.empty((m + 1, m + 1), device=BM.device, dtype=BM.dtype)
         S[:-1, :-1] = BM
@@ -656,6 +671,9 @@ class DistributionMatcher:
             
         ) -> torch.Tensor:
         """Compute projected Nyström gradient using block augmented algebra."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         m = phi_sub_next_obs.shape[0]
         r = eig_vecs_r.shape[1]
         d = phi_sub_next_obs.shape[1]
@@ -797,6 +815,9 @@ class DistributionMatcher:
             block_size: int,
         ) -> torch.Tensor:
         """Projected gradient without dense ψ, H, K_nm, M, or B."""
+        raise NotImplementedError(
+            "Blockwise Nyström computation is disabled until tests are completed."
+        )
         m = int(phi_sub_next_obs.shape[0])
         r = int(eig_vecs_r.shape[1])
         d = int(phi_sub_next_obs.shape[1])

@@ -118,7 +118,6 @@ class RoverAgent:
                  use_encoded_fifo: bool = True,
                  actor_encode_batch_size: int = 1024,
                  actor_encode_dtype: str = "float32",
-                 actor_kernel_block_size: int = 1024,
                  max_pending_transitions: Optional[int] = None,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
@@ -247,11 +246,8 @@ class RoverAgent:
         self.use_encoded_fifo = bool(use_encoded_fifo)
         self.requires_transition_view = self.use_encoded_fifo
         self.actor_encode_batch_size = int(actor_encode_batch_size)
-        self.actor_kernel_block_size = int(actor_kernel_block_size)
         if self.actor_encode_batch_size <= 0:
             raise ValueError("actor_encode_batch_size must be positive")
-        if self.actor_kernel_block_size <= 0:
-            raise ValueError("actor_kernel_block_size must be positive")
         self.actor_encode_dtype = _resolve_torch_dtype(actor_encode_dtype)
         if self.actor_encode_dtype != torch.float32:
             raise ValueError("actor_encode_dtype currently supports only float32")
@@ -943,9 +939,6 @@ class RoverAgent:
                 sub_next_obs=sub_next_obs,
             )
 
-        return self._update_actor_nystrom_compact(step)
-
-        # Legacy dense implementation retained below for numerical reference.
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
@@ -1021,7 +1014,7 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_blockwise_and_proj(
+            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
                 phi_sub_next_obs = self._phi_sub_next,
                 psi_sub_obs_action = self._psi_sub,
                 H = sub_H,
@@ -1130,166 +1123,6 @@ class RoverAgent:
    
         return metrics
 
-    def _update_actor_nystrom_compact(self, step):
-        """Exact PMD update using compact state/action data and row blocks."""
-        metrics = {}
-        n = int(self._phi_all_obs.shape[0])
-        m = int(self._phi_sub_next.shape[0])
-        block_size = self.actor_kernel_block_size
-        utils.ColorPrint.blue(
-            f"Starting compact blockwise Nyström PMD with n={n}, m={m}, "
-            f"block_size={block_size}."
-        )
-        self._fit_state_kernel_bandwidth(self._phi_all_obs, self._phi_sub_next)
-        sink_norm = utils.schedule(self.sink_schedule, step)
-        base_eta = float(np.clip(
-            float(utils.schedule(self.lr_actor, step)),
-            self.pmd_eta_min,
-            self.pmd_eta_max,
-        ))
-        self.current_eta = base_eta
-        self.gradient_coeff = torch.zeros(
-            (n + 1, 1), device=self.device, dtype=self.compute_dtype
-        )
-        prev_gradient_coeff = self.gradient_coeff.clone()
-
-        phase = self._memory_phase_start("actor_nystrom_setup")
-        A_nystrom, U_r = self.distribution_matcher.compute_nystrom_system_blockwise(
-            self._phi_all_obs,
-            self._phi_sub_obs,
-            self._all_actions,
-            self._sub_actions,
-            self.pca_truncation,
-            block_size,
-        )
-        self._memory_phase_end(phase)
-
-        def evaluate(coeff):
-            pi = self.distribution_matcher.policy_from_support_blockwise(
-                self._phi_all_obs,
-                self._phi_sub_next,
-                self._all_actions,
-                coeff,
-                self.n_actions,
-                block_size,
-            )
-            BM = self.distribution_matcher.compute_BM_blockwise(
-                A_nystrom,
-                self._phi_all_obs,
-                self._phi_sub_obs,
-                self._phi_sub_next,
-                self._all_actions,
-                self._sub_actions,
-                pi,
-                block_size,
-            )
-            nu = self.distribution_matcher.compute_nu_from_BM_compact(
-                BM,
-                self._phi_sub_next,
-                self._phi_sub_obs,
-                self._sub_alpha,
-                sink_norm,
-            )
-            return pi, BM, torch.linalg.norm(nu) ** 2
-
-        phase = self._memory_phase_start("actor_pmd")
-        self.pi, current_BM, actor_loss = evaluate(self.gradient_coeff)
-        best_loss = actor_loss
-        best_pi = self.pi.clone()
-        best_coeff = self.gradient_coeff.clone()
-        self._adagrad_accum = 0.0
-
-        for iteration in range(self.pmd_steps):
-            grad_update = (
-                self.distribution_matcher.compute_gradient_coefficient_compact_blockwise(
-                    current_BM,
-                    A_nystrom,
-                    self._phi_all_obs,
-                    self._phi_sub_obs,
-                    self._phi_sub_next,
-                    self._all_actions,
-                    self._sub_actions,
-                    self._sub_alpha,
-                    sink_norm,
-                    U_r,
-                    block_size,
-                )
-            )
-            if self.pmd_grad_clip_norm > 0:
-                grad_norm = torch.linalg.norm(grad_update)
-                if grad_norm > self.pmd_grad_clip_norm:
-                    grad_update.mul_(
-                        self.pmd_grad_clip_norm / (grad_norm + 1e-12)
-                    )
-
-            if self.pmd_eta_mode == "adagrad":
-                grad_norm_sq = float(torch.max(grad_update.square()).item())
-                self._adagrad_accum += grad_norm_sq
-                eta_t = base_eta / np.sqrt(
-                    self._adagrad_accum + self.pmd_adagrad_eps
-                )
-            elif self.pmd_eta_mode == "adadiff":
-                grad_norm_sq = float(torch.max(
-                    grad_update.square() - prev_gradient_coeff.square()
-                ).item())
-                self._adagrad_accum += grad_norm_sq
-                eta_t = base_eta / np.sqrt(
-                    self._adagrad_accum + self.pmd_adagrad_eps
-                )
-            else:
-                eta_t = base_eta
-            eta_t = float(np.clip(eta_t, self.pmd_eta_min, self.pmd_eta_max))
-
-            candidate_coeff = self.gradient_coeff + eta_t * grad_update
-            candidate_pi, candidate_BM, candidate_loss = evaluate(candidate_coeff)
-            if self.pmd_eta_mode == "backtracking":
-                trial = 0
-                while (
-                    candidate_loss > actor_loss
-                    and trial < self.pmd_backtrack_max_trials
-                ):
-                    eta_t = float(np.clip(
-                        eta_t * self.pmd_backtrack_factor,
-                        self.pmd_eta_min,
-                        self.pmd_eta_max,
-                    ))
-                    candidate_coeff = self.gradient_coeff + eta_t * grad_update
-                    candidate_pi, candidate_BM, candidate_loss = evaluate(
-                        candidate_coeff
-                    )
-                    trial += 1
-
-            self.current_eta = eta_t
-            self.gradient_coeff = candidate_coeff
-            prev_gradient_coeff = grad_update.clone()
-            self.pi = candidate_pi
-            current_BM = candidate_BM
-            actor_loss = candidate_loss
-            if actor_loss < best_loss:
-                best_loss = actor_loss
-                best_pi = self.pi.clone()
-                best_coeff = self.gradient_coeff.clone()
-            print(
-                f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, "
-                f"eta: {self.current_eta:.6g}"
-            )
-
-        if self.pmd_best_iterate:
-            self.pi = best_pi
-            self.gradient_coeff = best_coeff
-            actor_loss = best_loss
-        self._memory_phase_end(phase)
-
-        if self.use_tb or self.use_wandb:
-            metrics.update({
-                "actor_loss": actor_loss,
-                "actor_eta": float(self.current_eta),
-                "actor_best_loss": float(best_loss),
-                "sink_norm": float(sink_norm),
-            })
-        return metrics
-
-    
     def _cache_features(self, obs, action, next_obs, encoder=None, sub_obs=None, sub_action=None, sub_next_obs=None):
         """Pre-compute and cache dataset features."""
         encoder = self.encoder if encoder is None else encoder
@@ -1301,6 +1134,7 @@ class RoverAgent:
             self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True).to(dtype=self.compute_dtype)
 
             action = action #.cpu()
+            self._psi_all = self._encode_state_action(self._phi_all_obs, action)
             self._all_actions = action.long().reshape(-1).detach().cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [n, 1]
@@ -1313,6 +1147,7 @@ class RoverAgent:
 
             # ** AUGMENTATION STEP **
             # ψ and Φ are augmented with an additional zero dimension
+            self._psi_all = self._append_zero_feature_column(self._psi_all)
             zero_col = torch.zeros(*self._phi_all_next.shape[:-1], 1, device=self._phi_all_next.device, dtype=self._phi_all_next.dtype)
             self._phi_all_next = torch.cat([self._phi_all_next, zero_col], dim=-1)
 
@@ -1323,12 +1158,14 @@ class RoverAgent:
                 self._phi_sub_obs = self._encode_with_module(encoder, sub_obs, project=True).to(dtype=self.compute_dtype)
                 self._phi_sub_next = self._encode_with_module(encoder, sub_next_obs, project=True).to(dtype=self.compute_dtype)
                 self._sub_actions = sub_action.long().reshape(-1).detach().cpu()
+                self._psi_sub = self._encode_state_action(self._phi_sub_obs, sub_action)
 
                 zeros_col_sub_next = torch.zeros(*self._phi_sub_next.shape[:-1], 1, device=self._phi_sub_next.device, dtype=self._phi_sub_next.dtype)
                 self._phi_sub_next = torch.cat([self._phi_sub_next, zeros_col_sub_next], dim=-1)
 
                 zero_col_sub_obs = torch.zeros(*self._phi_sub_obs.shape[:-1], 1, device=self._phi_sub_obs.device, dtype=self._phi_sub_obs.dtype)
                 self._phi_sub_obs = torch.cat([self._phi_sub_obs, zero_col_sub_obs], dim=-1)
+                self._psi_sub = self._append_zero_feature_column(self._psi_sub)
 
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [m, 1]
                 self._sub_alpha[0] = 1.0  # set alpha to 1.0 for the first state
@@ -1346,15 +1183,18 @@ class RoverAgent:
             if "action" in encoded:
                 actions = encoded["action"].to(device=self.device, dtype=torch.long).reshape(-1)
                 E = F.one_hot(actions, self.n_actions).to(dtype=self.compute_dtype)
+                psi = self._encode_state_action(phi_obs, actions)
             else:
                 E = encoded["E"].to(dtype=self.compute_dtype, device=self.device)
                 actions = torch.argmax(E, dim=1).long()
-            return phi_obs, phi_next, E, actions
+                psi = encoded["psi"].to(dtype=self.compute_dtype, device=self.device)
+            return phi_obs, phi_next, psi, E, actions
 
         with torch.no_grad():
-            phi_obs, phi_next, E, actions = materialize(encoded_full)
+            phi_obs, phi_next, psi, E, actions = materialize(encoded_full)
             self._phi_all_obs = self._append_zero_feature_column(phi_obs)
             self._phi_all_next = self._append_zero_feature_column(phi_next)
+            self._psi_all = self._append_zero_feature_column(psi)
 
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self._phi_all_next.dtype)
             self._alpha[0] = 1.0
@@ -1363,9 +1203,10 @@ class RoverAgent:
             self._all_actions = actions.detach().cpu()
 
             if encoded_sub is not None:
-                sub_phi_obs, sub_phi_next, _, sub_actions = materialize(encoded_sub)
+                sub_phi_obs, sub_phi_next, sub_psi, _, sub_actions = materialize(encoded_sub)
                 self._phi_sub_obs = self._append_zero_feature_column(sub_phi_obs)
                 self._phi_sub_next = self._append_zero_feature_column(sub_phi_next)
+                self._psi_sub = self._append_zero_feature_column(sub_psi)
                 self._sub_actions = sub_actions.detach().cpu()
 
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
@@ -1376,6 +1217,7 @@ class RoverAgent:
     def _use_full_features_as_subsample(self):
         self._phi_sub_obs = self._phi_all_obs
         self._phi_sub_next = self._phi_all_next
+        self._psi_sub = self._psi_all
         self._sub_actions = self._all_actions
         self._sub_alpha = self._alpha
 

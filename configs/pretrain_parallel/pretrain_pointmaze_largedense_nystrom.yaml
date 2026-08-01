@@ -45,7 +45,7 @@ update_encoder: true
 
 agent:
   embeddings: false
-  lr_actor: 10
+  lr_actor: 100
   pmd_steps: 10
   update_every_steps: 100
   update_actor_every_steps: 10000
@@ -61,7 +61,7 @@ agent:
   nystrom_exact_grid: false
   nystrom_synthetic_subsamples: false
   debug_fixed_dataset_updates: false
-  subsampling_strategy: random
+  subsampling_strategy: pivoted_cholesky
   kernel_bandwidth: null
   kernel_bandwidth_mult: 1.0
   sink_schedule: "linear(0.0,0.005,500000)"
