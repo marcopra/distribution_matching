@@ -20,7 +20,8 @@ update_actor_after_critic_steps: 0
 num_envs: 4
 base_seed: ${seed}
 async_vector_env: true
-parallel_attach_eval_env_for_debug: false
+# Enables legacy PointMaze debug images in pointmaze_plots/ at actor updates.
+parallel_attach_eval_env_for_debug: true
 
 num_train_frames: 1_000_000
 num_seed_frames: 10_000

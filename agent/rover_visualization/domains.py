@@ -1199,9 +1199,14 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         if points.shape[0] > 1:
             deltas = points[:, None, :] - points[None, :, :]
             distances = np.linalg.norm(deltas, axis=2)
-            distances = distances[distances > 1e-6]
-            if distances.size:
-                base_scale = min(base_scale, float(np.min(distances)) * 1.35)
+            distances[distances <= 1e-6] = np.inf
+            nearest = distances.min(axis=1)
+            nearest = nearest[np.isfinite(nearest)]
+            if nearest.size:
+                # One explicitly inserted start point can sit very close to a
+                # regular probe. Global minimum then makes every glyph tiny.
+                # Median nearest-neighbor distance represents grid spacing.
+                base_scale = min(base_scale, float(np.median(nearest)) * 1.35)
 
         return max(base_scale * 0.45, 0.08)
 

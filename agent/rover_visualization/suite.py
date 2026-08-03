@@ -7,6 +7,7 @@ from .domains import (
     BaseDomainDebugVisualizer,
     FetchCoverageVisualizer,
     GridworldVisualizerAdapter,
+    PointMazeCoverageVisualizer,
     XYCoverageVisualizer,
     _find_discrete_env,
     _has_debug_xy_env,
@@ -35,8 +36,11 @@ class RoverDebugVisualizerSuite:
         elif _is_fetch_env(env):
             self.domain_visualizer = FetchCoverageVisualizer(self.agent, env, rollout_steps=500, bins=10)
         elif _is_point_maze_env(env):
-            # Canonical PointMaze coverage runs on pretraining evaluation cadence.
-            self.domain_visualizer = None
+            # Keep detailed debug plots (rollout heatmap and XY-conditioned
+            # action probabilities) available when a launcher explicitly
+            # attaches its evaluation environment. Scalar canonical coverage
+            # still runs on the pretraining evaluation cadence.
+            self.domain_visualizer = PointMazeCoverageVisualizer(self.agent, env)
         elif _has_debug_xy_env(env):
             self.domain_visualizer = XYCoverageVisualizer(
                 self.agent,

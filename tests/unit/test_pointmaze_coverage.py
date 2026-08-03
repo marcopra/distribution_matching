@@ -4,6 +4,7 @@ import numpy as np
 
 from agent.rover_visualization.domains import (
     CoverageProgress,
+    PointMazeCoverageVisualizer,
     pointmaze_evaluation_seed,
     pointmaze_free_space_coverage,
 )
@@ -62,13 +63,16 @@ class PointMazeCoverageTest(unittest.TestCase):
             pointmaze_evaluation_seed(3, 200_000, 7),
         )
 
-    def test_pointmaze_actor_update_domain_visualizer_is_disabled(self):
+    def test_pointmaze_actor_update_domain_visualizer_is_restored(self):
         suite = RoverDebugVisualizerSuite(
             agent=object(),
             exploration_visualizer=None,
             gridworld_visualizer_factory=lambda agent: self.fail("unexpected gridworld visualizer"),
         )
-        self.assertIsNone(suite.attach_env(PointMazeFakeEnv()))
+        self.assertIsInstance(
+            suite.attach_env(PointMazeFakeEnv()),
+            PointMazeCoverageVisualizer,
+        )
 
 
 if __name__ == "__main__":

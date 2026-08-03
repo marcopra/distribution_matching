@@ -827,7 +827,9 @@ class PointMazeNystromDebugHelper:
             return
         from agent.utils_debug_visualization import PointMazeNystromDebugVisualizer
 
-        PointMazeNystromDebugVisualizer().save_fixed_points_plot(
+        PointMazeNystromDebugVisualizer(
+            save_dir=os.path.join(os.getcwd(), "pointmaze_plots")
+        ).save_fixed_points_plot(
             layout=self.maze_layout(),
             points=self._fixed_xy_points,
             n_actions=n_actions,
