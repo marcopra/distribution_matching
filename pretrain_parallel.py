@@ -304,12 +304,6 @@ class Workspace:
         ):
             if info_key in info:
                 log(metric_key, float(info[info_key]))
-        self.logger.log_room_route(
-            info.get('montezuma_room_route'),
-            self.global_episode,
-            self.global_frame,
-            ty,
-        )
 
     def _validate_coverage_config(self):
         if not bool(getattr(self.cfg, "coverage_eval_enabled", False)):

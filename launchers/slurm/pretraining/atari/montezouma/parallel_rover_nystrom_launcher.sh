@@ -11,7 +11,7 @@ batch_sizes_actor=(
 )
 
 subsamples=(
-    5000
+    2500
 )
 
 feature_dims=(

@@ -4,10 +4,10 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --gres=gpu:1
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua-longrun
+#SBATCH --partition=gpua
 
 
 cd "$SLURM_SUBMIT_DIR"
@@ -51,4 +51,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.lambda_reg=1e-4 \
     agent.encoded_fifo_capacity=1000000 \
-    wandb_project=montezouma_hp
+    wandb_project=montezouma_hp \
+    agent.update_every_steps=1000

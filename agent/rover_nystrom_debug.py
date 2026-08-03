@@ -1,8 +1,6 @@
 from collections import OrderedDict
 import copy
 import os
-import resource
-import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -115,9 +113,6 @@ class RoverAgent:
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
-                 use_encoded_fifo: bool = True,
-                 actor_encode_batch_size: int = 1024,
-                 actor_encode_dtype: str = "float32",
                  max_pending_transitions: Optional[int] = None,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
@@ -243,14 +238,6 @@ class RoverAgent:
             self.encoded_fifo_capacity = min_fifo_capacity
         self.encoded_fifo_encode_batch_size = int(encoded_fifo_encode_batch_size)
         self.encoded_fifo_cuda_oom_splits = int(encoded_fifo_cuda_oom_splits)
-        self.use_encoded_fifo = bool(use_encoded_fifo)
-        self.requires_transition_view = self.use_encoded_fifo
-        self.actor_encode_batch_size = int(actor_encode_batch_size)
-        if self.actor_encode_batch_size <= 0:
-            raise ValueError("actor_encode_batch_size must be positive")
-        self.actor_encode_dtype = _resolve_torch_dtype(actor_encode_dtype)
-        if self.actor_encode_dtype != torch.float32:
-            raise ValueError("actor_encode_dtype currently supports only float32")
         self.max_pending_transitions = (
             None if max_pending_transitions is None
             else int(max_pending_transitions)
@@ -313,12 +300,6 @@ class RoverAgent:
         
         self.policy_encoder = copy.deepcopy(self.encoder).to(self.device)
         self._freeze_module(self.policy_encoder)
-        self.actor_encode_encoder = None
-        if not self.use_encoded_fifo:
-            self.actor_encode_encoder = copy.deepcopy(self.encoder).to(
-                device=self.device, dtype=self.actor_encode_dtype
-            )
-            self._freeze_module(self.actor_encode_encoder)
         self._policy_is_synced = True
         
         self.distribution_matcher = DistributionMatcher(
@@ -478,37 +459,6 @@ class RoverAgent:
         self.policy_encoder.load_state_dict(self.encoder.state_dict())
         self._freeze_module(self.policy_encoder)
         self._policy_is_synced = True
-
-    def _sync_actor_encode_encoder(self) -> None:
-        if self.actor_encode_encoder is None:
-            raise RuntimeError("FP32 actor encoder is unavailable while FIFO mode is enabled")
-        self.actor_encode_encoder.load_state_dict(self.encoder.state_dict())
-        self._freeze_module(self.actor_encode_encoder)
-
-    def _memory_phase_start(self, name):
-        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
-            torch.cuda.synchronize(self.device)
-            torch.cuda.reset_peak_memory_stats(self.device)
-        return name, time.perf_counter(), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-
-    def _memory_phase_end(self, phase):
-        name, started, rss_before = phase
-        cuda_allocated = cuda_reserved = 0
-        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
-            torch.cuda.synchronize(self.device)
-            cuda_allocated = torch.cuda.max_memory_allocated(self.device)
-            cuda_reserved = torch.cuda.max_memory_reserved(self.device)
-        rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        logger.info(
-            "memory phase=%s elapsed=%.3fs rss_peak_mib=%.1f rss_growth_mib=%.1f "
-            "cuda_allocated_peak_mib=%.1f cuda_reserved_peak_mib=%.1f",
-            name,
-            time.perf_counter() - started,
-            rss_after / 1024.0,
-            max(0, rss_after - rss_before) / 1024.0,
-            cuda_allocated / (1024.0 ** 2),
-            cuda_reserved / (1024.0 ** 2),
-        )
 
     def ready_for_snapshot(self) -> bool:
         return self._policy_is_synced
@@ -1014,7 +964,7 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
+            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_blockwise_and_proj(
                 phi_sub_next_obs = self._phi_sub_next,
                 psi_sub_obs_action = self._psi_sub,
                 H = sub_H,
@@ -1123,6 +1073,7 @@ class RoverAgent:
    
         return metrics
 
+    
     def _cache_features(self, obs, action, next_obs, encoder=None, sub_obs=None, sub_action=None, sub_next_obs=None):
         """Pre-compute and cache dataset features."""
         encoder = self.encoder if encoder is None else encoder
@@ -1134,7 +1085,7 @@ class RoverAgent:
             self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True).to(dtype=self.compute_dtype)
 
             action = action #.cpu()
-            self._psi_all = self._encode_state_action(self._phi_all_obs, action)
+            self._psi_all = self._encode_state_action(self._phi_all_obs, action) #.cpu()
             self._all_actions = action.long().reshape(-1).detach().cpu()
            
             self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [n, 1]
@@ -1147,7 +1098,9 @@ class RoverAgent:
 
             # ** AUGMENTATION STEP **
             # ψ and Φ are augmented with an additional zero dimension
-            self._psi_all = self._append_zero_feature_column(self._psi_all)
+            zeros_col = torch.zeros(*self._psi_all.shape[:-1], 1, device=self._psi_all.device, dtype=self._psi_all.dtype)
+            self._psi_all = torch.cat([self._psi_all, zeros_col], dim=-1)
+
             zero_col = torch.zeros(*self._phi_all_next.shape[:-1], 1, device=self._phi_all_next.device, dtype=self._phi_all_next.dtype)
             self._phi_all_next = torch.cat([self._phi_all_next, zero_col], dim=-1)
 
@@ -1158,6 +1111,7 @@ class RoverAgent:
                 self._phi_sub_obs = self._encode_with_module(encoder, sub_obs, project=True).to(dtype=self.compute_dtype)
                 self._phi_sub_next = self._encode_with_module(encoder, sub_next_obs, project=True).to(dtype=self.compute_dtype)
                 self._sub_actions = sub_action.long().reshape(-1).detach().cpu()
+
                 self._psi_sub = self._encode_state_action(self._phi_sub_obs, sub_action)
 
                 zeros_col_sub_next = torch.zeros(*self._phi_sub_next.shape[:-1], 1, device=self._phi_sub_next.device, dtype=self._phi_sub_next.dtype)
@@ -1165,12 +1119,14 @@ class RoverAgent:
 
                 zero_col_sub_obs = torch.zeros(*self._phi_sub_obs.shape[:-1], 1, device=self._phi_sub_obs.device, dtype=self._phi_sub_obs.dtype)
                 self._phi_sub_obs = torch.cat([self._phi_sub_obs, zero_col_sub_obs], dim=-1)
-                self._psi_sub = self._append_zero_feature_column(self._psi_sub)
+
+                zero_col_sub_psi = torch.zeros(*self._psi_sub.shape[:-1], 1, device=self._psi_sub.device, dtype=self._psi_sub.dtype)
+                self._psi_sub = torch.cat([self._psi_sub, zero_col_sub_psi], dim=-1)
 
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [m, 1]
                 self._sub_alpha[0] = 1.0  # set alpha to 1.0 for the first state
 
-            print(f"dimensions after augmentation: phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
+            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
     def _append_zero_feature_column(self, tensor):
         zeros_col = torch.zeros(*tensor.shape[:-1], 1, device=tensor.device, dtype=tensor.dtype)
@@ -1212,7 +1168,7 @@ class RoverAgent:
                 self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
                 self._sub_alpha[0] = 1.0
 
-            print(f"dimensions after augmentation: phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
+            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
 
     def _use_full_features_as_subsample(self):
         self._phi_sub_obs = self._phi_all_obs
@@ -1243,18 +1199,12 @@ class RoverAgent:
 
     def _load_first_actor_transition(self, replay_buffer=None, fallback_actor_batch=None):
         if replay_buffer is not None and hasattr(replay_buffer, "get_first_transition"):
-            try:
-                first_batch = replay_buffer.get_first_transition()
-            except RuntimeError:
-                first_batch = None
-            if first_batch is not None:
-                first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(
-                    first_batch[:5],
-                    self.device,
-                )
-                return self._make_actor_batch(
-                    first_obs, first_action, first_next_obs, first_reward
-                )
+            first_batch = replay_buffer.get_first_transition()
+            first_obs, first_action, first_reward, _, first_next_obs = utils.to_torch(
+                first_batch[:5],
+                self.device,
+            )
+            return self._make_actor_batch(first_obs, first_action, first_next_obs, first_reward)
 
         if fallback_actor_batch is None:
             return None
@@ -1288,16 +1238,12 @@ class RoverAgent:
     def _slice_raw_transition_batch(self, transitions, index):
         return tuple(field[index] for field in transitions)
 
-    def _encode_actor_transition_batch(self, transitions, encoder=None):
-        encoder = self.policy_encoder if encoder is None else encoder
+    def _encode_actor_transition_batch(self, transitions):
         obs, action, reward, _, next_obs = utils.to_torch(transitions[:5], self.device)
-        encoder_dtype = next(encoder.parameters()).dtype
-        obs = obs.to(dtype=encoder_dtype)
-        next_obs = next_obs.to(dtype=encoder_dtype)
         reward = reward.reshape(obs.shape[0], -1)
-        with torch.inference_mode():
-            phi_obs = self._encode_with_module(encoder, obs, project=True)
-            phi_next = self._encode_with_module(encoder, next_obs, project=True)
+        with torch.no_grad():
+            phi_obs = self._encode_with_module(self.policy_encoder, obs, project=True)
+            phi_next = self._encode_with_module(self.policy_encoder, next_obs, project=True)
         # FIFO lives on CPU. Store compact float32 features and action ids;
         # dense ψ=φ⊗e_a and E are rebuilt only for sampled actor batches.
         encoded = {
@@ -1313,169 +1259,11 @@ class RoverAgent:
             encoded["debug_xy"] = obs.detach().reshape(obs.shape[0], -1)[:, :2]
         return encoded
 
-    def _encode_fresh_actor_chunk(self, transitions):
-        return self._encode_actor_transition_batch_with_retries(
-            transitions,
-            encoder=self.actor_encode_encoder,
-        )
-
-    @staticmethod
-    def _allocate_encoded_actor_buffer(encoded, size):
-        return {
-            key: torch.empty(
-                (size, *value.shape[1:]),
-                dtype=value.dtype,
-                device="cpu",
-            )
-            for key, value in encoded.items()
-        }
-
-    def _collect_fresh_encoded_actor_data(
-            self, replay_iter, initial_batch, replay_buffer=None):
-        """Sample and immediately encode replay chunks into compact CPU FP32 buffers."""
-        self._sync_actor_encode_encoder()
-        target = int(self.batch_size_actor)
-        buffers = None
-        written = 0
-        pending_batch = initial_batch
-
-        while written < target:
-            if pending_batch is None:
-                pending_batch = next(replay_iter)
-            batch_count = int(pending_batch[0].shape[0])
-            for start in range(0, batch_count, self.actor_encode_batch_size):
-                if written >= target:
-                    break
-                take = min(
-                    self.actor_encode_batch_size,
-                    batch_count - start,
-                    target - written,
-                )
-                chunk = tuple(field[start:start + take] for field in pending_batch)
-                encoded = self._encode_fresh_actor_chunk(chunk)
-                if buffers is None:
-                    buffers = self._allocate_encoded_actor_buffer(encoded, target)
-                for key, value in encoded.items():
-                    buffers[key][written:written + take].copy_(
-                        value.detach().to(device="cpu", non_blocking=False)
-                    )
-                written += take
-                del encoded, chunk
-            pending_batch = None
-
-        if buffers is None:
-            raise RuntimeError("Could not collect fresh actor data")
-
-        fallback_first = self._make_actor_batch(
-            initial_batch[0][:1],
-            initial_batch[1][:1],
-            initial_batch[4][:1],
-            initial_batch[2][:1],
-        )
-        first = self._load_first_actor_transition(
-            replay_buffer=replay_buffer,
-            fallback_actor_batch=fallback_first,
-        )
-        if first is not None:
-            first_raw = (
-                first[0],
-                first[1],
-                first[3],
-                torch.ones_like(first[3]),
-                first[2],
-            )
-            first_encoded = self._encode_fresh_actor_chunk(first_raw)
-            for key, value in first_encoded.items():
-                if key in buffers:
-                    buffers[key][:1].copy_(value.detach().to("cpu"))
-        return buffers
-
-    def _sample_encoded_landmarks(self, full):
-        count = min(self._nystrom_subsample_count(), self._encoded_batch_size(full))
-        if self.nystrom_synthetic_subsamples:
-            return self.nystrom_debug.encode_subsamples(self)
-        if self.subsampling_strategy == "pivoted_cholesky":
-            features = full["phi_obs"]
-            actions = full["action"].reshape(-1)
-            candidate_count = min(
-                int(features.shape[0]),
-                max(
-                    count,
-                    int(np.ceil(self.nystrom_candidate_multiplier * count)),
-                ),
-            )
-            candidate_indices = torch.cat([
-                torch.zeros(1, dtype=torch.long),
-                torch.randperm(max(0, int(features.shape[0]) - 1))[
-                    :candidate_count - 1
-                ] + 1,
-            ])
-            candidate_features = features[candidate_indices]
-            candidate_actions = actions[candidate_indices]
-            bandwidth = None
-            if self.kernel_type == "gaussian":
-                if self.kernel_bandwidth is not None:
-                    bandwidth = float(self.kernel_bandwidth)
-                else:
-                    multiplier = (
-                        1.0 if self.kernel_bandwidth_mult is None
-                        else float(self.kernel_bandwidth_mult)
-                    )
-                    bandwidth = EncodedTransitionFIFO._estimate_gaussian_bandwidth(
-                        candidate_features, multiplier
-                    )
-            local_selected, residuals = EncodedTransitionFIFO._pivoted_cholesky_indices(
-                candidate_features,
-                count,
-                self.nystrom_cholesky_tolerance,
-                force_first=True,
-                kernel_type=self.kernel_type,
-                actions=candidate_actions,
-                bandwidth=bandwidth,
-                show_progress=self.nystrom_cholesky_progress,
-            )
-            self._encoded_actor_fifo.last_pivoted_cholesky_residuals = residuals
-            self._encoded_actor_fifo.last_pivoted_cholesky_candidate_count = candidate_count
-            self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth = bandwidth
-            selected = candidate_indices[local_selected]
-        else:
-            selected = torch.cat([
-                torch.zeros(1, dtype=torch.long),
-                torch.randperm(max(0, self._encoded_batch_size(full) - 1))[:count - 1] + 1,
-            ])
-        sampled = {key: value[selected] for key, value in full.items()}
-        return sampled, sampled.get("reward")
-
-    def _fresh_replay_actor_update_data(
-            self, replay_iter, initial_batch, replay_buffer=None):
-        phase = self._memory_phase_start("fresh_actor_encoding")
-        full = self._collect_fresh_encoded_actor_data(
-            replay_iter, initial_batch, replay_buffer=replay_buffer
-        )
-        self._memory_phase_end(phase)
-        if self.subsamples is None:
-            return EncodedActorUpdateData(
-                full=full,
-                rewards=full.get("reward"),
-                source="fresh chunk-encoded replay support",
-            )
-        phase = self._memory_phase_start("fresh_actor_landmarks")
-        subsample, subsample_rewards = self._sample_encoded_landmarks(full)
-        self._memory_phase_end(phase)
-        return EncodedActorUpdateData(
-            full=full,
-            rewards=full.get("reward"),
-            subsample=subsample,
-            subsample_rewards=subsample_rewards,
-            source="fresh chunk-encoded replay support + compact landmarks",
-        )
-
-    def _encode_actor_transition_batch_with_retries(
-            self, transitions, splits_left=None, encoder=None):
+    def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
         splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
         batch_size = transitions[0].shape[0]
         try:
-            return self._encode_actor_transition_batch(transitions, encoder=encoder)
+            return self._encode_actor_transition_batch(transitions)
         except RuntimeError as error:
             if not self._is_cuda_oom(error) or splits_left <= 0 or batch_size <= 1:
                 raise
@@ -1484,12 +1272,8 @@ class RoverAgent:
             midpoint = batch_size // 2
             left = self._slice_raw_transition_batch(transitions, slice(0, midpoint))
             right = self._slice_raw_transition_batch(transitions, slice(midpoint, None))
-            encoded_left = self._encode_actor_transition_batch_with_retries(
-                left, splits_left - 1, encoder=encoder
-            )
-            encoded_right = self._encode_actor_transition_batch_with_retries(
-                right, splits_left - 1, encoder=encoder
-            )
+            encoded_left = self._encode_actor_transition_batch_with_retries(left, splits_left - 1)
+            encoded_right = self._encode_actor_transition_batch_with_retries(right, splits_left - 1)
             return self._concat_encoded_batches([encoded_left, encoded_right])
 
     def _insert_first_transition_if_available(self, replay_buffer):
@@ -1542,8 +1326,6 @@ class RoverAgent:
 
     def drain_encoded_actor_fifo(self, replay_buffer):
         """Encode pending replay transitions without running actor/encoder update."""
-        if not self.use_encoded_fifo:
-            return False
         return self._update_encoded_actor_fifo(replay_buffer)
 
     def _sample_encoded_actor_data(self, size, include_first):
@@ -1907,17 +1689,9 @@ class RoverAgent:
         if self.debug_fixed_dataset_updates:
             return self._fixed_actor_update_data()
 
-        if self.use_encoded_fifo:
-            encoded_data = self._encoded_fifo_actor_update_data(replay_buffer)
-            if encoded_data is not None:
-                return encoded_data
-        else:
-            initial_batch = (obs, action, reward, torch.ones_like(reward), next_obs)
-            return self._fresh_replay_actor_update_data(
-                replay_iter,
-                initial_batch,
-                replay_buffer=replay_buffer,
-            )
+        encoded_data = self._encoded_fifo_actor_update_data(replay_buffer)
+        if encoded_data is not None:
+            return encoded_data
 
         return self._replay_actor_update_data(
             replay_iter,

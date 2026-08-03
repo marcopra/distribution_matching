@@ -194,20 +194,6 @@ class Logger(object):
             data[f'{ty}/frame'] = step
             wandb.log(data)
 
-    def log_room_route(self, route, episode, step, ty):
-        if not self.use_wandb or not route:
-            return
-        table = wandb.Table(
-            columns=['episode', 'episode_frame', 'room_id'],
-            data=[
-                [int(episode), int(episode_frame), int(room_id)]
-                for episode_frame, room_id in route
-            ],
-        )
-        wandb.log({
-            f'{ty}/room_route': table,
-            f'{ty}/frame': step,
-        })
 
     def dump(self, step, ty=None):
         if ty is None or ty == 'eval':
