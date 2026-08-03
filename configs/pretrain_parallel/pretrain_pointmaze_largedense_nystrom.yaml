@@ -56,7 +56,6 @@ agent:
   subsamples: 16000
   batch_size_actor: 16000
   lambda_reg: 1e-6
-  use_encoded_fifo: true
   encoded_fifo_capacity: 100000
   nystrom_exact_grid: false
   nystrom_synthetic_subsamples: false

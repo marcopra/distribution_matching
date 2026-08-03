@@ -22,9 +22,6 @@ nystrom_cholesky_progress: true
 encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
-use_encoded_fifo: true
-actor_encode_batch_size: 1024
-actor_encode_dtype: float32
 max_pending_transitions: null
 kernel_type: gaussian # [inner_product, gaussian, laplacian, dirac]
 kernel_bandwidth: null # fixed Gaussian bandwidth; null lets pivoted Cholesky fit candidates

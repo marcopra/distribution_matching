@@ -46,7 +46,6 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.debug_fixed_dataset_updates=false \
     agent.nystrom_synthetic_subsamples=false \
     agent.nystrom_exact_grid=false \
-    agent.use_encoded_fifo=true \
     agent.subsamples="${SUBSAMPLE}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     agent.kernel_bandwidth=null \
