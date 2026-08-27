@@ -339,7 +339,12 @@ def sample_trajectories(
     policy_step: int,
     seed: int,
     deterministic: bool,
+    collect_frames: bool = False,
+    frame_stride: int = 1,
 ):
+    if frame_stride < 1:
+        raise ValueError(f"frame_stride must be >= 1, got {frame_stride}")
+
     trajectories = []
     frames = []
     wall_rectangles = _pointmaze_wall_rectangles(env)
@@ -361,7 +366,8 @@ def sample_trajectories(
         point = extract_eval_trajectory_point(env, time_step)
         if point is not None:
             trajectory.append(point)
-        frames.append(render_goal_hidden_frame(env))
+        if collect_frames:
+            frames.append(render_goal_hidden_frame(env))
 
         for step in range(episode_steps):
             if agent is None:
@@ -398,7 +404,8 @@ def sample_trajectories(
                 if _points_inside_rectangles(np.asarray([point]), wall_rectangles)[0]:
                     wall_points += 1
                 trajectory.append(point)
-            frames.append(render_goal_hidden_frame(env))
+            if collect_frames and (step + 1) % frame_stride == 0:
+                frames.append(render_goal_hidden_frame(env))
 
             # if time_step.last():
             #     break
@@ -427,6 +434,17 @@ def parse_args():
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--gif-fps", type=int, default=20)
+    parser.add_argument(
+        "--save-gif",
+        action="store_true",
+        help="Render and save a goal-hidden GIF. Disabled by default to avoid storing every frame in RAM.",
+    )
+    parser.add_argument(
+        "--gif-frame-stride",
+        type=int,
+        default=10,
+        help="Keep one GIF frame every N environment steps (default: 10).",
+    )
     parser.add_argument(
         "--start-position-variance",
         type=float,
@@ -499,6 +517,8 @@ def main() -> None:
             policy_step=policy_step,
             seed=int(args.seed),
             deterministic=bool(args.deterministic),
+            collect_frames=bool(args.save_gif),
+            frame_stride=int(args.gif_frame_stride),
         )
         if not trajectories:
             raise RuntimeError("No trajectory XY points collected.")
@@ -512,7 +532,8 @@ def main() -> None:
 
         prefix = snapshot_path.stem if snapshot_path is not None else "random_policy"
         gif_path = output_dir / f"{prefix}_ntraj_{len(trajectories)}_rollouts.gif"
-        # save_gif(gif_path, frames, fps=int(args.gif_fps))
+        if args.save_gif:
+            save_gif(gif_path, frames, fps=int(args.gif_fps))
     finally:
         close = getattr(env, "close", None)
         if callable(close):
@@ -524,10 +545,11 @@ def main() -> None:
         print(f"Start position variance override: {float(args.start_position_variance)}")
     print(f"Policy step: {policy_step}")
     print(f"Deterministic: {bool(args.deterministic)}")
-    print(f"Sampled {len(trajectories)} trajectories, {len(frames)} GIF frames.")
+    print(f"Sampled {len(trajectories)} trajectories.")
+    if args.save_gif:
+        print(f"Saved {len(frames)} goal-hidden GIF frames (stride {int(args.gif_frame_stride)}): {gif_path}")
     for style, path in plot_paths.items():
         print(f"Saved {style} plot: {Path(path).resolve()}")
-    print(f"Saved goal-hidden GIF: {gif_path}")
 
 
 if __name__ == "__main__":

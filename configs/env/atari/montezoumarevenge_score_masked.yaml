@@ -5,11 +5,19 @@ env:
   name: "ALE/MontezumaRevenge-v5"
   render_mode: rgb_array
   atari:
+    # Compact task-specific action set for reaching room 2:
+    # NOOP, FIRE/jump, UP, RIGHT, LEFT, DOWN, RIGHTFIRE, LEFTFIRE. Exposed policy actions 0..5, 11, 12
+    # map to these full ALE action IDs in this order.
+    action_set: [0, 1, 2, 3, 4, 5, 11, 12]
     score_mask:
       enabled: true
+      # Both score digits and remaining-life indicator occupy rows 0-9 after
+      # AtariPreprocessing resizes the observation to 84x84.
+      band_height: 10
+      color: 0
     terminal_on_life_loss: false
   frameskip: 1
-  repeat_action_probability: 0.25
+  repeat_action_probability: 0.0
   max_episode_steps: 27000
 
 

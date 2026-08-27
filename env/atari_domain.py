@@ -39,7 +39,9 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         "BowlingNoFrameskip-v4": 25,
         "MarioBrosNoFrameskip-v4": 7,
         "ALE/MarioBros-v5": 7,
-        "ALE/MontezumaRevenge-v5": 0,
+        # AtariPreprocessing maps Montezuma's score and life indicators into
+        # rows 0-9 of the 84x84 observation. Gameplay begins below this band.
+        "ALE/MontezumaRevenge-v5": 10,
     }
 
     def __init__(self, env, band_height=None, color=255):
@@ -67,6 +69,46 @@ class AtariScoreMaskWrapper(gym.ObservationWrapper):
         out = obs.copy()
         out[:band, :, :] = self.color
         return out
+
+
+class AtariActionSetWrapper(gym.ActionWrapper):
+    """Expose a configured subset while mapping back to full ALE action IDs."""
+
+    def __init__(self, env, action_set):
+        super().__init__(env)
+        if not isinstance(env.action_space, gym.spaces.Discrete):
+            raise TypeError("Atari action-set restriction requires a discrete action space")
+
+        actions = [int(action) for action in action_set]
+        if not actions:
+            raise ValueError("atari.action_set must contain at least one action ID")
+        if len(actions) != len(set(actions)):
+            raise ValueError("atari.action_set action IDs must be unique")
+        invalid = [
+            action for action in actions
+            if action < 0 or action >= env.action_space.n
+        ]
+        if invalid:
+            raise ValueError(
+                f"atari.action_set contains invalid action IDs {invalid}; "
+                f"valid range is [0, {env.action_space.n - 1}]"
+            )
+
+        self.action_set = tuple(actions)
+        self.action_space = gym.spaces.Discrete(len(self.action_set))
+
+    def action(self, action):
+        index = int(np.asarray(action).item())
+        if index < 0 or index >= len(self.action_set):
+            raise ValueError(
+                f"Restricted Atari action index {index} is outside "
+                f"[0, {len(self.action_set) - 1}]"
+            )
+        return self.action_set[index]
+
+    def get_action_meanings(self):
+        meanings = self.env.unwrapped.get_action_meanings()
+        return [meanings[action] for action in self.action_set]
 
 
 def is_atari_env(reference):
@@ -101,6 +143,7 @@ def pop_atari_kwargs(env_kwargs):
 def wrap_atari_pixels(env, name, action_repeat, grayscale, atari_kwargs):
     atari_kwargs = coerce_dict(atari_kwargs, "atari")
     score_mask_cfg = coerce_dict(atari_kwargs.pop("score_mask", {}), "atari.score_mask")
+    action_set = atari_kwargs.pop("action_set", None)
 
     score_mask_enabled = bool(score_mask_cfg.pop("enabled", False))
     score_mask_band = score_mask_cfg.pop("band_height", None)
@@ -126,5 +169,7 @@ def wrap_atari_pixels(env, name, action_repeat, grayscale, atari_kwargs):
     env = AtariPreprocessing(env, **preprocessing_kwargs)
     if score_mask_enabled:
         env = AtariScoreMaskWrapper(env, band_height=score_mask_band, color=score_mask_color)
+    if action_set is not None:
+        env = AtariActionSetWrapper(env, action_set)
 
     return env, 1

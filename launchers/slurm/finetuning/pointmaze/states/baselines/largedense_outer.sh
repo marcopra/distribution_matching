@@ -1,0 +1,23 @@
+#!/bin/bash
+INNER="launchers/slurm/finetuning/pointmaze/states/baselines/largedense_inner.sh"
+ENVS=(
+    pointmaze/pointmaze_largedense_goal_1
+    # pointmaze/pointmaze_largedense_goal_2
+)
+SPECS=(
+    "ddpg_discrete|none|10000"
+    # "cic_discrete|/home/mprattico/distribution_matching/models/pointmaze/largedense/states/cic/models/states/gym/cic/0/snapshot_1000000.pt|10000"
+    # "icm_apt_discrete|/home/mprattico/distribution_matching/models/pointmaze/largedense/states/icm_apt/models/states/gym/icm_apt/0/snapshot_1000000.pt|10000"
+    # "rnd_discrete|/home/mprattico/distribution_matching/models/pointmaze/largedense/states/rnd/models/states/gym/rnd/0/snapshot_1000000.pt|10000"
+    # "smm_discrete|/home/mprattico/distribution_matching/models/pointmaze/largedense/states/smm/models/states/gym/smm/0/snapshot_1000000.pt|10000"
+    # "maxent_discrete|/home/mprattico/distribution_matching/models/pointmaze/largedense/states/maxent/models/states/gym/maxent/0/snapshot_1000000.pt|10000"
+)
+
+for seed in 0 1 2; do
+    for env in "${ENVS[@]}"; do
+        for spec in "${SPECS[@]}"; do
+            IFS='|' read -r agent model_path actor_update_threshold <<< "$spec"
+            sbatch --export=ALL,SEED="$seed",ENV="$env",AGENT="$agent",MODEL_PATH="$model_path",ACTOR_UPDATE_THRESHOLD="$actor_update_threshold" "$INNER"
+        done
+    done
+done

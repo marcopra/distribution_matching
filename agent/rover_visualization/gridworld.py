@@ -15,6 +15,8 @@ from sklearn.manifold import TSNE
 import torch
 import torch.nn.functional as F
 
+import utils
+
 
 class DiscreteStateVisualizationAdapter:
     """Small adapter that turns different discrete env APIs into one plotting surface."""
@@ -506,7 +508,7 @@ class EmbeddingDistributionVisualizerV2:
             f"γ = {self.agent.discount}\n"
             f"η = {self.agent.lr_actor}\n"
             f"λ = {self.agent.lambda_reg}\n"
-            f"sink notm = {utils.schedule(self.agent.sink_schedule, step):.6f}\n"
+            f"sink norm = {utils.schedule(self.agent.sink_schedule, step):.6f}\n"
             f"PMD steps = {self.agent.pmd_steps}\n"
             
         )
@@ -578,13 +580,101 @@ class EmbeddingDistributionVisualizerV2:
         
         plt.close(fig)
 
+    def save_dataset_subsample_policy_heatmaps(self, step: int, save_path: str = None):
+        """Save dataset heatmaps plus per-cell learned policy diagnostics."""
+        state_counts, subsample_counts = self._compute_batch_and_subsample_state_counts()
+        if state_counts is None:
+            return None
+        policy_per_state = self._get_policy_per_state()
+        if save_path is None:
+            save_path = os.path.join(
+                "gridworld_plots",
+                f"step_{step}_dataset_subsamples_policy_heatmaps.png",
+            )
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        fig = plt.figure(figsize=(32, 15), constrained_layout=True)
+        grid_spec = fig.add_gridspec(
+            2,
+            5,
+            width_ratios=[1.2, 1.2, 2.4, 2.4, 2.0],
+            hspace=0.3,
+            wspace=0.35,
+        )
+        dataset_ax = fig.add_subplot(grid_spec[0, 0:2])
+        subsample_ax = fig.add_subplot(grid_spec[1, 0:2])
+        policy_bars_ax = fig.add_subplot(grid_spec[:, 2:4])
+        policy_arrows_ax = fig.add_subplot(grid_spec[:, 4])
+        full_grid = self._state_dist_to_grid(state_counts)
+        subsample_grid = (
+            self._state_dist_to_grid(subsample_counts)
+            if subsample_counts is not None
+            else np.zeros_like(full_grid)
+        )
+        occupancy_panels = (
+            (
+                dataset_ax,
+                full_grid,
+                "Actor Dataset Occupancy",
+                max(float(full_grid.max()), 1.0),
+            ),
+            (
+                subsample_ax,
+                subsample_grid,
+                "Nyström Subsample Occupancy",
+                max(float(subsample_grid.max()), 1.0),
+            ),
+        )
+        for ax, grid, title, panel_vmax in occupancy_panels:
+            image = ax.imshow(
+                grid,
+                cmap="YlOrRd",
+                interpolation="nearest",
+                vmin=0,
+                vmax=panel_vmax,
+            )
+            ax.set_title(title, fontsize=13, fontweight="bold")
+            ax.set_xlabel("Grid x")
+            ax.set_ylabel("Grid y")
+            ax.set_xticks(np.arange(self.grid_width))
+            ax.set_yticks(np.arange(self.grid_height))
+            ax.grid(which="both", color="white", linewidth=0.5, alpha=0.35)
+            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="Count")
+
+        self._plot_policy_bars_per_cell(
+            policy_bars_ax,
+            policy_per_state,
+            annotate_probabilities=True,
+        )
+        policy_bars_ax.set_title(
+            "Learned Policy Probabilities per State",
+            fontsize=14,
+            fontweight="bold",
+        )
+        self._plot_policy_arrows(policy_arrows_ax, policy_per_state)
+        policy_arrows_ax.set_title(
+            "Maximum-Probability Action per State",
+            fontsize=14,
+            fontweight="bold",
+        )
+
+        fig.suptitle(
+            f"GridWorld Dataset, Subsamples, and Learned Policy (Step {step})",
+            fontsize=16,
+            fontweight="bold",
+        )
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"GridWorld dataset/subsample/policy heatmaps saved to: {save_path}")
+        return save_path
+
     def _action_legend_elements(self):
         return [
             Patch(facecolor=self.action_colors[i], edgecolor='black', label=self.action_names[i])
             for i in range(self.n_actions)
         ]
 
-    def _plot_policy_bars_per_cell(self, ax, policy_per_state):
+    def _plot_policy_bars_per_cell(self, ax, policy_per_state, annotate_probabilities=False):
         """Plot policy bars inside each grid cell, similar to action probabilities grid."""
         ax.set_xlim(self.min_x - 0.5, self.min_x + self.grid_width - 0.5)
         ax.set_ylim(self.min_y - 0.5, self.min_y + self.grid_height - 0.5)
@@ -649,6 +739,20 @@ class EmbeddingDistributionVisualizerV2:
                     linewidth=0.8
                 )
                 ax.add_patch(bar_rect)
+                if annotate_probabilities:
+                    label_y = y + cell_size / 2 - 0.08
+                    ax.text(
+                        bar_x,
+                        label_y,
+                        f"{probs[a_idx]:.2f}",
+                        ha="center",
+                        va="bottom",
+                        rotation=90,
+                        fontsize=3.4,
+                        fontweight="bold",
+                        color="black",
+                        zorder=10,
+                    )
         
         # Set proper ticks
         ax.set_xticks(np.arange(self.min_x, self.min_x + self.grid_width))
@@ -794,7 +898,7 @@ class EmbeddingDistributionVisualizerV2:
             return counts
 
         # Use the cached features from the last actor update
-        if not hasattr(self.agent, '_phi_all_next') or self.agent._phi_all_next is None:
+        if not hasattr(self.agent, '_phi_all_obs') or self.agent._phi_all_obs is None:
             return None, None
         
         # We need to infer which states are in the batch
@@ -809,14 +913,73 @@ class EmbeddingDistributionVisualizerV2:
                 enc_all_states = self.agent.encoder(all_states).detach().cpu()
 
             # Always show occupancy for the full actor batch.
-            all_batch_embeddings = self.agent._phi_all_next[:, :-1].detach().cpu()
+            # Dataset occupancy is defined over transition source states s.
+            all_batch_embeddings = self.agent._phi_all_obs[:, :-1].detach().cpu()
             state_counts = _accumulate_state_counts(all_batch_embeddings, enc_all_states)
 
             subsample_counts = None
-            if getattr(self.agent, 'subsamples', None) is not None and hasattr(self.agent, '_phi_sub_next'):
-                subsample_embeddings = self.agent._phi_sub_next[:, :-1].detach().cpu()
+            if (
+                getattr(self.agent, 'subsamples', None) is not None
+                and hasattr(self.agent, '_phi_sub_obs')
+                and self.agent._phi_sub_obs is not None
+            ):
+                subsample_embeddings = self.agent._phi_sub_obs[:, :-1].detach().cpu()
                 subsample_counts = _accumulate_state_counts(subsample_embeddings, enc_all_states)
         return state_counts, subsample_counts
+
+    def _compute_batch_and_subsample_state_action_counts(self):
+        """Count actor samples by current-state index and action index."""
+        if (
+            not hasattr(self.agent, '_phi_all_obs')
+            or self.agent._phi_all_obs is None
+            or not hasattr(self.agent, '_all_actions')
+            or self.agent._all_actions is None
+        ):
+            return None, None
+
+        with torch.no_grad():
+            if self.agent.obs_type == 'pixels':
+                all_state_embeddings = self.agent.aug_and_encode(
+                    self._prerendered_states,
+                    project=True,
+                ).detach().cpu()
+            else:
+                all_states = self.all_state_ids_one_hot.to(self.agent.device)
+                all_state_embeddings = self.agent.encoder(all_states).detach().cpu()
+            all_state_embeddings = F.normalize(all_state_embeddings, p=2, dim=1)
+
+            def _counts(batch_embeddings, actions):
+                batch_embeddings = F.normalize(
+                    batch_embeddings[:, :-1].detach().cpu(),
+                    p=2,
+                    dim=1,
+                )
+                actions = actions.detach().cpu().long().reshape(-1)
+                usable = min(batch_embeddings.shape[0], actions.shape[0])
+                state_indices = torch.argmax(
+                    batch_embeddings[:usable] @ all_state_embeddings.T,
+                    dim=1,
+                ).numpy()
+                action_indices = actions[:usable].numpy()
+                valid = (action_indices >= 0) & (action_indices < self.n_actions)
+                counts = np.zeros((self.n_actions, self.n_states), dtype=np.float32)
+                np.add.at(counts, (action_indices[valid], state_indices[valid]), 1.0)
+                return counts
+
+            full_counts = _counts(self.agent._phi_all_obs, self.agent._all_actions)
+            subsample_counts = None
+            if (
+                getattr(self.agent, 'subsamples', None) is not None
+                and hasattr(self.agent, '_phi_sub_obs')
+                and self.agent._phi_sub_obs is not None
+                and hasattr(self.agent, '_sub_actions')
+                and self.agent._sub_actions is not None
+            ):
+                subsample_counts = _counts(
+                    self.agent._phi_sub_obs,
+                    self.agent._sub_actions,
+                )
+        return full_counts, subsample_counts
 
     def _plot_sample_occupancy(self, ax, title='Batch State Occupancy', normalize=True):
         """Plot state occupancy from the current batch.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -130,6 +131,99 @@ def _prepare_trajectories(trajectories) -> list[np.ndarray]:
         if points:
             prepared.append(np.asarray(points, dtype=np.float32))
     return prepared
+
+
+def pointmaze_free_space_coverage(
+    env,
+    trajectories,
+    grid_size: int = 90,
+    radius: float = 0.08,
+) -> tuple[int, int, float]:
+    """Measure trajectory coverage over a regular grid of PointMaze free space."""
+    if grid_size < 2:
+        raise ValueError("grid_size must be at least 2")
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+
+    prepared = _prepare_trajectories(trajectories)
+    if not prepared:
+        raise ValueError("coverage requires at least one valid trajectory point")
+
+    layout = _get_pointmaze_wall_layout(env)
+    if layout is None:
+        raise AttributeError("PointMaze environment has no valid get_debug_maze_layout()")
+
+    lower = layout["maze_lower"]
+    upper = layout["maze_upper"]
+    walls = layout["wall_rectangles"]
+    xs = np.linspace(lower[0], upper[0], grid_size, dtype=np.float32)
+    ys = np.linspace(lower[1], upper[1], grid_size, dtype=np.float32)
+    grid = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
+
+    inside_wall = np.zeros(len(grid), dtype=bool)
+    if walls.size:
+        x = grid[:, 0:1]
+        y = grid[:, 1:2]
+        inside_wall = (
+            (x >= walls[:, 0])
+            & (x <= walls[:, 0] + walls[:, 2])
+            & (y >= walls[:, 1])
+            & (y <= walls[:, 1] + walls[:, 3])
+        ).any(axis=1)
+    free = grid[~inside_wall]
+    if len(free) == 0:
+        raise ValueError("PointMaze layout contains no free grid points")
+
+    samples = np.concatenate(prepared, axis=0)
+    covered = np.zeros(len(free), dtype=bool)
+    radius_sq = float(radius) ** 2
+    for start in range(0, len(free), 2048):
+        chunk = free[start : start + 2048]
+        distances = ((chunk[:, None, :] - samples[None, :, :]) ** 2).sum(axis=2)
+        covered[start : start + len(chunk)] = distances.min(axis=1) <= radius_sq
+
+    covered_count = int(covered.sum())
+    free_count = int(len(free))
+    return covered_count, free_count, 100.0 * covered_count / free_count
+
+
+@dataclass
+class CoverageProgress:
+    """Track checkpoint-to-checkpoint coverage growth for logging."""
+
+    tolerance: float = 0.25
+    previous_coverage: Optional[float] = None
+    previous_frame: Optional[int] = None
+    best_coverage: float = 0.0
+
+    def update(self, coverage_pct: float, frame: int) -> dict[str, float]:
+        coverage_pct = float(coverage_pct)
+        frame = int(frame)
+        if not np.isfinite(coverage_pct):
+            raise ValueError("coverage_pct must be finite")
+        if frame < 0:
+            raise ValueError("frame must be non-negative")
+        if self.previous_frame is not None and frame <= self.previous_frame:
+            raise ValueError("coverage frames must increase strictly")
+
+        delta = 0.0 if self.previous_coverage is None else coverage_pct - self.previous_coverage
+        frame_delta = 0 if self.previous_frame is None else frame - self.previous_frame
+        gain_per_100k = 0.0 if frame_delta == 0 else delta * 100_000.0 / frame_delta
+        self.best_coverage = max(self.best_coverage, coverage_pct)
+        self.previous_coverage = coverage_pct
+        self.previous_frame = frame
+        return {
+            "coverage_pct": coverage_pct,
+            "coverage_delta": delta,
+            "coverage_best": self.best_coverage,
+            "coverage_gain_per_100k": gain_per_100k,
+            "coverage_expanding": float(delta > self.tolerance),
+        }
+
+
+def pointmaze_evaluation_seed(training_seed: int, frame: int, episode: int = 0) -> int:
+    """Stable per-run, per-checkpoint seed without Python hash randomization."""
+    return int(training_seed) * 1_000_003 + int(frame) + int(episode)
 
 
 def _trajectory_colors(n_trajectories: int) -> list:
@@ -1105,9 +1199,14 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         if points.shape[0] > 1:
             deltas = points[:, None, :] - points[None, :, :]
             distances = np.linalg.norm(deltas, axis=2)
-            distances = distances[distances > 1e-6]
-            if distances.size:
-                base_scale = min(base_scale, float(np.min(distances)) * 1.35)
+            distances[distances <= 1e-6] = np.inf
+            nearest = distances.min(axis=1)
+            nearest = nearest[np.isfinite(nearest)]
+            if nearest.size:
+                # One explicitly inserted start point can sit very close to a
+                # regular probe. Global minimum then makes every glyph tiny.
+                # Median nearest-neighbor distance represents grid spacing.
+                base_scale = min(base_scale, float(np.median(nearest)) * 1.35)
 
         return max(base_scale * 0.45, 0.08)
 
@@ -1333,10 +1432,31 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
             extent=[lower[0], upper[0], lower[1], upper[1]],
             cmap="viridis",
         )
+        trajectories = getattr(self, "_last_trajectories", ())
+        colors = plt.get_cmap("tab10")
+        for trajectory_idx, trajectory in enumerate(trajectories):
+            ax.plot(
+                trajectory[:, 0],
+                trajectory[:, 1],
+                color=colors(trajectory_idx % 10),
+                linewidth=0.8,
+                alpha=0.65,
+                zorder=2,
+            )
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title(f"{self.title_prefix} rollout coverage at step {step} (n samples: {coords.shape[0]})")
+        if trajectories:
+            horizon = getattr(self, "_last_rollout_horizon", "?")
+            ax.set_title(
+                f"{self.title_prefix} rollout coverage at step {step} "
+                f"({len(trajectories)} trajectories, horizon={horizon})"
+            )
+        else:
+            ax.set_title(
+                f"{self.title_prefix} rollout coverage at step {step} "
+                f"(n samples: {coords.shape[0]})"
+            )
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
@@ -1363,6 +1483,8 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class PointMazeCoverageVisualizer(XYCoverageVisualizer):
+    NUM_TRAJECTORIES = 10
+
     def __init__(
         self,
         agent,
@@ -1384,6 +1506,53 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
 
     def _use_env_plot_bounds(self) -> bool:
         return False
+
+    def _environment_horizon(self) -> int:
+        current = self.env
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            spec = getattr(current, "spec", None)
+            horizon = getattr(spec, "max_episode_steps", None)
+            if horizon is None:
+                horizon = getattr(current, "_max_episode_steps", None)
+            if horizon is not None:
+                return int(horizon)
+            current = getattr(current, "env", None)
+        raise RuntimeError("PointMaze environment does not expose max_episode_steps")
+
+    def _sample_policy_rollout(self, step: int) -> np.ndarray:
+        rng = np.random.default_rng(int(step))
+        horizon = self._environment_horizon()
+        trajectories = []
+
+        for trajectory_idx in range(self.NUM_TRAJECTORIES):
+            time_step = self.env.reset(seed=int(step) + trajectory_idx)
+            trajectory = []
+            for _ in range(horizon):
+                coord = self._extract_coordinates(time_step)
+                if coord is not None:
+                    trajectory.append(coord)
+
+                probs = np.asarray(
+                    self.agent.compute_action_probs(time_step.observation),
+                    dtype=np.float64,
+                )
+                probs = np.clip(probs, 0.0, None)
+                probs = probs / max(probs.sum(), 1e-12)
+                action = rng.choice(self.agent.n_actions, p=probs)
+                time_step = self.env.step(action)
+                if time_step.last():
+                    break
+
+            if trajectory:
+                trajectories.append(np.asarray(trajectory, dtype=np.float32))
+
+        self._last_trajectories = trajectories
+        self._last_rollout_horizon = horizon
+        if not trajectories:
+            return np.zeros((0, 0), dtype=np.float32)
+        return np.concatenate(trajectories, axis=0)
 
     def _policy_probe_points(self) -> Optional[np.ndarray]:
         n_points = int(self.policy_eval_points)

@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Focused operator ablation. Start with one seed; promote winning
+# configuration to seeds 1/2/3 after policy deviation becomes non-zero.
+seeds="1"
+
+batch_sizes_actor=(
+    2000000
+    100000
+    50000
+)
+
+subsamples=(
+    2500
+)
+
+feature_dims=(
+    256
+)
+
+kernel_bandwidth_multipliers=(
+    0.5
+    1.0
+)
+
+kernel_types=(
+    # gaussian
+    inner_product
+)
+
+linear_projections=(
+    # true
+    false
+)
+
+# Indices into the sink_schedules array defined in parallel_rover_nystrom_base.sh:
+#   0 -> "linear(0.0, 0.001,  15_000_000)"
+#   1 -> "linear(0.0, 0.01,   15_000_000)"
+#   2 -> "linear(0.0, 0.1,    15_000_000)"
+#   3 -> "linear(0.0, 1,      15_000_000)"
+#   4 -> "0.0"
+sink_idxs=(4)
+
+for seed in $seeds; do
+    for batch_size_actor in "${batch_sizes_actor[@]}"; do
+        for subsample in "${subsamples[@]}"; do
+            for feature_dim in "${feature_dims[@]}"; do
+                for kernel_type in "${kernel_types[@]}"; do
+                    if [[ "$kernel_type" == "gaussian" ]]; then
+                        bandwidths=("${kernel_bandwidth_multipliers[@]}")
+                    else
+                        # Bandwidth has no meaning for inner-product kernel.
+                        # One sentinel prevents duplicate inner-product jobs.
+                        bandwidths=("none")
+                    fi
+                    for kernel_bandwidth_multiplier in "${bandwidths[@]}"; do
+                        for linear_projection in "${linear_projections[@]}"; do
+                            for sink_idx in "${sink_idxs[@]}"; do
+                                sbatch \
+                                    --export=ALL,SEED="$seed",BATCH_SIZE_ACTOR="$batch_size_actor",SUBSAMPLE="$subsample",FEATURE_DIM="$feature_dim",KERNEL_TYPE="$kernel_type",KERNEL_BANDWIDTH_MULTIPLIER="$kernel_bandwidth_multiplier",LINEAR_PROJECTION="$linear_projection",SINK_IDX="$sink_idx" \
+                                    launchers/slurm/pretraining/atari/montezouma/parallel_rover_nystrom_base.sh
+                            done
+                        done
+                    done
+                done
+            done
+        done
+    done
+done

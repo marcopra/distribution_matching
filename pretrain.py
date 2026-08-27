@@ -137,7 +137,7 @@ class Workspace:
                     project=cfg.wandb_project,
                     name=cfg.wandb_run_name,
                     tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
-                    sync_tensorboard=True,
+                    sync_tensorboard=False,
                     mode='online')
             else:
                 wandb.init(
@@ -145,7 +145,7 @@ class Workspace:
                     project=cfg.wandb_project,
                     name=cfg.wandb_run_name,
                     tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
-                    sync_tensorboard=True,
+                    sync_tensorboard=False,
                     mode='online')
                 
         self.logger = Logger(self.work_dir,
@@ -218,12 +218,16 @@ class Workspace:
 
         # create replay buffer
         first_transition = type(self.agent).__name__ == 'RoverAgent'
+        transition_view = bool(
+            getattr(self.agent, 'requires_transition_view', False)
+        )
         self.replay_loader = make_replay_loader(self.replay_storage,
                                                 cfg.replay_buffer_size,
                                                 cfg.batch_size,
                                                 cfg.replay_buffer_num_workers,
                                                 cfg.save_buffer, cfg.nstep, cfg.discount,
-                                                first_transition=first_transition)
+                                                first_transition=first_transition,
+                                                transition_view=transition_view)
         
         self._replay_iter = None
 
@@ -254,15 +258,23 @@ class Workspace:
         info = getattr(time_step, 'info', None)
         return info if isinstance(info, dict) else {}
 
-    def _log_montezuma_episode_metrics(self, log, time_step):
+    def _log_montezuma_episode_metrics(self, log, time_step, ty='train'):
         if not self.is_montezuma:
             return
         info = self._get_time_step_info(time_step)
-        if 'montezuma_visited_second_room' in info:
-            log('montezuma_visited_second_room',
-                float(info['montezuma_visited_second_room']))
-        if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
-            log('montezuma_max_room_id', info['montezuma_max_room_id'])
+        for info_key, metric_key in (
+            ('montezuma_escaped_first_room', 'escaped_first_room'),
+            ('montezuma_unique_rooms_visited', 'unique_rooms_visited'),
+            ('montezuma_room_transition_count', 'room_transition_count'),
+        ):
+            if info_key in info:
+                log(metric_key, float(info[info_key]))
+        self.logger.log_room_route(
+            info.get('montezuma_room_route'),
+            self.global_episode,
+            self.global_frame,
+            ty,
+        )
 
     @property
     def global_step(self):
@@ -336,12 +348,7 @@ class Workspace:
             log('episode', self.global_episode)
             log('step', self.global_step)
             if self.is_montezuma and episode > 0:
-                info = self._get_time_step_info(time_step)
-                if 'montezuma_visited_second_room' in info:
-                    log('montezuma_visited_second_room',
-                        float(info['montezuma_visited_second_room']))
-                if 'montezuma_max_room_id' in info and info['montezuma_max_room_id'] is not None:
-                    log('montezuma_max_room_id', info['montezuma_max_room_id'])
+                self._log_montezuma_episode_metrics(log, time_step, ty='eval')
 
     def _save_eval_trajectory_plots(self, trajectories):
         enabled = getattr(self.cfg, "plot_eval_trajectories", False)

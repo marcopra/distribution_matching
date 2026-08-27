@@ -10,7 +10,7 @@ reward_free: true
 # task settings
 domain: gym
 task_name: ${env.name}
-obs_type: pixels
+obs_type: states
 frame_stack: 1
 action_repeat: 1
 discount: 0.99
@@ -32,12 +32,30 @@ num_eval_episodes: 1
 snapshots: [3000, 50000, 100000, 200000, 500000, 1000000, 2000000]
 snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
 
-# replay buffer
+# replay buffer 
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 1
 batch_size: ${agent.batch_size}
 nstep: ${agent.nstep}
 update_encoder: true
+
+agent:
+  feature_dim: 256
+  embeddings: false
+  lr_actor: 100
+  pmd_steps: 10
+  update_every_steps: 10
+  pmd_eta_mode: backtracking
+  pca_truncation: 4500
+  compute_dtype: float64
+  sink_schedule: linear(0.0, 1.0, 100000)
+  kernel_bandwidth: 0.15
+  nystrom_exact_grid: true
+  subsamples: 16000
+  lambda_reg: 1e-6
+  batch_size_actor: 16000
+  update_actor_every_steps: 1500
+  T_init_steps: 0
 
 
 # misc

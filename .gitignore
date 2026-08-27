@@ -224,4 +224,6 @@ maxent/
 exp_local*
 _rooms
 exp_config.yaml
-
+*.log
+runs/*
+exp_*

@@ -181,9 +181,19 @@ class Logger(object):
     def log_metrics(self, metrics, step, ty):
         for key, value in metrics.items():
             self.log(f'{ty}/{key}', value, step)
-            # log anche su tensorboard con il training step
-            if ty == 'train':
-                self._try_sw_log(f'{ty}/{key}', value, step)
+
+    def log_immediate_metrics(self, metrics, step, ty):
+        data = {}
+        for key, value in metrics.items():
+            if type(value) == torch.Tensor:
+                value = value.item()
+            full_key = f'{ty}/{key}'
+            self._try_sw_log(full_key, value, step)
+            data[full_key] = value
+        if self.use_wandb and data:
+            data[f'{ty}/frame'] = step
+            wandb.log(data)
+
 
     def dump(self, step, ty=None):
         if ty is None or ty == 'eval':

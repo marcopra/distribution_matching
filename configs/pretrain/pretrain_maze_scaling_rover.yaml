@@ -1,0 +1,93 @@
+# @package _global_
+#
+# Local scaling experiment for Rover on 108/200/500-state mazes.
+# Sweep environments from CLI; see commands at bottom.
+defaults:
+  - /agent: rover_nystrom_pointmaze_debug
+  - /env: gridworld/maze_108_seed7_env
+  - _self_
+
+reward_free: true
+domain: gym
+task_name: ${env.name}
+obs_type: discrete_states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+grayscale: false
+resolution: 84
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+# Match models/maze/108/pixels/rover/.hydra/config.yaml.
+num_train_frames: 100_000
+num_seed_frames: 2_000
+eval_every_frames: 10_000
+num_eval_episodes: 50
+plot_eval_trajectories: true
+eval_trajectory_plot_dir: eval_trajectory_plots
+eval_trajectory_plot_episodes: [20, 25, 35]
+eval_trajectory_plot_styles: [suite, occupancy, small_multiples]
+
+snapshots: [100_000]
+snapshot_dir: models/maze_scaling/${hydra:runtime.choices.env}/${agent.name}/seed_${seed}
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+
+agent:
+  # Discrete one-hot states pass directly to Rover: no learned feature embedding.
+  embeddings: false
+  feature_dim: 200
+
+  # insert_env() auto-attaches GridworldVisualizerAdapter for Maze-v0.
+  # It saves gridworld and Nyström plots at every actor update.
+
+  # Saved 108-run optimization settings.
+  lr_actor: 100
+  lambda_reg: 0.001
+  batch_size: 1024
+  T_init_steps: 300
+  update_every_steps: 1
+  update_actor_every_steps: 1500
+  pmd_steps: 100
+  pmd_eta_mode: backtracking
+  sink_schedule: linear(0.0, 0.1, 100_000)
+  epsilon_schedule: 0.15
+  mode: l1
+
+  # Scaling setup requested for Nyström Rover.
+  batch_size_actor: 10_000
+  subsamples: 4_000
+  pca_truncation: 2000
+  subsampling_strategy: pivoted_cholesky
+  kernel_type: inner_product
+  nystrom_candidate_multiplier: 5.0
+  nystrom_cholesky_tolerance: 1e-6
+  nystrom_cholesky_progress: true
+
+seed: 1
+device: cuda:0
+save_video: false
+save_train_video: false
+save_buffer: true
+save_snapshot: true
+use_tb: true
+use_wandb: false
+save_log: true
+wandb_project: maze_scaling
+wandb_entity: urlb
+wandb_tag: rover
+wandb_run_name: rover_${hydra:runtime.choices.env}_seed_${seed}
+wandb_id: none
+experiment: maze_scaling_rover
+
+hydra:
+  run:
+    dir: ./exp_local/maze_scaling/rover/${hydra:runtime.choices.env}/seed_${seed}/${now:%Y.%m.%d_%H%M%S}
+  sweep:
+    dir: ./exp_sweep/maze_scaling/rover/${now:%Y.%m.%d_%H%M%S}
+    subdir: ${hydra:runtime.choices.env}/seed_${seed}

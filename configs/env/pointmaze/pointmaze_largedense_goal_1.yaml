@@ -3,6 +3,7 @@
 env:
   name: "PointMaze_LargeDense-v3"
   render_mode: rgb_array
+  max_episode_steps: 2000
   pointmaze:
     top_down_camera: true
     discrete_actions: true
@@ -11,4 +12,5 @@ env:
     only_xy_position: true
     start_position: [0.5, 0.0]
     start_position_variance: 0.0
-    goal_position: [1.0, 1.0]
+    reward_type: sparse    
+    goal_position: [3.0, -3.0]

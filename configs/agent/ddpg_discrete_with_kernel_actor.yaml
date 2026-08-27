@@ -15,9 +15,12 @@ use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later
 update_actor_after_critic_steps: ${update_actor_after_critic_steps}
 hidden_dim: 1024
-dataset_dim: 556
+dataset_dim: null # auto-loaded from snapshot when p_path is set
 eta: 0.5
 feature_dim: 50
+embeddings: true
+kernel_type: auto # auto-loaded from snapshot when p_path is set
+kernel_bandwidth: null # auto-loaded from snapshot when p_path is set
 eps_schedule: linear(0.3, 0.01, 30000)
 nstep: 1
 batch_size: 1024 # 256 for pixels

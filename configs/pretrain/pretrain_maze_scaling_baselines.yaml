@@ -1,0 +1,72 @@
+# @package _global_
+#
+# Cluster scaling experiment for CIC/RND/SMM on 108/200/500-state mazes.
+# Agent, environment, and seed grids are supplied by Hydra multirun.
+defaults:
+  - /agent: rnd_discrete
+  - /env: gridworld/maze_108_seed7_env
+  - override /hydra/launcher: submitit_slurm
+  - _self_
+
+reward_free: true
+domain: gym
+task_name: ${env.name}
+obs_type: discrete_states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+grayscale: false
+resolution: 84
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+# Same interaction and evaluation budget as Rover.
+num_train_frames: 100_000
+num_seed_frames: 2_000
+eval_every_frames: 10_000
+num_eval_episodes: 50
+plot_eval_trajectories: true
+eval_trajectory_plot_dir: eval_trajectory_plots
+eval_trajectory_plot_episodes: [20, 25, 35]
+eval_trajectory_plot_styles: [suite, occupancy, small_multiples]
+
+snapshots: [100_000]
+snapshot_dir: models/maze_scaling/${hydra:runtime.choices.env}/${agent.name}/seed_${seed}
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+
+seed: 1
+device: cuda:0
+save_video: false
+save_train_video: false
+save_buffer: true
+save_snapshot: true
+use_tb: true
+use_wandb: true
+save_log: true
+wandb_project: maze_scaling
+wandb_entity: urlb
+wandb_tag: ${agent.name}
+wandb_run_name: ${agent.name}_${hydra:runtime.choices.env}_seed_${seed}
+wandb_id: none
+experiment: maze_scaling_baselines
+
+hydra:
+  run:
+    dir: ./exp_local/maze_scaling/baselines/${agent.name}/${hydra:runtime.choices.env}/seed_${seed}/${now:%Y.%m.%d_%H%M%S}
+  sweep:
+    dir: ./exp_sweep/maze_scaling/baselines/${now:%Y.%m.%d_%H%M%S}
+    subdir: ${agent.name}/${hydra:runtime.choices.env}/seed_${seed}
+  launcher:
+    timeout_min: 2880
+    cpus_per_task: 16
+    gpus_per_node: 1
+    tasks_per_node: 1
+    mem_gb: 96
+    nodes: 1
+    partition: gpua-longrun
+    submitit_folder: ${hydra.sweep.dir}/.slurm

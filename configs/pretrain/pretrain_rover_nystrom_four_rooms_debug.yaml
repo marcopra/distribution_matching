@@ -1,0 +1,94 @@
+# @package _global_
+defaults:
+  - /agent: rover_nystrom_gridworld_debug
+  - /env: gridworld/multiplerooms5_4x4_2.yaml
+  - _self_
+
+reward_free: true
+domain: gym
+task_name: ${env.name}
+obs_type: states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+grayscale: false
+resolution: 84
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+num_train_frames: 100_000
+num_seed_frames: 2000
+eval_every_frames: 10000
+num_eval_episodes: 1
+plot_eval_trajectories: false
+eval_trajectory_plot_dir: eval_trajectory_plots
+eval_trajectory_plot_episodes: []
+eval_trajectory_plot_styles: [suite, occupancy]
+
+snapshots: [500000000000]
+snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
+replay_buffer_size: 1000000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+save_buffer: true
+use_tb: true
+use_wandb: false
+save_log: false
+wandb_project: pretrain_gridworld
+wandb_entity: urlb
+wandb_tag: nystrom_debug
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${task_name}
+wandb_id: none
+experiment: exp
+
+agent:
+  subsamples: 1000
+  nystrom_synthetic_subsamples: false
+  synthetic_dataset_exclude_state_idxs: []
+  synthetic_dataset_exclusion_mode: one_action
+  synthetic_dataset_excluded_action: 0
+  synthetic_subsample_exclude_state_idxs: []
+  synthetic_subsample_exclusion_mode: all_actions
+  synthetic_subsample_excluded_action: 0
+  debug_fixed_dataset_updates: false
+  kernel_type: inner_product
+  subsampling_strategy: reverse_gamma_h
+  batch_size_actor: 5000
+  embeddings: false
+  lr_actor: 1000
+  pmd_steps: 10
+  sink_schedule: linear(0.0, 0.1, 100_000)
+  T_init_steps: 0
+
+
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${agent.name}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
+    subdir: ${hydra.job.num}
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=reverse_gamma_h
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=gamma_h
+
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=reverse_gamma_h
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=gamma_h
+
+
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=reverse_gamma_h
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=gamma_h
+
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=reverse_gamma_h
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=gamma_h

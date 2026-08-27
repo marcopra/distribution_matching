@@ -63,6 +63,8 @@ from agent.rover_visualization.suite import build_debug_visualizer_suite
 # Main Agent
 # ============================================================================
 class RoverAgent:
+    requires_transition_view = True
+
     def __init__(self,
                  name,
                  obs_type,
@@ -111,9 +113,14 @@ class RoverAgent:
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
+                 max_pending_transitions: Optional[int] = None,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
                  kernel_bandwidth_mult: Optional[float] = None,
+                 subsampling_strategy: str = "random",
+                 nystrom_candidate_multiplier: float = 5.0,
+                 nystrom_cholesky_tolerance: float = 1e-6,
+                 nystrom_cholesky_progress: bool = True,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  nystrom_exact_grid: bool = False,
@@ -175,6 +182,30 @@ class RoverAgent:
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_mult = kernel_bandwidth_mult
+        self.subsampling_strategy = str(subsampling_strategy).lower()
+        if self.subsampling_strategy not in (
+            "random", "gamma_h", "reverse_gamma_h", "pivoted_cholesky"
+        ):
+            raise ValueError(
+                "subsampling_strategy must be random, gamma_h, reverse_gamma_h, "
+                "or pivoted_cholesky"
+            )
+        self.nystrom_candidate_multiplier = float(nystrom_candidate_multiplier)
+        self.nystrom_cholesky_tolerance = float(nystrom_cholesky_tolerance)
+        self.nystrom_cholesky_progress = bool(nystrom_cholesky_progress)
+        if self.nystrom_candidate_multiplier < 1.0:
+            raise ValueError("nystrom_candidate_multiplier must be at least 1")
+        if self.nystrom_cholesky_tolerance < 0.0:
+            raise ValueError("nystrom_cholesky_tolerance must be non-negative")
+        if self.subsampling_strategy == "pivoted_cholesky":
+            # Selector must reproduce actor kernel columns exactly. Gaussian
+            # bandwidth is fitted from candidate pool and reused by actor update.
+            # Extend FIFO kernel-column computation with this assertion when
+            # supporting another kernel.
+            assert self.kernel_type in ("inner_product", "gaussian"), (
+                "pivoted_cholesky subsampling currently requires kernel_type "
+                "inner_product or gaussian"
+            )
         self.max_distances=1000
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
@@ -208,6 +239,10 @@ class RoverAgent:
             self.encoded_fifo_capacity = min_fifo_capacity
         self.encoded_fifo_encode_batch_size = int(encoded_fifo_encode_batch_size)
         self.encoded_fifo_cuda_oom_splits = int(encoded_fifo_cuda_oom_splits)
+        self.max_pending_transitions = (
+            None if max_pending_transitions is None
+            else int(max_pending_transitions)
+        )
         self._encoded_actor_fifo = EncodedTransitionFIFO(self.encoded_fifo_capacity)
         self._encoded_fifo_replay_marker = None
         
@@ -454,6 +489,17 @@ class RoverAgent:
         return self.kernel_fn(X, Y)
 
     def _fit_state_kernel_bandwidth(self, X: torch.Tensor, Y: torch.Tensor) -> None:
+        if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
+            bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
+            if bandwidth is not None:
+                self.kernel_fn.bandwidth = bandwidth
+                self.distribution_matcher.kernel_fn.bandwidth = bandwidth
+                utils.ColorPrint.yellow(
+                    f"Using pivoted-Cholesky candidate-pool Gaussian bandwidth={bandwidth:.6g}."
+                )
+                return
+            # Synthetic/fixed landmark paths bypass FIFO candidate selection.
+            # Preserve their existing Gaussian bandwidth behavior.
         if self.kernel_type != "gaussian" or self.kernel_bandwidth_mult is None:
             return
         multiplier = float(self.kernel_bandwidth_mult)
@@ -621,6 +667,46 @@ class RoverAgent:
             logger.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
+    def _compute_action_probs_batch(self, observations: np.ndarray) -> np.ndarray:
+        """Compute π(·|s) for a batch of observations."""
+        observations = np.asarray(observations)
+        with torch.no_grad():
+            obs_tensor = torch.as_tensor(
+                observations,
+                device=self.device,
+                dtype=self.compute_dtype,
+            )
+            enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+
+            if self.gradient_coeff is None:
+                return np.full(
+                    (observations.shape[0], self.n_actions),
+                    1.0 / self.n_actions,
+                    dtype=np.float64,
+                )
+
+            zeros = torch.zeros(
+                (enc_obs.shape[0], 1),
+                device=enc_obs.device,
+                dtype=enc_obs.dtype,
+            )
+            enc_obs_augmented = torch.cat([enc_obs, zeros], dim=1)
+            H = self._kernel(enc_obs_augmented, self._phi_all_obs)
+            probs = self._policy_from_H(H)
+            bad_rows = (torch.sum(probs, dim=1) == 0.0) | torch.isnan(torch.sum(probs, dim=1))
+            if torch.any(bad_rows):
+                utils.ColorPrint.red(
+                    "Warning: some batched action_probs sum to zero or NaN. "
+                    "Using uniform distribution for those rows."
+                )
+                probs = probs.clone()
+                probs[bad_rows] = torch.ones(
+                    self.n_actions,
+                    device=probs.device,
+                    dtype=probs.dtype,
+                ) / self.n_actions
+            return probs.detach().cpu().numpy()
+
     
     def act(self, obs, meta, step, eval_mode):
         if step < self.num_expl_steps or np.random.rand() < utils.schedule(self.epsilon_schedule, step):
@@ -632,6 +718,45 @@ class RoverAgent:
         # print(f"Step {step}: Action probabilities: {action_probs}")
         # Sample action
         return np.random.choice(self.n_actions, p=action_probs)
+
+    def act_parallel(self, observations, metas, step, eval_mode):
+        observations = np.asarray(observations)
+        num_envs = observations.shape[0]
+        steps = np.asarray(step if np.ndim(step) > 0 else [step] * num_envs, dtype=np.int64)
+        if steps.shape[0] != num_envs:
+            raise ValueError(f"Expected {num_envs} logical steps, got {steps.shape[0]}")
+
+        actions = np.empty(num_envs, dtype=np.int64)
+        policy_indices = []
+        for env_id, step_i in enumerate(steps):
+            epsilon = utils.schedule(self.epsilon_schedule, int(step_i))
+            if step_i < self.num_expl_steps or np.random.rand() < epsilon:
+                actions[env_id] = np.random.randint(self.n_actions)
+            else:
+                policy_indices.append(env_id)
+
+        if policy_indices:
+            try:
+                batch_obs = observations[policy_indices]
+                action_probs = self._compute_action_probs_batch(batch_obs)
+                if action_probs.shape != (len(policy_indices), self.n_actions):
+                    raise ValueError(f"Unexpected action_probs shape {action_probs.shape}")
+                for row, env_id in enumerate(policy_indices):
+                    probs = action_probs[row]
+                    self.current_action_probs.append(probs)
+                    actions[env_id] = np.random.choice(self.n_actions, p=probs)
+            except Exception as exc:
+                utils.ColorPrint.yellow(f"Batched act_parallel failed; falling back to looped act: {exc}")
+                for env_id in policy_indices:
+                    meta = metas[env_id] if metas is not None else None
+                    actions[env_id] = self.act(
+                        observations[env_id],
+                        meta,
+                        int(steps[env_id]),
+                        eval_mode=eval_mode,
+                    )
+
+        return actions
 
     
     def _is_T_sufficiently_initialized(self, step: int) -> bool:
@@ -1171,8 +1296,16 @@ class RoverAgent:
 
             # Encode only the new replay-buffer transitions, then immediately
             # acknowledge them so raw pending data can be released by storage.
+            terminal_mask = (
+                np.asarray(transitions[3]).reshape(len(transition_ids), -1).min(axis=1)
+                <= 0.0
+            )
             encoded = self._encode_actor_transition_batch_with_retries(transitions)
-            self._encoded_actor_fifo.add(transition_ids, encoded)
+            self._encoded_actor_fifo.add(
+                transition_ids,
+                encoded,
+                terminal_mask=terminal_mask,
+            )
             self._encoded_fifo_replay_marker = int(transition_ids[-1])
             if hasattr(replay_buffer, "mark_transitions_encoded"):
                 replay_buffer.mark_transitions_encoded(self._encoded_fifo_replay_marker)
@@ -1181,12 +1314,28 @@ class RoverAgent:
         self._insert_first_transition_if_available(replay_buffer)
         return inserted > 0 or len(self._encoded_actor_fifo) > 0
 
+    def drain_encoded_actor_fifo(self, replay_buffer):
+        """Encode pending replay transitions without running actor/encoder update."""
+        return self._update_encoded_actor_fifo(replay_buffer)
+
     def _sample_encoded_actor_data(self, size, include_first):
-        encoded = self._encoded_actor_fifo.sample(
+        encoded = self._encoded_actor_fifo.sample_by_strategy(
             int(size),
             self.device,
+            strategy=self.subsampling_strategy,
+            gamma=self.discount,
             include_first=include_first,
+            candidate_multiplier=self.nystrom_candidate_multiplier,
+            cholesky_tolerance=self.nystrom_cholesky_tolerance,
+            kernel_type=self.kernel_type,
+            kernel_bandwidth=self.kernel_bandwidth,
+            kernel_bandwidth_mult=self.kernel_bandwidth_mult,
+            cholesky_progress=self.nystrom_cholesky_progress,
         )
+        if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
+            bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
+            self.kernel_fn.bandwidth = bandwidth
+            self.distribution_matcher.kernel_fn.bandwidth = bandwidth
         return encoded, encoded.get("reward")
 
     def _all_encoded_actor_data(self, include_first=True):
@@ -1401,7 +1550,7 @@ class RoverAgent:
             step,
             points,
             f"step_{step}_nystrom_subsamples.png",
-            "PointMaze Nyström subsamples",
+            f"PointMaze Nyström subsamples ({self.subsampling_strategy})",
         )
 
     def _synthetic_actor_subsample_batch(self):
@@ -1419,7 +1568,10 @@ class RoverAgent:
             return EncodedActorUpdateData(
                 full=full,
                 rewards=rewards,
-                source=f"encoded FIFO sample of batch_size_actor={self.batch_size_actor}",
+                source=(
+                    f"encoded FIFO {self.subsampling_strategy} sample of "
+                    f"batch_size_actor={self.batch_size_actor}"
+                ),
             )
 
         # Nyström uses the whole encoded FIFO as support and a smaller landmark set.
@@ -1433,7 +1585,10 @@ class RoverAgent:
                 count,
                 include_first=True,
             )
-            subsample_source = f"encoded FIFO Nyström sample of subsamples={count}"
+            subsample_source = (
+                f"encoded FIFO {self.subsampling_strategy} Nyström sample "
+                f"of subsamples={count}"
+            )
         return EncodedActorUpdateData(
             full=full,
             rewards=rewards,
@@ -1651,6 +1806,7 @@ class RoverAgent:
             f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
             f"PMD steps = {self.pmd_steps}\n"
             f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
+            f"subsampling = {self.subsampling_strategy}\n"
         )
 
     def _run_debug_visualizers(self, metrics, obs, step):

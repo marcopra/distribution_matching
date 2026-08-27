@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.rover_nystrom_pointmaze_debug.RoverAgent
+_target_: agent.rover_nystrom_debug.RoverAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -13,14 +13,19 @@ batch_size: 1024
 batch_size_actor: 10000
 subsamples: 4000
 pca_truncation: 500
-nystrom_synthetic_subsamples: true
+nystrom_synthetic_subsamples: false # true bypasses FIFO strategy and uses fixed landmarks
 debug_fixed_dataset_updates: false # temporary debug: train encoders and actor from fixed PointMaze grid
+subsampling_strategy: random # [random, gamma_h, reverse_gamma_h, pivoted_cholesky]
+nystrom_candidate_multiplier: 5.0
+nystrom_cholesky_tolerance: 1e-6
+nystrom_cholesky_progress: true
 encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
+max_pending_transitions: null
 kernel_type: gaussian # [inner_product, gaussian, laplacian, dirac]
-kernel_bandwidth: null # fixed Gaussian bandwidth when set
-kernel_bandwidth_mult: null # when set, Gaussian bandwidth = median pairwise state distance * multiplier
+kernel_bandwidth: null # fixed Gaussian bandwidth; null lets pivoted Cholesky fit candidates
+kernel_bandwidth_mult: null # candidate median-distance multiplier; null means 1.0
 nystrom_grid_border_margin: 0.01
 nystrom_grid_oversample: 2.0
 nystrom_exact_grid: false
@@ -30,6 +35,7 @@ curl: false
 embedding_sum_loss: 0.0
 hidden_dim: 1024
 feature_dim: null
+linear_projection: false
 T_init_steps: 1000
 total_train_steps: ${num_train_frames}
 update_every_steps: 100

@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 import ale_py
@@ -103,7 +104,10 @@ class ResizeRendering(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ExtendedTimeStep(NamedTuple):
@@ -178,7 +182,10 @@ class DiscreteObservationWrapper(gym.Wrapper):
         return self._obs_to_onehot(obs), reward, terminated, truncated, info
     
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ActionRepeatWrapper(gym.Wrapper):
@@ -192,8 +199,10 @@ class ActionRepeatWrapper(gym.Wrapper):
         self.obs_keys = None
         self._is_montezuma = self._check_is_montezuma()
         self._montezuma_initial_room = None
-        self._montezuma_max_room = None
-        self._montezuma_visited_second_room = False
+        self._montezuma_escaped_first_room = False
+        self._montezuma_rooms_visited = set()
+        self._montezuma_room_route = []
+        self._montezuma_episode_frame = 0
         
         # Expose render_resolution if available
         if hasattr(env, 'render_resolution'):
@@ -220,30 +229,41 @@ class ActionRepeatWrapper(gym.Wrapper):
     def _reset_montezuma_tracking(self):
         room_id = self._get_montezuma_room_id()
         self._montezuma_initial_room = room_id
-        self._montezuma_max_room = room_id
-        self._montezuma_visited_second_room = False
+        self._montezuma_escaped_first_room = False
+        self._montezuma_rooms_visited = set()
+        self._montezuma_room_route = []
+        self._montezuma_episode_frame = 0
+        if room_id is not None:
+            self._montezuma_rooms_visited.add(room_id)
+            self._montezuma_room_route.append((0, room_id))
         return room_id
 
     def _update_montezuma_tracking(self):
+        self._montezuma_episode_frame += 1
         room_id = self._get_montezuma_room_id()
         if room_id is None:
             return None
         if self._montezuma_initial_room is None:
             self._montezuma_initial_room = room_id
-        if self._montezuma_max_room is None:
-            self._montezuma_max_room = room_id
-        else:
-            self._montezuma_max_room = max(self._montezuma_max_room, room_id)
+        self._montezuma_rooms_visited.add(room_id)
+        if not self._montezuma_room_route or self._montezuma_room_route[-1][1] != room_id:
+            self._montezuma_room_route.append(
+                (self._montezuma_episode_frame, room_id)
+            )
         if self._montezuma_initial_room is not None and room_id != self._montezuma_initial_room:
-            self._montezuma_visited_second_room = True
+            self._montezuma_escaped_first_room = True
         return room_id
 
     def _augment_info(self, info, room_id):
         info = dict(info) if info is not None else {}
         if self._is_montezuma:
             info['montezuma_room_id'] = room_id
-            info['montezuma_visited_second_room'] = self._montezuma_visited_second_room
-            info['montezuma_max_room_id'] = self._montezuma_max_room
+            info['montezuma_escaped_first_room'] = self._montezuma_escaped_first_room
+            info['montezuma_unique_rooms_visited'] = len(self._montezuma_rooms_visited)
+            info['montezuma_room_transition_count'] = max(
+                0, len(self._montezuma_room_route) - 1
+            )
+            info['montezuma_room_route'] = tuple(self._montezuma_room_route)
         return info
 
     def _process_proprio_obs(self, obs):
@@ -317,6 +337,8 @@ class ActionRepeatWrapper(gym.Wrapper):
             image_obs = None
 
         info = self._augment_info(info, montezuma_room_id)
+        info["terminated"] = bool(terminated)
+        info["truncated"] = bool(truncated)
         return ExtendedTimeStep(
             step_type=step_type,
             reward=reward,
@@ -369,7 +391,10 @@ class ActionRepeatWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class FrameStackWrapper(gym.Wrapper):
@@ -441,7 +466,10 @@ class FrameStackWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class ActionDTypeWrapper(gym.Wrapper):
@@ -465,7 +493,10 @@ class ActionDTypeWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class IgnoreSuccessTerminationWrapper(gym.Wrapper):
@@ -480,7 +511,10 @@ class IgnoreSuccessTerminationWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
     
 class ExtendedTimeStepWrapper(gym.Wrapper):
     def __init__(self, env):
@@ -522,7 +556,150 @@ class ExtendedTimeStepWrapper(gym.Wrapper):
     
     def __getattr__(self, name):
         """Forward other attributes to the wrapped environment."""
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
+
+
+class ExtendedTimeStepGymAdapter(gym.Env):
+    """Expose existing ExtendedTimeStep envs through Gymnasium's vector API."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+        self.observation_space = env.observation_space
+        self.action_space = env.action_space
+        self.metadata = getattr(env, "metadata", self.metadata)
+        self.render_mode = getattr(env, "render_mode", None)
+
+    def reset(self, *, seed=None, options=None):
+        kwargs = {}
+        if seed is not None:
+            kwargs["seed"] = seed
+        if options is not None:
+            kwargs["options"] = options
+        time_step = self.env.reset(**kwargs)
+        info = dict(time_step.info or {})
+        info["time_step"] = time_step
+        return time_step.observation, info
+
+    def step(self, action):
+        time_step = self.env.step(action)
+        info = dict(time_step.info or {})
+        terminated = bool(info.get("terminated", time_step.last()))
+        truncated = bool(info.get("truncated", False))
+        if time_step.last() and not (terminated or truncated):
+            terminated = True
+        info["time_step"] = time_step
+        return time_step.observation, time_step.reward, terminated, truncated, info
+
+    def close(self):
+        close = getattr(self.env, "close", None)
+        if callable(close):
+            close()
+
+    def render(self):
+        return self.env.render()
+
+    def __getattr__(self, name):
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
+
+
+@dataclass
+class EnvFactory:
+    name: str
+    obs_type: str
+    frame_stack: int = 1
+    action_repeat: int = 1
+    seed: int | None = None
+    resolution: int = 224
+    grayscale: bool = False
+    url: bool = False
+    kwargs: dict[str, Any] | None = None
+
+    def __call__(self):
+        env = make(
+            self.name,
+            self.obs_type,
+            frame_stack=self.frame_stack,
+            action_repeat=self.action_repeat,
+            seed=self.seed,
+            resolution=self.resolution,
+            grayscale=self.grayscale,
+            url=self.url,
+            **(self.kwargs or {}),
+        )
+        return ExtendedTimeStepGymAdapter(env)
+
+
+def make_env_factory(
+    name,
+    obs_type,
+    frame_stack=1,
+    action_repeat=1,
+    seed=None,
+    resolution=224,
+    grayscale=False,
+    url=False,
+    **kwargs,
+):
+    """Return a top-level, picklable factory for AsyncVectorEnv workers."""
+    return EnvFactory(
+        name=name,
+        obs_type=obs_type,
+        frame_stack=frame_stack,
+        action_repeat=action_repeat,
+        seed=seed,
+        resolution=resolution,
+        grayscale=grayscale,
+        url=url,
+        kwargs=dict(kwargs),
+    )
+
+
+def make_async_vector_env(
+    num_envs,
+    base_seed,
+    name,
+    obs_type,
+    frame_stack=1,
+    action_repeat=1,
+    resolution=224,
+    grayscale=False,
+    url=False,
+    context="spawn",
+    **kwargs,
+):
+    """Create AsyncVectorEnv with one independently seeded wrapped env per worker."""
+    env_fns = [
+        make_env_factory(
+            name,
+            obs_type,
+            frame_stack=frame_stack,
+            action_repeat=action_repeat,
+            seed=None if base_seed is None else int(base_seed) + env_id,
+            resolution=resolution,
+            grayscale=grayscale,
+            url=url,
+            **kwargs,
+        )
+        for env_id in range(int(num_envs))
+    ]
+    async_kwargs = {"context": context}
+    try:
+        from gymnasium.vector import AutoresetMode
+
+        async_kwargs["autoreset_mode"] = AutoresetMode.DISABLED
+    except Exception:
+        pass
+    return gym.vector.AsyncVectorEnv(env_fns, **async_kwargs)
+
 
 class TerminateOnPoint(gym.Wrapper):
     """Terminate the episode as soon as a point is scored or lost."""

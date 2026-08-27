@@ -827,7 +827,9 @@ class PointMazeNystromDebugHelper:
             return
         from agent.utils_debug_visualization import PointMazeNystromDebugVisualizer
 
-        PointMazeNystromDebugVisualizer().save_fixed_points_plot(
+        PointMazeNystromDebugVisualizer(
+            save_dir=os.path.join(os.getcwd(), "pointmaze_plots")
+        ).save_fixed_points_plot(
             layout=self.maze_layout(),
             points=self._fixed_xy_points,
             n_actions=n_actions,
@@ -935,7 +937,19 @@ class KernelActorDiscrete(nn.Module):
     optionally finetuning them with RL algorithms.
     """
     
-    def __init__(self, obs_type, input_dim, dataset_dim, action_dim, eta, trainable=True):
+    SUPPORTED_KERNELS = ("inner_product", "gaussian")
+
+    def __init__(
+        self,
+        obs_type,
+        input_dim,
+        dataset_dim,
+        action_dim,
+        eta,
+        trainable=True,
+        kernel_type="inner_product",
+        kernel_bandwidth=None,
+    ):
         """
         Args:
             obs_type: Type of observation ('states' or 'pixels')
@@ -946,6 +960,16 @@ class KernelActorDiscrete(nn.Module):
             trainable: If True, allows weights to be updated during finetuning
         """
         super().__init__()
+        self.obs_type = obs_type
+        self.input_dim = int(input_dim)
+        self.dataset_dim = int(dataset_dim)
+        self.action_dim = int(action_dim)
+        self.kernel_type = str(kernel_type or "inner_product").strip().lower()
+        if self.kernel_type not in self.SUPPORTED_KERNELS:
+            raise ValueError(
+                f"Unsupported kernel_type={self.kernel_type!r}; "
+                f"expected one of {self.SUPPORTED_KERNELS}"
+            )
         
         # Layer 1: Kernel layer computes H = [φ(x); 0] @ Φ_dataset^T
         # We need input_dim+1 to account for the augmented zero
@@ -960,6 +984,15 @@ class KernelActorDiscrete(nn.Module):
         self.bias_coeff = nn.Parameter(torch.zeros(action_dim, dtype=float_type))
         
         self.eta = nn.Parameter(torch.tensor(eta, dtype=float_type), requires_grad=trainable)
+        if self.kernel_type == "gaussian":
+            if kernel_bandwidth is None or float(kernel_bandwidth) <= 0.0:
+                raise ValueError("Gaussian kernel actor requires a positive kernel_bandwidth")
+            self.log_bandwidth = nn.Parameter(
+                torch.tensor(np.log(float(kernel_bandwidth)), dtype=float_type),
+                requires_grad=trainable,
+            )
+        else:
+            self.register_parameter("log_bandwidth", None)
         self.softmax = nn.Softmax(dim=1)
         
         # Control whether weights are trainable
@@ -968,6 +1001,12 @@ class KernelActorDiscrete(nn.Module):
                 param.requires_grad = False
         
         self.apply(utils.weight_init)
+
+    @property
+    def kernel_bandwidth(self):
+        if self.log_bandwidth is None:
+            return None
+        return torch.exp(self.log_bandwidth)
 
     def initialize_from_pretrained(self, phi_dataset, gradient_coeff, eta, E=None):
         """
@@ -980,7 +1019,25 @@ class KernelActorDiscrete(nn.Module):
             E: [num_unique, n_actions] - action one-hot encoding matrix (optional)
         """
         # 1. Initialize kernel layer: W = Φ_dataset (augmented with zeros)
-        self.kernel_layer.weight.data.copy_(phi_dataset)
+        expected_phi_shape = (self.dataset_dim, self.input_dim + 1)
+        if tuple(phi_dataset.shape) != expected_phi_shape:
+            raise ValueError(
+                f"phi_dataset shape {tuple(phi_dataset.shape)} does not match "
+                f"actor shape {expected_phi_shape}"
+            )
+        if E is None or tuple(E.shape) != (self.dataset_dim, self.action_dim):
+            raise ValueError(
+                f"E shape {None if E is None else tuple(E.shape)} does not match "
+                f"{(self.dataset_dim, self.action_dim)}"
+            )
+        if gradient_coeff.shape[0] != self.dataset_dim + 1:
+            raise ValueError(
+                f"gradient_coeff has {gradient_coeff.shape[0]} rows; "
+                f"expected {self.dataset_dim + 1}"
+            )
+        self.kernel_layer.weight.data.copy_(
+            phi_dataset.to(device=self.kernel_layer.weight.device, dtype=self.kernel_layer.weight.dtype)
+        )
         
         # 2. Split gradient_coeff into action coeffs and bias
         # gradient_coeff shape: [num_unique+1, 1]
@@ -999,20 +1056,42 @@ class KernelActorDiscrete(nn.Module):
         weighted_E = action_grad.unsqueeze(1) * E  # [num_unique, n_actions]
         # action_coeffs.weight shape: [n_actions, num_unique]
         # We want: logits = H @ weighted_E = H @ W^T, so W^T = weighted_E
-        self.action_coeffs.weight.data.copy_(weighted_E.T)
+        self.action_coeffs.weight.data.copy_(
+            weighted_E.T.to(
+                device=self.action_coeffs.weight.device,
+                dtype=self.action_coeffs.weight.dtype,
+            )
+        )
     
         
         # 4. Initialize bias term
         self.bias_coeff.data.fill_(bias_grad)
         
         # 5. Set eta
-        self.eta.data.copy_(torch.tensor(eta))
+        self.eta.data.fill_(float(eta))
         print("all dtypes:", self.kernel_layer.weight.dtype, self.action_coeffs.weight.dtype, self.bias_coeff.dtype, self.eta.dtype)
         print(f"Kernel actor initialized from pretrained weights:")
         print(f"  - Kernel layer: {self.kernel_layer.weight.shape}")
         print(f"  - Action coeffs: {self.action_coeffs.weight.shape}")
         print(f"  - Bias: {self.bias_coeff.shape}")
         print(f"  - Eta: {self.eta.item()}")
+        print(f"  - Kernel: {self.kernel_type}")
+        if self.kernel_bandwidth is not None:
+            print(f"  - Bandwidth: {self.kernel_bandwidth.item()}")
+
+    def _kernel_features(self, phi_x_aug):
+        landmarks = self.kernel_layer.weight
+        if self.kernel_type == "inner_product":
+            return F.linear(phi_x_aug, landmarks)
+
+        x_sq = torch.sum(phi_x_aug * phi_x_aug, dim=1, keepdim=True)
+        y_sq = torch.sum(landmarks * landmarks, dim=1).unsqueeze(0)
+        squared_distance = torch.clamp(
+            x_sq + y_sq - 2.0 * (phi_x_aug @ landmarks.T),
+            min=0.0,
+        )
+        bandwidth = self.kernel_bandwidth.clamp_min(1e-12)
+        return torch.exp(-squared_distance / (2.0 * bandwidth * bandwidth))
 
     def forward(self, phi_x):
         """
@@ -1042,7 +1121,7 @@ class KernelActorDiscrete(nn.Module):
         
         # Step 2: Calcola le similarità del kernel H = [φ(x); 0] @ Φ_dataset^T
         # kernel_layer computes: H = phi_x_aug @ kernel_layer.weight^T
-        h = self.kernel_layer(phi_x_aug)
+        h = self._kernel_features(phi_x_aug)
         # Shape: [batch_size, dataset_dim]
         
         # Step 3a: Applica i coefficienti del gradiente specifici per azione
@@ -1076,7 +1155,8 @@ class KernelActorDiscrete(nn.Module):
         phi_x_aug = torch.cat([phi_x, torch.zeros(batch_size, 1, device=phi_x.device)], dim=1)
         
         # Similarità del kernel
-        h = self.kernel_layer(phi_x_aug)
+        phi_x_aug = phi_x_aug.to(dtype=float_type)
+        h = self._kernel_features(phi_x_aug)
         
         # Logit specifici per azione + bias
         action_logits = self.action_coeffs(h)

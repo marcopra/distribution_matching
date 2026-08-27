@@ -75,7 +75,7 @@ class Workspace:
                     project=cfg.wandb_project,
                     name=cfg.wandb_run_name,
                     tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
-                    sync_tensorboard=True,
+                    sync_tensorboard=False,
                     mode=cfg.wandb_mode if hasattr(cfg, 'wandb_mode') else 'online')
             else:
                 wandb.init(
@@ -83,7 +83,7 @@ class Workspace:
                     project=cfg.wandb_project,
                     name=cfg.wandb_run_name,
                     tags=cfg.wandb_tag.split('_') if cfg.wandb_tag and cfg.wandb_tag != "none" else None,
-                    sync_tensorboard=True,
+                    sync_tensorboard=False,
                     mode=cfg.wandb_mode if hasattr(cfg, 'wandb_mode') else 'online')
 
 
