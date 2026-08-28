@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_pointmaze
   - /env: pointmaze/pointmaze_umaze_goal_1
   # - override hydra/launcher: submitit_local
 
@@ -49,9 +49,11 @@ agent:
   pca_truncation: 4500
   compute_dtype: float64
   sink_schedule: 1.0
-  nystrom_exact_grid: true
-  nystrom_synthetic_subsamples: true
-  debug_fixed_dataset_updates: true
+  debug: true
+  debug_config:
+    nystrom_exact_grid: true
+    nystrom_synthetic_subsamples: true
+    debug_fixed_dataset_updates: true
   kernel_bandwidth: 0.2
   subsamples: 8000
   lambda_reg: 1e-6

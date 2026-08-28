@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_pointmaze
   - /env: pointmaze/pointmaze_umaze_goal_1
   - _self_
   # - override hydra/launcher: submitit_local
@@ -25,7 +25,6 @@ update_actor_after_critic_steps: 0
 num_envs: 4
 base_seed: ${seed}
 async_vector_env: true
-parallel_attach_eval_env_for_debug: true
 
 # train settings
 num_train_frames: 2_000_000
@@ -56,10 +55,10 @@ agent:
   pca_truncation: 4500
   compute_dtype: float64
   sink_schedule: linear(0.0, 0.8, 500_000)
-  debug_fixed_dataset_updates: false
   kernel_bandwidth: null
-  kernel_bandwidth_mult: 0.3
-  nystrom_exact_grid: false
+  debug_config:
+    debug_fixed_dataset_updates: false
+    nystrom_exact_grid: false
   subsamples: 8000
   lambda_reg: 1e-6
   batch_size_actor: 16000
@@ -99,4 +98,3 @@ hydra:
   #   mem_gb: 160
   #   nodes: 1
   #   submitit_folder: ./exp_sweep_parallel/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}/.slurm
-

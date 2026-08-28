@@ -1,6 +1,10 @@
 # @package agent
-_target_: agent.rover_nystrom_debug.RoverAgent
-name: dist_matching
+defaults:
+  - debug@debug_config: generic
+  - _self_
+
+_target_: agent.rover_nystrom.RoverAgent
+name: rover_nystrom
 obs_type: ???
 obs_shape: ???
 grayscale: ${grayscale}
@@ -13,22 +17,16 @@ batch_size: 1024
 batch_size_actor: 10000
 subsamples: 4000
 pca_truncation: 500
-nystrom_synthetic_subsamples: false
-debug_fixed_dataset_updates: false
-subsampling_strategy: pivoted_cholesky
+subsampling_strategy: random # [random, pivoted_cholesky]
 nystrom_candidate_multiplier: 5.0
 nystrom_cholesky_tolerance: 1e-6
-nystrom_cholesky_progress: false
+nystrom_cholesky_progress: true
 encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 max_pending_transitions: null
-kernel_type: inner_product
-kernel_bandwidth: null
-kernel_bandwidth_mult: null
-nystrom_grid_border_margin: 0.01
-nystrom_grid_oversample: 2.0
-nystrom_exact_grid: false
+kernel_type: gaussian # [inner_product, gaussian, laplacian, dirac]
+kernel_bandwidth: null # null uses unscaled median candidate distance
 nstep: 1
 lr_encoder: 1e-4
 curl: false
@@ -41,7 +39,7 @@ total_train_steps: ${num_train_frames}
 update_every_steps: 100
 update_actor_every_steps: 1500
 pmd_steps: 100
-pmd_eta_mode: backtracking
+pmd_eta_mode: backtracking # [none, adagrad, backtracking, adadiff]
 pmd_best_iterate: true
 pmd_grad_clip_norm: 0.0
 pmd_adagrad_eps: 1e-8
@@ -59,3 +57,5 @@ use_wandb: ${use_wandb}
 num_expl_steps: ???
 device: ${device}
 compute_dtype: float64
+debug: false
+

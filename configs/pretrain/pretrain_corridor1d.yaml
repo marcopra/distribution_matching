@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_pointmaze
   - /env: continuous_rooms/continuous_corridor_1d 
   # - override hydra/launcher: submitit_local
 
@@ -45,11 +45,12 @@ agent:
   pmd_steps: 50
   update_every_steps: 1
   pmd_eta_mode: backtracking
-  svd_truncation: 2500
+  pca_truncation: 2500
   compute_dtype: float32
   sink_schedule: 1
-  debug_fixed_dataset_updates: true
-  kernel_bandwidth_percentile: 5.0
+  debug: true
+  debug_config:
+    debug_fixed_dataset_updates: true
   subsamples: null
   lambda_reg: 1e-2
   batch_size_actor: 200

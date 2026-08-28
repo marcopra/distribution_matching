@@ -1282,7 +1282,6 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         points: np.ndarray,
         probabilities: np.ndarray,
         scale: float,
-        highlight_index: Optional[int] = None,
     ) -> None:
         n_actions = probabilities.shape[1]
         colors = self.ACTION_COLORS
@@ -1294,17 +1293,16 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
 
         for point_idx, (point, probs) in enumerate(zip(points, probabilities)):
             x, y = float(point[0]), float(point[1])
-            is_highlighted = highlight_index is not None and point_idx == int(highlight_index)
             ax.add_patch(
                 patches.Rectangle(
                     (x - box_width / 2.0, y - box_height / 2.0),
                     box_width,
                     box_height,
                     facecolor="white",
-                    edgecolor="#111827" if is_highlighted else "#4b5563",
-                    linewidth=2.4 if is_highlighted else 0.45,
-                    alpha=0.92 if is_highlighted else 0.78,
-                    zorder=4 if is_highlighted else 1,
+                    edgecolor="#4b5563",
+                    linewidth=0.45,
+                    alpha=0.78,
+                    zorder=1,
                 )
             )
             start_x = x - 0.5 * bar_spacing * (n_actions - 1)
@@ -1320,7 +1318,7 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
                         facecolor=colors[action_idx % len(colors)],
                         edgecolor="none",
                         alpha=0.95,
-                        zorder=5 if is_highlighted else 2,
+                        zorder=2,
                     )
                 )
 
@@ -1560,7 +1558,12 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             return None
 
         debug_helper = getattr(self.agent, "nystrom_debug", None)
-        build_grid_points = getattr(debug_helper, "build_grid_points", None)
+        if debug_helper is None:
+            debug_manager = getattr(self.agent, "debug_manager", None)
+            debug_helper = getattr(debug_manager, "data_helper", None)
+        build_grid_points = getattr(debug_helper, "build_policy_grid_points", None)
+        if not callable(build_grid_points):
+            build_grid_points = getattr(debug_helper, "build_grid_points", None)
         if callable(build_grid_points):
             return np.asarray(build_grid_points(n_points), dtype=np.float32).reshape(-1, 2)
 
@@ -1595,7 +1598,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             ax.set_title(title)
             ax.grid(True, alpha=0.18, linewidth=0.5)
 
-        self._plot_policy_probe_bars(axes[0], points, probabilities, scale, highlight_index=0)
+        self._plot_policy_probe_bars(axes[0], points, probabilities, scale)
         self._plot_policy_probe_arrows(axes[1], points, probabilities, scale)
         self._add_policy_action_legend(axes[0], probabilities.shape[1])
         self._add_policy_action_legend(axes[1], probabilities.shape[1])

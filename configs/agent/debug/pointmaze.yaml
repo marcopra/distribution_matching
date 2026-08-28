@@ -1,0 +1,10 @@
+# @package agent.debug_config
+domain: pointmaze
+debug_fixed_dataset_updates: false
+nystrom_synthetic_subsamples: false
+nystrom_grid_border_margin: 0.01
+nystrom_grid_oversample: 2.0
+nystrom_exact_grid: false
+policy_plot_dir: policy_plots
+pointmaze_plot_dir: pointmaze_plots
+preserve_legacy_rng_sequence: true

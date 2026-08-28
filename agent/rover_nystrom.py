@@ -6,18 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib import patches
 import utils
 import logging
-import agent.utils
-from agent.utils import (
-    EncodedActorUpdateData,
-    PointMazeNystromDebugHelper,
-    RawActorUpdateData,
-)
+from agent.rover_utils.types import EncodedActorUpdateData, RawActorUpdateData
 # set logging level to info
 
 def _resolve_torch_dtype(dtype):
@@ -52,12 +43,9 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 
 logger.addHandler(handler)
-from agent.rover_buffers import EncodedTransitionFIFO
-from agent.rover_matchers import DistributionMatcher
-from agent.rover_networks import CNNEncoder, Encoder, ProjectSA
-from agent.rover_visualization.exploration import ExplorationVisualizer
-from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
-from agent.rover_visualization.suite import build_debug_visualizer_suite
+from agent.rover_utils.buffers import EncodedTransitionFIFO
+from agent.rover_utils.matchers import DistributionMatcher
+from agent.rover_utils.networks import CNNEncoder, Encoder, ProjectSA
 
 # ============================================================================
 # Main Agent
@@ -108,22 +96,18 @@ class RoverAgent:
                  pmd_backtrack_factor: float = 0.5,
                  pmd_backtrack_max_trials: int = 8,
                  compute_dtype: str = "float32",
-                 nystrom_synthetic_subsamples: bool = False,
-                 debug_fixed_dataset_updates: bool = False,
+                 debug: bool = False,
+                 debug_config=None,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
                  max_pending_transitions: Optional[int] = None,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth: Optional[float] = None,
-                 kernel_bandwidth_mult: Optional[float] = None,
                  subsampling_strategy: str = "random",
                  nystrom_candidate_multiplier: float = 5.0,
                  nystrom_cholesky_tolerance: float = 1e-6,
                  nystrom_cholesky_progress: bool = True,
-                 nystrom_grid_border_margin: float = 0.05,
-                 nystrom_grid_oversample: float = 2.0,
-                 nystrom_exact_grid: bool = False,
                  device: str = "cpu",
                  ):
 
@@ -190,18 +174,14 @@ class RoverAgent:
         # ** Kernel Settings **
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
-        self.kernel_bandwidth_mult = kernel_bandwidth_mult # TODO remove, it seems to cause instabilities
         
         # ** Subsampling settings for Nyström approximation **
-        self.subsampling_strategy = str(subsampling_strategy).lower() # TODO remove gamma_h, reverse_gamma_h
-        if self.subsampling_strategy not in (
-            "random", "gamma_h", "reverse_gamma_h", "pivoted_cholesky"
-        ):
+        self.subsampling_strategy = str(subsampling_strategy).lower()
+        if self.subsampling_strategy not in ("random", "pivoted_cholesky"):
             raise ValueError(
-                "subsampling_strategy must be random, gamma_h, reverse_gamma_h, "
-                "or pivoted_cholesky"
+                "subsampling_strategy must be random or pivoted_cholesky"
             )
-        self.nystrom_candidate_multiplier = float(nystrom_candidate_multiplier) # TODO what is this? Do we need it?
+        self.nystrom_candidate_multiplier = float(nystrom_candidate_multiplier) # Number of candidates to subsample for Nyström approximation, relative to the number of subsamples. Only used for pivoted_cholesky.
         self.nystrom_cholesky_tolerance = float(nystrom_cholesky_tolerance) # Needed for pivoted Cholesky subsampling
         self.nystrom_cholesky_progress = bool(nystrom_cholesky_progress)
         if self.nystrom_candidate_multiplier < 1.0:
@@ -217,25 +197,18 @@ class RoverAgent:
                 "pivoted_cholesky subsampling currently requires kernel_type "
                 "inner_product or gaussian"
             )
-        self.max_distances=1000 # TODO what is this? Do we need it?
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
             bandwidth=self.kernel_bandwidth,
         )
         self.subsamples = subsamples # N of subsamples for Nyström approximation. If None, use all the samples in the FIFO buffer.
 
-        # DEBUG SETTINGS - In the future we have to create a class that manage the debug for the different domains.
-        # TODO: remove from the main code - We have to find a way to manage debug mode in a cleaner way.
-        if self.debug_fixed_dataset_updates:
-            utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed continuous Nyström dataset.")
-        
-        self.nystrom_debug = PointMazeNystromDebugHelper(
-            border_margin=nystrom_grid_border_margin,
-            oversample=nystrom_grid_oversample,
-            exact_grid=nystrom_exact_grid,
-        )
-        self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates) 
-        self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples) # N of synthetic subsamples for Nyström approximation.
+        self.debug = bool(debug)
+        self.debug_manager = None
+        if self.debug:
+            from agent.rover_utils.debug import make_debug_manager
+
+            self.debug_manager = make_debug_manager(self, debug_config)
 
         # ** FIFO buffer for encoded transitions settings **
         min_fifo_capacity = max( 
@@ -363,62 +336,19 @@ class RoverAgent:
 
         self.training = False
 
-        self.current_action_probs = []
-        self.action_probs_history = []  # List of [step, mean_action_probs_array]
-        self.policy_deviation_history = []  # List of [step, deviation_value]
-
-
-        # TODO this parameters are all for visualization and debug, identify a better management for them
-        self.debug_visualizer = build_debug_visualizer_suite(
-            agent=self,
-            exploration_visualizer_cls=ExplorationVisualizer,
-            gridworld_visualizer_cls=EmbeddingDistributionVisualizerV2,
-        )
-        self.visualizer = self.debug_visualizer.exploration_visualizer
-        self.gridworld_visualizer = None
-        self.env = None
-        self.wrapped_env = None
-        self._discrete_env = None
-
+        if self.debug_manager is not None:
+            self.debug_manager.preserve_legacy_rng_sequence()
 
         self.current_eta = 0.0
         self._adagrad_accum = None
 
         self.subsampled = None
 
-    def _find_discrete_env(self, env):
-        current = env
-        while current is not None:
-            if hasattr(current, "n_states") and hasattr(current, "idx_to_state") and hasattr(current, "state_to_idx"):
-                return current
-
-            if hasattr(current, "env"):
-                current = current.env
-            elif hasattr(current, "unwrapped") and current.unwrapped is not current:
-                current = current.unwrapped
-            else:
-                break
-        return env.unwrapped
-
     def insert_env(self, env):
-        """
-        Insert environment reference for gridworld-specific visualizations.
-        Call this from pretrain.py after agent creation.
-        """       
-        self.wrapped_env = env
-        self.env = self._find_discrete_env(env)
-        self.nystrom_debug.attach_env(env)
-        
-        try:
-            self.gridworld_visualizer = self.debug_visualizer.attach_env(env)
-            if self.gridworld_visualizer is not None:
-                print("✓ Domain-specific debug visualizer initialized")
-        except Exception as e:
-            print(f"⚠ Could not initialize domain-specific debug visualizer: {e}")
-            self.gridworld_visualizer = None
+        if self.debug_manager is not None:
+            self.debug_manager.attach_env(env)
 
 
-    
     def train(self, training=True):
         self.training = training
         self.encoder.train(training)
@@ -483,7 +413,17 @@ class RoverAgent:
     def _kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return self.kernel_fn(X, Y)
 
+    def _kernel_status(self, kernel_fn=None) -> str:
+        kernel_fn = self.kernel_fn if kernel_fn is None else kernel_fn
+        bandwidth = getattr(kernel_fn, "bandwidth", None)
+        if bandwidth is None:
+            return f"kernel={self.kernel_type}"
+        return f"kernel={self.kernel_type}, bandwidth={bandwidth:.6g}"
+
     def _fit_state_kernel_bandwidth(self, X: torch.Tensor, Y: torch.Tensor) -> None:
+        del Y
+        if self.kernel_type != "gaussian" or self.kernel_bandwidth is not None:
+            return
         if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
             bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
             if bandwidth is not None:
@@ -493,139 +433,16 @@ class RoverAgent:
                     f"Using pivoted-Cholesky candidate-pool Gaussian bandwidth={bandwidth:.6g}."
                 )
                 return
-            # Synthetic/fixed landmark paths bypass FIFO candidate selection.
-            # Preserve their existing Gaussian bandwidth behavior.
-        if self.kernel_type != "gaussian" or self.kernel_bandwidth_mult is None:
-            return
-        multiplier = float(self.kernel_bandwidth_mult)
-        if multiplier <= 0.0:
-            raise ValueError("kernel_bandwidth_mult must be positive when set.")
-
         with torch.no_grad():
-            if X.shape[0] > self.max_distances or Y.shape[0] > self.max_distances:
-                pair_count = min(X.shape[0], Y.shape[0])
-                sample_count = min(pair_count, self.max_distances)
-                indices = torch.randperm(pair_count, device=X.device)[:sample_count]
-                X = X[indices]
-                Y = Y[indices.to(Y.device)]
-
-            distances = torch.sqrt(torch.clamp(agent.utils.pairwise_squared_distance_torch(X.detach(), Y.detach()), min=0.0))
+            candidates = X.detach().reshape(X.shape[0], -1)
+            if candidates.shape[0] > 1000:
+                indices = torch.randperm(candidates.shape[0], device=candidates.device)[:1000]
+                candidates = candidates[indices]
+            distances = torch.pdist(candidates, p=2)
             distances = distances[distances > 0]
-            if distances.numel() == 0:
-                median_distance = torch.tensor(1.0, device=X.device, dtype=X.dtype)
-            else:
-                median_distance = torch.median(distances)
-            bandwidth = max(float(median_distance.item()) * multiplier, 1e-12)
-
-        self.kernel_fn.bandwidth = bandwidth
-        self.distribution_matcher.kernel_fn.bandwidth = bandwidth
-        utils.ColorPrint.yellow(
-            f"Fitted actor Gaussian bandwidth={bandwidth:.6g} "
-            f"(median_distance={float(median_distance.item()):.6g}, multiplier={multiplier:.6g})."
-        )
-
-    def _kernel_status(self, kernel_fn=None) -> str:
-        kernel_fn = self.kernel_fn if kernel_fn is None else kernel_fn
-        bandwidth = getattr(kernel_fn, "bandwidth", None)
-        if bandwidth is None:
-            return f"kernel={self.kernel_type}"
-        return f"kernel={self.kernel_type}, bandwidth={bandwidth:.6g}"
-
-    @staticmethod
-    def _uniform_tensor_indices(n_items, max_items, device):
-        if n_items <= max_items:
-            return torch.arange(n_items, device=device)
-        return torch.round(torch.linspace(0, n_items - 1, max_items, device=device)).long()
-
-    def _kernel_debug_matrix(self, kernel_fn, X, Y, max_points=300):
-        x_idx = self._uniform_tensor_indices(X.shape[0], max_points, X.device)
-        y_idx = self._uniform_tensor_indices(Y.shape[0], max_points, Y.device)
-        with torch.no_grad():
-            matrix = kernel_fn(X[x_idx], Y[y_idx]).detach().float().cpu().numpy()
-        return matrix
-
-    @staticmethod
-    def _unique_rows(tensor: torch.Tensor) -> torch.Tensor:
-        if tensor.numel() == 0:
-            return tensor
-        rows = tensor.detach().cpu().reshape(tensor.shape[0], -1).numpy()
-        seen = set()
-        keep_indices = []
-        for idx, row in enumerate(rows):
-            key = row.tobytes()
-            if key in seen:
-                continue
-            seen.add(key)
-            keep_indices.append(idx)
-        index = torch.as_tensor(keep_indices, dtype=torch.long, device=tensor.device)
-        return tensor.index_select(0, index)
-
-    def _save_actor_kernel_debug_plot(
-            self,
-            step,
-            state_X,
-            state_Y,
-            state_action_X,
-            state_action_Y,
-            state_action_X_actions=None,
-            state_action_Y_actions=None,
-            nystrom=False
-        ):
-        if self.kernel_type != "gaussian":
-            return
-
-        save_dir = os.path.join(os.getcwd(), "kernel_debug_plots")
-        os.makedirs(save_dir, exist_ok=True)
-        suffix = "nystrom" if nystrom else "full"
-        save_path = os.path.join(save_dir, f"step_{step}_{suffix}_kernels.png")
-
-        # Plot unique next-state points to avoid action-repeated rows in the state kernel.
-        state_matrix = self._kernel_debug_matrix(self.kernel_fn, state_X, state_Y)
-        if state_action_X_actions is None or state_action_Y_actions is None:
-            action_matrix = self._kernel_debug_matrix(self.distribution_matcher.kernel_fn, state_action_X, state_action_Y)
-        else:
-            x_idx = self._uniform_tensor_indices(state_action_X.shape[0], 300, state_action_X.device)
-            y_idx = self._uniform_tensor_indices(state_action_Y.shape[0], 300, state_action_Y.device)
-            x_actions = state_action_X_actions.to(device=state_action_X.device)
-            y_actions = state_action_Y_actions.to(device=state_action_Y.device)
-            with torch.no_grad():
-                action_matrix = self.distribution_matcher.state_action_kernel(
-                    state_action_X[x_idx],
-                    state_action_Y[y_idx],
-                    x_actions[x_idx],
-                    y_actions[y_idx],
-                ).detach().float().cpu().numpy()
-        state_values = state_matrix.reshape(-1)
-        action_values = action_matrix.reshape(-1)
-
-        fig, axes = plt.subplots(2, 2, figsize=(11, 8), constrained_layout=True)
-        panels = [
-            (axes[0, 0], state_matrix, "State / next-state kernel heatmap", self._kernel_status(self.kernel_fn)),
-            (axes[1, 0], action_matrix, "State-action kernel heatmap", self._kernel_status(self.distribution_matcher.kernel_fn)),
-        ]
-        for ax, matrix, title, status in panels:
-            im = ax.imshow(matrix, cmap="viridis", vmin=0.0, vmax=1.0, aspect="auto", interpolation="nearest")
-            ax.set_title(f"{title}\n{status}", fontsize=10)
-            ax.set_xlabel("Y support")
-            ax.set_ylabel("X support")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-        for ax, values, title in [
-            (axes[0, 1], state_values, "State / next-state kernel values"),
-            (axes[1, 1], action_values, "State-action kernel values"),
-        ]:
-            ax.hist(values, bins=70, range=(0.0, 1.0), color="#2563eb", alpha=0.82)
-            ax.axvline(float(np.mean(values)), color="black", linestyle="--", linewidth=1.1, label=f"mean={np.mean(values):.3g}")
-            ax.axvline(float(np.median(values)), color="#dc2626", linestyle=":", linewidth=1.3, label=f"median={np.median(values):.3g}")
-            ax.set_title(title, fontsize=10)
-            ax.set_xlabel("kernel value")
-            ax.set_ylabel("count")
-            ax.legend(fontsize=8)
-
-        fig.suptitle(f"Automatic Gaussian sigma diagnostics at step {step} ({suffix})", fontsize=13)
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Kernel sigma debug plot saved to: {save_path}")
+            bandwidth = 1.0 if distances.numel() == 0 else float(torch.median(distances).item())
+        self.kernel_fn.bandwidth = max(bandwidth, 1e-12)
+        self.distribution_matcher.kernel_fn.bandwidth = self.kernel_fn.bandwidth
     
     
     def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
@@ -709,7 +526,7 @@ class RoverAgent:
 
         # Compute action probabilities
         action_probs = self.compute_action_probs(obs)
-        self.current_action_probs.append(action_probs)  # Store for visualization
+        self.debug_manager.record_action_probs(action_probs) if self.debug_manager is not None else None  # Store for visualization
         # print(f"Step {step}: Action probabilities: {action_probs}")
         # Sample action
         return np.random.choice(self.n_actions, p=action_probs)
@@ -738,7 +555,7 @@ class RoverAgent:
                     raise ValueError(f"Unexpected action_probs shape {action_probs.shape}")
                 for row, env_id in enumerate(policy_indices):
                     probs = action_probs[row]
-                    self.current_action_probs.append(probs)
+                    self.debug_manager.record_action_probs(probs) if self.debug_manager is not None else None
                     actions[env_id] = np.random.choice(self.n_actions, p=probs)
             except Exception as exc:
                 utils.ColorPrint.yellow(f"Batched act_parallel failed; falling back to looped act: {exc}")
@@ -837,10 +654,9 @@ class RoverAgent:
 
         # Print losses
         logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
-        if self.use_tb or self.use_wandb:
-            metrics['transition_loss'] = loss.item()
-            metrics['contrastive_loss'] = contrastive_loss.item()
-            metrics['curl_loss'] = curl_loss.item()
+        metrics['transition_loss'] = loss.item()
+        metrics['contrastive_loss'] = contrastive_loss.item()
+        metrics['curl_loss'] = curl_loss.item()
         return metrics
     
 
@@ -890,16 +706,6 @@ class RoverAgent:
         prev_gradient_coeff = self.gradient_coeff.clone()
         self._fit_state_kernel_bandwidth(self._phi_all_obs, self._phi_sub_next)
         sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
-        self._save_actor_kernel_debug_plot(
-            step,
-            state_X=self._phi_sub_next,
-            state_Y=self._phi_sub_next,
-            state_action_X=self._phi_sub_obs,
-            state_action_Y=self._phi_sub_obs,
-            state_action_X_actions=self._sub_actions,
-            state_action_Y_actions=self._sub_actions,
-            nystrom=True,
-        )
         utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
@@ -1061,11 +867,10 @@ class RoverAgent:
             actor_loss = best_loss
             
 
-        if self.use_tb or self.use_wandb:
-            metrics['actor_loss'] = actor_loss
-            metrics['actor_eta'] = float(self.current_eta)
-            metrics['actor_best_loss'] = float(best_loss)
-            metrics['sink_norm'] = float(sink_norm)
+        metrics['actor_loss'] = float(actor_loss)
+        metrics['actor_eta'] = float(self.current_eta)
+        metrics['actor_best_loss'] = float(best_loss)
+        metrics['sink_norm'] = float(sink_norm)
    
         return metrics
 
@@ -1318,13 +1123,11 @@ class RoverAgent:
             int(size),
             self.device,
             strategy=self.subsampling_strategy,
-            gamma=self.discount,
             include_first=include_first,
             candidate_multiplier=self.nystrom_candidate_multiplier,
             cholesky_tolerance=self.nystrom_cholesky_tolerance,
             kernel_type=self.kernel_type,
             kernel_bandwidth=self.kernel_bandwidth,
-            kernel_bandwidth_mult=self.kernel_bandwidth_mult,
             cholesky_progress=self.nystrom_cholesky_progress,
         )
         if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
@@ -1417,140 +1220,6 @@ class RoverAgent:
             raise ValueError("subsamples must be positive when provided")
         return count
 
-    def _fixed_actor_update_data(self) -> RawActorUpdateData:
-        fixed_batch = self.nystrom_debug.fixed_actor_batch(self, n_transitions=int(self.batch_size_actor))
-        subsample = (
-            self.nystrom_debug.fixed_actor_batch(self, n_transitions=self._nystrom_subsample_count())
-            if self.subsamples is not None else None
-        )
-        return RawActorUpdateData(
-            full=fixed_batch,
-            subsample=subsample,
-            source="fixed PointMaze debug dataset",
-        )
-
-    def _xy_points_from_actor_batch(self, actor_batch, expected_size=None):
-        if actor_batch is None:
-            return None
-        if isinstance(actor_batch, dict):
-            xy = actor_batch.get("debug_xy")
-            if xy is None:
-                return None
-            points = xy.detach().float().cpu().numpy().reshape(xy.shape[0], -1)[:, :2]
-            if points.shape[0] == 0 or not np.isfinite(points).all():
-                return None
-            return points.astype(np.float32, copy=False)
-        if (
-            self.debug_fixed_dataset_updates
-            and expected_size is not None
-            and hasattr(self.nystrom_debug, "fixed_xy_points_for_size")
-        ):
-            fixed_points = self.nystrom_debug.fixed_xy_points_for_size(int(expected_size))
-            if fixed_points is not None:
-                return np.asarray(fixed_points, dtype=np.float32).reshape(-1, 2)
-        obs = actor_batch[0]
-        if obs is None or obs.ndim < 2 or obs.shape[1] < 2:
-            return None
-        if self.obs_type == "pixels":
-            return None
-        obs_np = obs.detach().float().cpu().numpy().reshape(obs.shape[0], -1)
-        points = obs_np[:, :2]
-        if points.shape[0] == 0 or not np.isfinite(points).all():
-            return None
-        return points.astype(np.float32, copy=False)
-
-    def _save_pointmaze_actor_dataset_plot(self, step, points, filename, title):
-        if points is None:
-            return
-        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
-        if points.size == 0:
-            return
-
-        save_dir = os.path.join(os.getcwd(), "pointmaze_plots")
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, filename)
-
-        fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
-        try:
-            layout = self.nystrom_debug.maze_layout()
-        except Exception:
-            layout = None
-        if isinstance(layout, dict):
-            for x0, y0, width, height in layout["wall_rectangles"]:
-                ax.add_patch(
-                    patches.Rectangle(
-                        (x0, y0),
-                        width,
-                        height,
-                        facecolor="black",
-                        edgecolor="black",
-                        linewidth=0.5,
-                        zorder=1,
-                    )
-                )
-            lower = np.asarray(layout["maze_lower"], dtype=np.float32)
-            upper = np.asarray(layout["maze_upper"], dtype=np.float32)
-            ax.add_patch(
-                patches.Rectangle(
-                    (lower[0], lower[1]),
-                    upper[0] - lower[0],
-                    upper[1] - lower[1],
-                    fill=False,
-                    edgecolor="black",
-                    linewidth=1.2,
-                    zorder=2,
-                )
-            )
-            ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
-            ax.set_ylim(lower[1] - 0.1, upper[1] + 0.1)
-        else:
-            pad = 0.05 * max(float(np.ptp(points[:, 0])), float(np.ptp(points[:, 1])), 1.0)
-            ax.set_xlim(float(points[:, 0].min()) - pad, float(points[:, 0].max()) + pad)
-            ax.set_ylim(float(points[:, 1].min()) - pad, float(points[:, 1].max()) + pad)
-
-        ax.scatter(points[:, 0], points[:, 1], s=8, c="#ff7f0e", linewidths=0.0, alpha=0.9, zorder=8)
-        ax.scatter(points[0, 0], points[0, 1], marker="*", s=130, c="white", edgecolors="black", linewidths=0.9, zorder=9)
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.set_title(f"{title}\n{points.shape[0]} states")
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"PointMaze actor dataset plot saved to: {save_path}")
-
-    def _save_actor_full_dataset_plot(self, actor_data, step):
-        full_size = (
-            self._encoded_batch_size(actor_data.full)
-            if isinstance(actor_data, EncodedActorUpdateData)
-            else actor_data.full[0].shape[0]
-        )
-        points = self._xy_points_from_actor_batch(actor_data.full, expected_size=full_size)
-        self._save_pointmaze_actor_dataset_plot(
-            step,
-            points,
-            f"step_{step}_actor_full_dataset.png",
-            "PointMaze actor full dataset",
-        )
-
-    def _save_actor_nystrom_subsample_plot(self, actor_data, step):
-        if actor_data.subsample is None:
-            return
-        subsample_size = (
-            self._encoded_batch_size(actor_data.subsample)
-            if isinstance(actor_data, EncodedActorUpdateData)
-            else actor_data.subsample[0].shape[0]
-        )
-        points = self._xy_points_from_actor_batch(actor_data.subsample, expected_size=subsample_size)
-        self._save_pointmaze_actor_dataset_plot(
-            step,
-            points,
-            f"step_{step}_nystrom_subsamples.png",
-            f"PointMaze Nyström subsamples ({self.subsampling_strategy})",
-        )
-
-    def _synthetic_actor_subsample_batch(self):
-        return self.nystrom_debug.fixed_actor_batch(self)
-
     def _encoded_fifo_actor_update_data(self, replay_buffer):
         if not self._update_encoded_actor_fifo(replay_buffer):
             return None
@@ -1572,8 +1241,8 @@ class RoverAgent:
         # Nyström uses the whole encoded FIFO as support and a smaller landmark set.
         count = self._nystrom_subsample_count()
         full, rewards = self._all_encoded_actor_data(include_first=True)
-        if self.nystrom_synthetic_subsamples:
-            subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
+        if self.debug_manager is not None and self.debug_manager.nystrom_synthetic_subsamples:
+            subsample, subsample_rewards = self.debug_manager.synthetic_encoded_subsample()
             subsample_source = "fixed PointMaze Nyström landmarks"
         else:
             subsample, subsample_rewards = self._sample_encoded_actor_data(
@@ -1594,8 +1263,8 @@ class RoverAgent:
 
     def _replay_actor_subsample_batch(self, replay_iter, full_batch, replay_buffer):
         count = self._nystrom_subsample_count()
-        if self.nystrom_synthetic_subsamples:
-            return self._synthetic_actor_subsample_batch()
+        if self.debug_manager is not None and self.debug_manager.nystrom_synthetic_subsamples:
+            return self.debug_manager.synthetic_raw_subsample()
         if count >= full_batch[0].shape[0]:
             return full_batch
         return self._load_actor_subsample_from_replay_iter(
@@ -1625,7 +1294,7 @@ class RoverAgent:
             subsample=self._replay_actor_subsample_batch(replay_iter, full_batch, replay_buffer),
             source=(
                 "replay full support + fixed PointMaze Nyström landmarks"
-                if self.nystrom_synthetic_subsamples
+                if self.debug_manager is not None and self.debug_manager.nystrom_synthetic_subsamples
                 else f"replay full support + replay Nyström subsample of subsamples={self.subsamples}"
             ),
         )
@@ -1637,8 +1306,8 @@ class RoverAgent:
         replay. If subsamples is None, the object carries only the full actor
         batch and update_actor is used. Otherwise it also carries Nyström data.
         """
-        if self.debug_fixed_dataset_updates:
-            return self._fixed_actor_update_data()
+        if self.debug_manager is not None and self.debug_manager.debug_fixed_dataset_updates:
+            return self.debug_manager.fixed_actor_update_data()
 
         encoded_data = self._encoded_fifo_actor_update_data(replay_buffer)
         if encoded_data is not None:
@@ -1674,12 +1343,9 @@ class RoverAgent:
 
     def _update_actor_from_data(self, actor_data, step):
         self._log_actor_update_data(actor_data)
-        # DEBUG PLOTS: remove these two lines to disable actor dataset dumps.
-        self._save_actor_full_dataset_plot(actor_data, step)
-        self._save_actor_nystrom_subsample_plot(actor_data, step)
 
         if isinstance(actor_data, EncodedActorUpdateData):
-            return self.update_actor_nystrom(
+            metrics = self.update_actor_nystrom(
                 None,
                 None,
                 None,
@@ -1690,98 +1356,25 @@ class RoverAgent:
                 encoded_sub=actor_data.subsample,
             )
 
-        obs, action, next_obs, reward = actor_data.full
-        sub_obs = sub_action = sub_next_obs = sub_reward = None
-        if actor_data.subsample is not None:
-            sub_obs, sub_action, sub_next_obs, sub_reward = actor_data.subsample
-        return self.update_actor_nystrom(
-            obs,
-            action,
-            next_obs,
-            step=step,
-            rewards=reward,
-            sub_obs=sub_obs,
-            sub_action=sub_action,
-            sub_next_obs=sub_next_obs,
-            sub_rewards=sub_reward,
-        )
-
-    def _build_debug_visualizer_batch(self, obs, max_observations=2000):
-        if obs is None:
-            return None, None
-
-        max_observations = min(max_observations, obs.shape[0])
-        visualizer_obs = obs[:max_observations]
-        with torch.no_grad():
-            visualizer_z = self._encode_with_module(
-                self.policy_encoder,
-                visualizer_obs,
-                project=True,
+        else:
+            obs, action, next_obs, reward = actor_data.full
+            sub_obs = sub_action = sub_next_obs = sub_reward = None
+            if actor_data.subsample is not None:
+                sub_obs, sub_action, sub_next_obs, sub_reward = actor_data.subsample
+            metrics = self.update_actor_nystrom(
+                obs,
+                action,
+                next_obs,
+                step=step,
+                rewards=reward,
+                sub_obs=sub_obs,
+                sub_action=sub_action,
+                sub_next_obs=sub_next_obs,
+                sub_rewards=sub_reward,
             )
-        return visualizer_obs, visualizer_z
-
-    def _compute_mean_action_probs_deviation(self, action_probs: np.ndarray) -> float:
-        """
-        Compute mean deviation of action probabilities from uniform distribution.
-        
-        Args:
-            action_probs: [batch_size, n_actions] action probabilities from current policy
-            
-        Returns:
-            Mean absolute deviation from uniform (1/n_actions)
-        """
-        uniform_prob = 1.0 / self.n_actions
-        # Average over batch, then compute mean absolute deviation across actions
-        mean_probs = np.mean(action_probs, axis=0)  # [n_actions]
-        deviation = np.mean(np.abs(mean_probs - uniform_prob))
-        return deviation
-
-    def plot_policy_deviation_history(self, save_dir: str = './policy_plots'):
-        """
-        Plot cumulative history of policy deviation from uniform distribution.
-        
-        Args:
-            save_dir: Directory to save the plot
-        """
-        if len(self.policy_deviation_history) == 0:
-            print("No policy deviation history to plot yet")
-            return
-        
-        os.makedirs(save_dir, exist_ok=True)
-        
-        steps, deviations = zip(*self.policy_deviation_history)
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        ax.plot(steps, deviations, color='blue', linewidth=2, alpha=0.8, label='Policy Deviation')
-        ax.axhline(0, color='green', linestyle='--', linewidth=1.5, label='Uniform Policy', alpha=0.7)
-        
-        # Theoretical maximum (when policy is deterministic on one action)
-        max_deviation = (self.n_actions - 1) / self.n_actions
-        ax.axhline(max_deviation, color='red', linestyle='--', linewidth=1.5, 
-                   label=f'Deterministic Policy ({max_deviation:.3f})', alpha=0.7)
-        
-        ax.set_xlabel('Training Steps', fontsize=12)
-        ax.set_ylabel('Mean |P(a) - 1/|A||', fontsize=12)
-        ax.set_title('Policy Concentration Over Time\n(Deviation from Uniform Distribution)', 
-                     fontsize=14, fontweight='bold')
-        ax.legend(loc='best', fontsize=10)
-        ax.grid(True, alpha=0.3)
-        
-        # Add current value annotation
-        if len(deviations) > 0:
-            current_val = deviations[-1]
-            ax.text(0.02, 0.98, f'Current: {current_val:.4f}', 
-                    transform=ax.transAxes, fontsize=11,
-                    verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
-        
-        plt.tight_layout()
-        save_path = os.path.join(save_dir, 'policy_deviation_history.png')
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Policy deviation plot saved to: {save_path}")
+        if self.debug_manager is not None:
+            self.debug_manager.actor_data_updated(actor_data, step)
+        return metrics
 
     def aug_and_encode(self, obs, project=False):
         obs = self.aug(obs)
@@ -1792,49 +1385,9 @@ class RoverAgent:
         else:
             return self.encoder(obs)
 
-    def _debug_visualizer_text(self, step) -> str:
-        return (
-            f"Step: {step}\n"
-            f"γ = {self.discount}\n"
-            f"η = {self.current_eta}\n"
-            f"λ = {self.lambda_reg}\n"
-            f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
-            f"PMD steps = {self.pmd_steps}\n"
-            f"subsamples = {self.subsamples if self.subsamples is not None else 'all'}\n"
-            f"subsampling = {self.subsampling_strategy}\n"
-        )
-
-    def _run_debug_visualizers(self, metrics, obs, step):
-        if self.debug_visualizer is None:
-            return metrics
-
-        visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
-        metrics.update(
-            self.debug_visualizer.save(
-                step=step,
-                obs_batch=visualizer_obs,
-                z_batch=self._unique_rows(visualizer_z),
-                param_text=self._debug_visualizer_text(step),
-            )
-        )
-
-        if len(self.current_action_probs) == 0:
-            return metrics
-
-        current_action_probs = np.array(self.current_action_probs)
-        mean_deviation = self._compute_mean_action_probs_deviation(current_action_probs)
-        mean_probs = np.mean(current_action_probs, axis=0)
-
-        self.policy_deviation_history.append((step, mean_deviation))
-        self.action_probs_history.append((step, mean_probs))
-        self.current_action_probs = []
-
-        metrics['policy_deviation_from_uniform'] = mean_deviation
-        print(
-            f"Policy deviation from uniform: {mean_deviation:.4f} "
-            f"(0=uniform, {(self.n_actions - 1) / self.n_actions:.3f}=deterministic)"
-        )
-        self.plot_policy_deviation_history(save_dir=os.path.join(os.getcwd(), 'policy_plots'))
+    def _run_debug_manager(self, metrics, step):
+        if self.debug_manager is not None:
+            return self.debug_manager.update(metrics, step)
         return metrics
 
     def update(self, replay_iter, step, replay_buffer=None):
@@ -1846,11 +1399,10 @@ class RoverAgent:
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch, self.device)
-        if self.debug_fixed_dataset_updates:
-            obs, action, next_obs, reward = self.nystrom_debug.fixed_encoder_batch(self)
+        if self.debug_manager is not None and self.debug_manager.debug_fixed_dataset_updates:
+            obs, action, next_obs, reward = self.debug_manager.fixed_encoder_batch()
 
-        if self.use_tb or self.use_wandb:
-            metrics['batch_reward'] = reward.mean().item()
+        metrics['batch_reward'] = reward.mean().item()
         if self.embeddings:
             metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
@@ -1869,6 +1421,6 @@ class RoverAgent:
                 replay_buffer=replay_buffer,
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
-            metrics = self._run_debug_visualizers(metrics, obs, step)
-        # exit(0)  # TEMP DEBUG: remove this line to allow training to continue after first actor update
+            metrics = self._run_debug_manager(metrics, step)
+
         return metrics

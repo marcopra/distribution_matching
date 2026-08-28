@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom
+  - /agent: rover_nystrom_gridworld
   - /env: gridworld/multiplerooms5_4x4_0
   # - override hydra/launcher: submitit_local
   

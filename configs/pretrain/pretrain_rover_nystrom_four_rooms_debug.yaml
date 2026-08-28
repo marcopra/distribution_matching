@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_gridworld_debug
+  - /agent: rover_nystrom_gridworld
   - /env: gridworld/multiplerooms5_4x4_2.yaml
   - _self_
 
@@ -51,16 +51,18 @@ experiment: exp
 
 agent:
   subsamples: 1000
-  nystrom_synthetic_subsamples: false
-  synthetic_dataset_exclude_state_idxs: []
-  synthetic_dataset_exclusion_mode: one_action
-  synthetic_dataset_excluded_action: 0
-  synthetic_subsample_exclude_state_idxs: []
-  synthetic_subsample_exclusion_mode: all_actions
-  synthetic_subsample_excluded_action: 0
-  debug_fixed_dataset_updates: false
+  debug: true
+  debug_config:
+    nystrom_synthetic_subsamples: false
+    synthetic_dataset_exclude_state_idxs: []
+    synthetic_dataset_exclusion_mode: one_action
+    synthetic_dataset_excluded_action: 0
+    synthetic_subsample_exclude_state_idxs: []
+    synthetic_subsample_exclusion_mode: all_actions
+    synthetic_subsample_excluded_action: 0
+    debug_fixed_dataset_updates: false
   kernel_type: inner_product
-  subsampling_strategy: reverse_gamma_h
+  subsampling_strategy: random
   batch_size_actor: 5000
   embeddings: false
   lr_actor: 1000
@@ -77,18 +79,10 @@ hydra:
     dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
     subdir: ${hydra.job.num}
 # python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=random
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=reverse_gamma_h
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=gamma_h
 
 # python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=random
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=reverse_gamma_h
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=gamma_h
 
 
 # python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=random
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=reverse_gamma_h
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=gamma_h
 
 # python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=random
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=reverse_gamma_h
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=gamma_h

@@ -1,0 +1,6 @@
+# @package agent.debug_config
+domain: generic
+debug_fixed_dataset_updates: false
+nystrom_synthetic_subsamples: false
+policy_plot_dir: policy_plots
+

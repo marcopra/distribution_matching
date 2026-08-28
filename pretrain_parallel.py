@@ -11,6 +11,7 @@ os.environ['MUJOCO_GL'] = 'egl'
 
 from pathlib import Path
 import inspect
+from contextlib import nullcontext
 
 import hydra
 from omegaconf import OmegaConf
@@ -171,10 +172,6 @@ class Workspace:
 
         self.num_envs = int(getattr(self.cfg, "num_envs", 1))
         self.base_seed = int(getattr(self.cfg, "base_seed", self.cfg.seed))*self.num_envs
-        self.parallel_attach_eval_env_for_debug = bool(
-            getattr(self.cfg, "parallel_attach_eval_env_for_debug", False)
-        )
-
         self.train_env = gym_env.make_async_vector_env(
             self.num_envs,
             self.base_seed,
@@ -221,7 +218,7 @@ class Workspace:
         meta_specs = self.agent.get_meta_specs()
         time_step = self.eval_env.reset()
 
-        if self.parallel_attach_eval_env_for_debug and hasattr(self.agent, 'insert_env'):
+        if bool(getattr(self.agent, 'debug', False)) and hasattr(self.agent, 'insert_env'):
             self.agent.insert_env(self.eval_env)
 
         # create replay buffer
@@ -715,12 +712,16 @@ class Workspace:
         stash_attr(agent, 'gridworld_visualizer')
         stash_attr(agent, 'domain_visualizer')
 
-        debug_visualizer = getattr(agent, '__dict__', {}).get('debug_visualizer', None)
-        stash_attr(debug_visualizer, 'domain_visualizer')
+        debug_manager = getattr(agent, 'debug_manager', None)
+        debug_context = (
+            debug_manager.detached_for_snapshot()
+            if debug_manager is not None else nullcontext()
+        )
 
         try:
-            with snapshot.open('wb') as f:
-                torch.save(payload, f)
+            with debug_context:
+                with snapshot.open('wb') as f:
+                    torch.save(payload, f)
         finally:
             for obj, attr, value in reversed(restored_refs):
                 setattr(obj, attr, value)

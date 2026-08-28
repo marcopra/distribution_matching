@@ -4,9 +4,6 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from sampling import sample_time_steps
-
-
 class EncodedTransitionFIFO:
     """FIFO storage for actor-ready encoded transitions.
 
@@ -144,7 +141,7 @@ class EncodedTransitionFIFO:
         return encoded, torch.cat(trajectory_ids), torch.cat(trajectory_steps)
 
     @staticmethod
-    def _estimate_gaussian_bandwidth(features, multiplier, max_points=1000):
+    def _estimate_gaussian_bandwidth(features, max_points=1000):
         """Estimate median-distance bandwidth from a bounded candidate subset."""
         features = features.detach().to(device="cpu", dtype=torch.float32).reshape(features.shape[0], -1)
         if features.shape[0] > max_points:
@@ -152,7 +149,7 @@ class EncodedTransitionFIFO:
         distances = torch.pdist(features, p=2)
         distances = distances[distances > 0]
         median = 1.0 if distances.numel() == 0 else float(torch.median(distances).item())
-        return max(median * float(multiplier), 1e-12)
+        return max(median, 1e-12)
 
     @staticmethod
     def _pivoted_cholesky_indices(
@@ -270,7 +267,6 @@ class EncodedTransitionFIFO:
         tolerance,
         kernel_type,
         kernel_bandwidth,
-        kernel_bandwidth_mult,
         show_progress,
     ):
         if size <= 0:
@@ -322,10 +318,7 @@ class EncodedTransitionFIFO:
                 if bandwidth <= 0.0:
                     raise ValueError("kernel_bandwidth must be positive when set")
             else:
-                multiplier = 1.0 if kernel_bandwidth_mult is None else float(kernel_bandwidth_mult)
-                if multiplier <= 0.0:
-                    raise ValueError("kernel_bandwidth_mult must be positive when set")
-                bandwidth = self._estimate_gaussian_bandwidth(features, multiplier)
+                bandwidth = self._estimate_gaussian_bandwidth(features)
         else:
             raise ValueError(
                 "pivoted Cholesky supports kernel_type=inner_product or gaussian"
@@ -352,13 +345,11 @@ class EncodedTransitionFIFO:
         size,
         device,
         strategy="random",
-        gamma=0.99,
         include_first=True,
         candidate_multiplier=5.0,
         cholesky_tolerance=1e-6,
         kernel_type="inner_product",
         kernel_bandwidth=None,
-        kernel_bandwidth_mult=None,
         cholesky_progress=True,
     ):
         strategy = str(strategy).lower()
@@ -382,58 +373,9 @@ class EncodedTransitionFIFO:
                 cholesky_tolerance,
                 kernel_type,
                 kernel_bandwidth,
-                kernel_bandwidth_mult,
                 cholesky_progress,
             )
-        if strategy not in ("gamma_h", "reverse_gamma_h"):
-            raise ValueError(
-                "strategy must be one of: random, gamma_h, reverse_gamma_h, pivoted_cholesky"
-            )
-        if size <= 0:
-            raise ValueError("sample size must be positive")
-
-        encoded, trajectory_ids, _ = self._all_with_trajectory_metadata()
-        total = int(trajectory_ids.numel())
-        remaining = int(size) - (1 if include_first and self._first is not None else 0)
-        if remaining < 0:
-            remaining = 0
-
-        boundary = torch.ones(total, dtype=torch.bool)
-        boundary[1:] = trajectory_ids[1:] != trajectory_ids[:-1]
-        starts = torch.nonzero(boundary, as_tuple=False).reshape(-1)
-        ends = torch.cat([starts[1:], torch.tensor([total], dtype=torch.long)])
-        horizons = ends - starts - 1
-
-        chosen_groups = np.random.randint(0, int(starts.numel()), size=remaining)
-        chosen_groups_t = torch.as_tensor(chosen_groups, dtype=torch.long)
-        chosen_horizons = horizons[chosen_groups_t].numpy()
-        sampled_t = sample_time_steps(
-            gamma,
-            remaining,
-            horizon=chosen_horizons,
-            rng=np.random,
-        ) if remaining else np.empty(0, dtype=np.int64)
-        selected_t = chosen_horizons - sampled_t if strategy == "reverse_gamma_h" else sampled_t
-        selected = starts[chosen_groups_t] + torch.as_tensor(selected_t, dtype=torch.long)
-
-        if include_first and self._first is not None:
-            selected = torch.cat([torch.zeros(1, dtype=torch.long), selected])
-            sampled_times = np.concatenate(([self._first_trajectory_step], selected_t))
-            sampled_horizons = np.concatenate(([0], chosen_horizons))
-            sampled_trajectories = np.concatenate((
-                [self._first_trajectory_id],
-                trajectory_ids[starts[chosen_groups_t]].numpy(),
-            ))
-        else:
-            sampled_times = selected_t
-            sampled_horizons = chosen_horizons
-            sampled_trajectories = trajectory_ids[starts[chosen_groups_t]].numpy()
-
-        self.last_sampled_time_steps = np.asarray(sampled_times, dtype=np.int64)
-        self.last_sampled_horizons = np.asarray(sampled_horizons, dtype=np.int64)
-        self.last_sampled_trajectory_ids = np.asarray(sampled_trajectories, dtype=np.int64)
-        sampled = self._index(encoded, selected)
-        return {key: value.to(device) for key, value in sampled.items()}
+        raise ValueError("strategy must be one of: random, pivoted_cholesky")
 
     def sample(self, size, device, include_first=True):
         if size <= 0:

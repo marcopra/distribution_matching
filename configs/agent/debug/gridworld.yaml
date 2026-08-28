@@ -1,0 +1,12 @@
+# @package agent.debug_config
+domain: gridworld
+debug_fixed_dataset_updates: false
+nystrom_synthetic_subsamples: false
+synthetic_dataset_exclude_state_idxs: []
+synthetic_dataset_exclusion_mode: one_action
+synthetic_dataset_excluded_action: 0
+synthetic_subsample_exclude_state_idxs: []
+synthetic_subsample_exclusion_mode: one_action
+synthetic_subsample_excluded_action: 0
+policy_plot_dir: policy_plots
+gridworld_plot_dir: gridworld_plots

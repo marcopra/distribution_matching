@@ -1,0 +1,6 @@
+# @package agent
+defaults:
+  - rover_nystrom
+  - override debug@debug_config: pointmaze
+  - _self_
+

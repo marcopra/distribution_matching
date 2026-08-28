@@ -25,11 +25,11 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 
 logger.addHandler(handler)
-from agent.rover_matchers import DistributionMatcher
-from agent.rover_networks import CNNEncoder, Encoder, ProjectSA
-from agent.rover_visualization.exploration import ExplorationVisualizer
-from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
-from agent.rover_visualization.suite import build_debug_visualizer_suite
+from agent.rover_utils.matchers import DistributionMatcher
+from agent.rover_utils.networks import CNNEncoder, Encoder, ProjectSA
+from agent.rover_utils.visualization.exploration import ExplorationVisualizer
+from agent.rover_utils.visualization.gridworld import EmbeddingDistributionVisualizerV2
+from agent.rover_utils.visualization.suite import build_debug_visualizer_suite
 
 # ============================================================================
 # Main Agent

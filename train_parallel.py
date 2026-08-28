@@ -25,7 +25,7 @@ from replay_buffer_parallel import ReplayBufferStorageParallel, make_replay_load
 from video import TrainVideoRecorder, VideoRecorder
 import ale_py
 from omegaconf import open_dict
-from agent.rover_visualization.domains import save_maze_trajectory_overlay_plot
+from agent.rover_utils.visualization.domains import save_maze_trajectory_overlay_plot
 
 
 torch.backends.cudnn.benchmark = True

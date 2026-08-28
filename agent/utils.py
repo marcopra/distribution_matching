@@ -655,6 +655,39 @@ class PointMazeNystromDebugHelper:
         self._last_grid_spacing = grid_spacing
         return selected.astype(np.float32, copy=False)
 
+    def build_policy_grid_points(self, n_points: int) -> np.ndarray:
+        """Return ordered, equally spaced feasible probes plus exact start."""
+        if n_points <= 0:
+            raise ValueError("PointMaze policy grid requires a positive number of points.")
+
+        layout = self.maze_layout()
+        margin = max(self.border_margin, 0.0)
+        lower = layout["maze_lower"].astype(np.float32, copy=False) + margin
+        upper = layout["maze_upper"].astype(np.float32, copy=False) - margin
+        if np.any(upper <= lower):
+            lower = layout["maze_lower"].astype(np.float32, copy=False)
+            upper = layout["maze_upper"].astype(np.float32, copy=False)
+            margin = 0.0
+
+        points, _ = self._exact_feasible_grid_candidates(
+            lower,
+            upper,
+            layout["wall_rectangles"],
+            layout["walkable_rectangles"],
+            margin,
+            n_points,
+            anchor=lower,
+        )
+        order = np.lexsort((points[:, 0], points[:, 1]))
+        points = points[order]
+
+        start = self._fixed_start_xy()
+        if start is not None:
+            start = np.asarray(start, dtype=np.float32).reshape(1, 2)
+            matches = np.all(np.isclose(points, start, atol=1e-5), axis=1)
+            points = np.concatenate([points[~matches], start], axis=0)
+        return points.astype(np.float32, copy=False)
+
     def _landmark_transition(self, agent, xy, action_idx):
         if not self._has_point_env():
             step_from_position = self._env_method("step_from_position")

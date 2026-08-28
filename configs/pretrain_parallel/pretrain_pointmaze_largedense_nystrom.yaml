@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_pointmaze
   - /env: pointmaze/pointmaze_largedense_goal_1
   - _self_
 
@@ -20,8 +20,6 @@ update_actor_after_critic_steps: 0
 num_envs: 4
 base_seed: ${seed}
 async_vector_env: true
-# Enables legacy PointMaze debug images in pointmaze_plots/ at actor updates.
-parallel_attach_eval_env_for_debug: true
 
 num_train_frames: 1_000_000
 num_seed_frames: 10_000
@@ -58,12 +56,8 @@ agent:
   batch_size_actor: 16000
   lambda_reg: 1e-6
   encoded_fifo_capacity: 100000
-  nystrom_exact_grid: false
-  nystrom_synthetic_subsamples: false
-  debug_fixed_dataset_updates: false
   subsampling_strategy: pivoted_cholesky
   kernel_bandwidth: null
-  kernel_bandwidth_mult: 1.0
   sink_schedule: "linear(0.0,0.005,500000)"
 
 seed: 1

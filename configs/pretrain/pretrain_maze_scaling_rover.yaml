@@ -3,7 +3,7 @@
 # Local scaling experiment for Rover on 108/200/500-state mazes.
 # Sweep environments from CLI; see commands at bottom.
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_gridworld
   - /env: gridworld/maze_108_seed7_env
   - _self_
 

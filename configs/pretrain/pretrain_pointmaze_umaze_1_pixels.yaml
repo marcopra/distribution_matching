@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /agent: rover_nystrom_pointmaze_debug
+  - /agent: rover_nystrom_pointmaze
   - /env: pointmaze/pointmaze_umaze_goal_1
   - _self_
   # - override hydra/launcher: submitit_local
@@ -50,11 +50,12 @@ agent:
   pca_truncation: 4500
   compute_dtype: float64
   sink_schedule: 0.8
-  nystrom_synthetic_subsamples: true
-  debug_fixed_dataset_updates: true
+  debug: true
+  debug_config:
+    nystrom_synthetic_subsamples: true
+    debug_fixed_dataset_updates: true
+    nystrom_exact_grid: true
   kernel_bandwidth: null
-  kernel_bandwidth_mult: 0.3
-  nystrom_exact_grid: true
   subsamples: 8000
   lambda_reg: 1e-6
   batch_size_actor: 8000
@@ -94,5 +95,3 @@ hydra:
   #   mem_gb: 160
   #   nodes: 1
   #   submitit_folder: ./exp_sweep_parallel/${now:%Y.%m.%d}/${now:%H%M}_${task_name}_${experiment}/.slurm
-
-
