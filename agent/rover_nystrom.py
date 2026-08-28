@@ -527,7 +527,7 @@ class RoverAgent:
         # Compute action probabilities
         action_probs = self.compute_action_probs(obs)
         self.debug_manager.record_action_probs(action_probs) if self.debug_manager is not None else None  # Store for visualization
-        # print(f"Step {step}: Action probabilities: {action_probs}")
+
         # Sample action
         return np.random.choice(self.n_actions, p=action_probs)
 
@@ -653,7 +653,6 @@ class RoverAgent:
         self.encoder_scheduler.step()
 
         # Print losses
-        logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
         metrics['transition_loss'] = loss.item()
         metrics['contrastive_loss'] = contrastive_loss.item()
         metrics['curl_loss'] = curl_loss.item()
@@ -674,6 +673,7 @@ class RoverAgent:
                              encoded_sub=None):
         """Update policy using Projected Mirror Descent and Nystrom Approximation."""
         metrics = dict()
+
         if encoded_full is not None or encoded_sub is not None:
             if encoded_full is None:
                 raise ValueError("Nyström actor update requires encoded_full when encoded_sub is provided.")
