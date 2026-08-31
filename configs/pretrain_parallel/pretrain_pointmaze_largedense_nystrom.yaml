@@ -55,9 +55,8 @@ agent:
   subsamples: 16000
   batch_size_actor: 16000
   lambda_reg: 1e-6
-  encoded_fifo_capacity: 100000
-  subsampling_strategy: pivoted_cholesky
-  kernel_bandwidth: null
+  kernel:
+    subsampling_strategy: pivoted_cholesky
   sink_schedule: "linear(0.0,0.005,500000)"
 
 seed: 1

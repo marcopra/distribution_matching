@@ -63,11 +63,12 @@ agent:
   batch_size_actor: 10_000
   subsamples: 4_000
   pca_truncation: 2000
-  subsampling_strategy: pivoted_cholesky
-  kernel_type: inner_product
-  nystrom_candidate_multiplier: 5.0
-  nystrom_cholesky_tolerance: 1e-6
-  nystrom_cholesky_progress: true
+  kernel:
+    name: inner_product
+    subsampling_strategy: pivoted_cholesky
+    candidate_multiplier: 5.0
+    cholesky_tolerance: 1e-6
+    cholesky_progress: true
 
 seed: 1
 device: cuda:0

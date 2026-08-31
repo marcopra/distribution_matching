@@ -29,12 +29,12 @@ sink_schedules=(
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 kernel_args=(
-    "agent.kernel_type=${KERNEL_TYPE}"
+    "agent.kernel.name=${KERNEL_TYPE}"
 )
 if [[ "$KERNEL_TYPE" == "gaussian" ]]; then
-    kernel_args+=("agent.kernel_bandwidth_mult=${KERNEL_BANDWIDTH_MULTIPLIER}")
+    kernel_args+=("agent.kernel.bandwidth=${KERNEL_BANDWIDTH_MULTIPLIER}")
 else
-    kernel_args+=("agent.kernel_bandwidth_mult=null")
+    : # Inner-product kernel has no bandwidth.
 fi
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
@@ -48,8 +48,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     "${kernel_args[@]}" \
     agent.linear_projection="${LINEAR_PROJECTION}" \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
-    agent.subsampling_strategy=pivoted_cholesky \
+    agent.kernel.subsampling_strategy=pivoted_cholesky \
     agent.lambda_reg=1e-4 \
-    agent.encoded_fifo_capacity=1000000 \
     wandb_project=montezouma_hp \
     agent.update_every_steps=1000

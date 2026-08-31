@@ -1,11 +1,10 @@
 # @package agent
 defaults:
   - debug@debug_config: generic
-  - kernel@kernel: gaussian
   - _self_
 
-_target_: agent.rover_nystrom.RoverAgent
-name: rover_nystrom
+_target_: agent.rover_nystrom_legacy.RoverAgent
+name: rover_nystrom_legacy
 obs_type: ???
 obs_shape: ???
 grayscale: ${grayscale}
@@ -16,12 +15,18 @@ lambda_reg: 1e-6
 lr_T: 1e-4
 batch_size: 1024
 batch_size_actor: 10000
-encoding_fifo: true
 subsamples: 4000
 pca_truncation: 500
+subsampling_strategy: random
+nystrom_candidate_multiplier: 5.0
+nystrom_cholesky_tolerance: 1e-6
+nystrom_cholesky_progress: true
+encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
 encoded_fifo_cuda_oom_splits: 4
 max_pending_transitions: null
+kernel_type: gaussian
+kernel_bandwidth: null
 nstep: 1
 lr_encoder: 1e-4
 curl: false
@@ -34,8 +39,10 @@ total_train_steps: ${num_train_frames}
 update_every_steps: 100
 update_actor_every_steps: 1500
 pmd_steps: 100
-pmd_eta_mode: backtracking # [fixed, backtracking]
+pmd_eta_mode: backtracking
 pmd_best_iterate: true
+pmd_grad_clip_norm: 0.0
+pmd_adagrad_eps: 1e-8
 pmd_eta_min: 1e-8
 pmd_eta_max: 1e8
 pmd_backtrack_factor: 0.25

@@ -9,6 +9,9 @@ import numpy as np
 from PIL import Image
 import torch
 
+from agent.rover_utils.actor_data import RawTransitions
+
+
 class GridWorldSyntheticData:
     """Build fixed state-action transitions from a discrete GridWorld."""
 
@@ -165,7 +168,8 @@ class GridWorldSyntheticData:
         next_obs = torch.as_tensor(self._observations(next_state_indices), dtype=torch.float32, device=self.agent.device)
         action = torch.as_tensor(actions, dtype=torch.long, device=self.agent.device)
         reward = torch.zeros((state_indices.size, 1), dtype=self.agent.compute_dtype, device=self.agent.device)
-        batch = self.agent._make_actor_batch(obs, action, next_obs, reward)
+        # Debug providers expose the same raw boundary as replay: (s, a, s', r).
+        batch = (obs, action, next_obs, reward)
         return batch, state_indices
 
     def full_actor_batch(self):
@@ -185,11 +189,11 @@ class GridWorldSyntheticData:
     def fixed_encoder_batch(self, agent):
         batch = self.full_actor_batch()
         size = min(int(agent.batch_size), batch[0].shape[0])
-        return agent._slice_actor_batch(batch, slice(0, size))
+        return tuple(field[:size] for field in batch)
 
     def encode_subsamples(self, agent):
+        """Encode fixed landmarks through the agent's normal encoder path."""
         agent._sync_policy_encoder()
         batch = self.subsample_actor_batch()
-        transitions = (batch[0], batch[1], batch[3], torch.ones_like(batch[3]), batch[2])
-        encoded = agent._encode_actor_transition_batch_with_retries(transitions)
-        return encoded, encoded.get("reward")
+        encoded = agent.transition_encoder.encode_raw(RawTransitions(*batch))
+        return encoded.tensors, encoded.reward

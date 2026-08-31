@@ -55,7 +55,6 @@ agent:
   pca_truncation: 4500
   compute_dtype: float64
   sink_schedule: linear(0.0, 0.8, 500_000)
-  kernel_bandwidth: null
   debug_config:
     debug_fixed_dataset_updates: false
     nystrom_exact_grid: false

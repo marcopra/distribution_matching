@@ -71,7 +71,8 @@ agent:
   pmd_eta_mode: backtracking
   compute_dtype: float64
   sink_schedule: 0.0
-  subsampling_strategy: random
+  kernel:
+    subsampling_strategy: random
   pca_truncation: 10000
   subsamples: 10000
   lambda_reg: 1e-6

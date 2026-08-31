@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from agent.utils import PointMazeNystromDebugHelper
+from agent.rover_utils.pointmaze_debug import PointMazeNystromDebugHelper
 from agent.rover_utils.types import EncodedActorUpdateData, RawActorUpdateData
 from agent.rover_utils.visualization.gridworld import EmbeddingDistributionVisualizerV2
 from agent.rover_utils.visualization.suite import RoverDebugVisualizerSuite

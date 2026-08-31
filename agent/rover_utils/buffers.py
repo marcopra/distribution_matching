@@ -141,17 +141,6 @@ class EncodedTransitionFIFO:
         return encoded, torch.cat(trajectory_ids), torch.cat(trajectory_steps)
 
     @staticmethod
-    def _estimate_gaussian_bandwidth(features, max_points=1000):
-        """Estimate median-distance bandwidth from a bounded candidate subset."""
-        features = features.detach().to(device="cpu", dtype=torch.float32).reshape(features.shape[0], -1)
-        if features.shape[0] > max_points:
-            features = features[torch.randperm(features.shape[0])[:max_points]]
-        distances = torch.pdist(features, p=2)
-        distances = distances[distances > 0]
-        median = 1.0 if distances.numel() == 0 else float(torch.median(distances).item())
-        return max(median, 1e-12)
-
-    @staticmethod
     def _pivoted_cholesky_indices(
         features,
         size,
@@ -313,12 +302,11 @@ class EncodedTransitionFIFO:
                 if "action" in candidates
                 else torch.argmax(candidates["E"], dim=1)
             )
-            if kernel_bandwidth is not None:
-                bandwidth = float(kernel_bandwidth)
-                if bandwidth <= 0.0:
-                    raise ValueError("kernel_bandwidth must be positive when set")
-            else:
-                bandwidth = self._estimate_gaussian_bandwidth(features)
+            if kernel_bandwidth is None:
+                raise ValueError("Gaussian pivoted Cholesky requires kernel_bandwidth")
+            bandwidth = float(kernel_bandwidth)
+            if bandwidth <= 0.0:
+                raise ValueError("kernel_bandwidth must be positive")
         else:
             raise ValueError(
                 "pivoted Cholesky supports kernel_type=inner_product or gaussian"

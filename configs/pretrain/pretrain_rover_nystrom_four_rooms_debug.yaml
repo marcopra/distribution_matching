@@ -61,8 +61,9 @@ agent:
     synthetic_subsample_exclusion_mode: all_actions
     synthetic_subsample_excluded_action: 0
     debug_fixed_dataset_updates: false
-  kernel_type: inner_product
-  subsampling_strategy: random
+  kernel:
+    name: inner_product
+    subsampling_strategy: random
   batch_size_actor: 5000
   embeddings: false
   lr_actor: 1000
@@ -78,11 +79,11 @@ hydra:
   sweep:
     dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${agent.name}_${experiment}
     subdir: ${hydra.job.num}
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=1000 agent.kernel.subsampling_strategy=random
 
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=2000 agent.kernel.subsampling_strategy=random
 
 
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=3000 agent.kernel.subsampling_strategy=random
 
-# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.subsampling_strategy=random
+# python pretrain.py -cn=pretrain/pretrain_rover_nystrom_four_rooms_debug agent.subsamples=4000 agent.kernel.subsampling_strategy=random

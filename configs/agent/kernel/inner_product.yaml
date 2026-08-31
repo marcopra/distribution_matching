@@ -1,0 +1,6 @@
+name: inner_product
+bandwidth: null
+subsampling_strategy: random # [random, pivoted_cholesky]
+candidate_multiplier: 5.0
+cholesky_tolerance: 1e-6
+cholesky_progress: true

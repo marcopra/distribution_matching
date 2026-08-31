@@ -65,7 +65,8 @@ agent:
   pmd_eta_mode: backtracking
   compute_dtype: float64
   sink_schedule: "linear(0.0, 0.001, 2_000_000)"
-  kernel_type: inner_product
+  kernel:
+    name: inner_product
   pca_truncation: 5000
   subsamples: 10000
   lambda_reg: 1e-6

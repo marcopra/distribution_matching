@@ -49,6 +49,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.nystrom_exact_grid=false \
     agent.subsamples="${SUBSAMPLE}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
-    agent.kernel_bandwidth=null \
-    agent.kernel_bandwidth_mult="${KERNEL_BANDWIDTH_MULTIPLIER}" \
+    agent.kernel.bandwidth="${KERNEL_BANDWIDTH_MULTIPLIER}" \
     "agent.sink_schedule='${SINK_SCHEDULE}'"

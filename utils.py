@@ -120,7 +120,6 @@ class KernelFunction:
         self,
         kernel_type="inner_product",
         bandwidth=None,
-        bandwidth_percentile=None,
     ):
         kernel_type = str(kernel_type or "inner_product").strip().lower()
         aliases = {
@@ -148,60 +147,22 @@ class KernelFunction:
 
         self.kernel_type = kernel_type
         self.bandwidth = None if bandwidth is None else float(bandwidth)
-        self.bandwidth_percentile = None if bandwidth_percentile is None else float(bandwidth_percentile)
-        self.bandwidth_fit_max_pairs = 16_000_000
+        if self.kernel_type in {"gaussian", "gaussian_chunked"} and self.bandwidth is None:
+            raise ValueError("bandwidth is required for gaussian kernels")
         self._kernel = kernels[kernel_type]
 
     def __call__(self, X, Y):
-        self.fit_bandwidth(X, Y)
         bandwidth = 1.0 if self.bandwidth is None else self.bandwidth
         return self._kernel(X, Y, bandwidth=bandwidth)
-
-    def reset_auto_bandwidth(self):
-        if self.bandwidth_percentile is not None:
-            self.bandwidth = None
-
-    def fit_bandwidth(self, X, Y):
-        if self.kernel_type == "gaussian":
-            self._maybe_fit_gaussian_bandwidth(X, Y)
-        return self.bandwidth
-
-    def _maybe_fit_gaussian_bandwidth(self, X, Y):
-        if self.bandwidth is not None or self.bandwidth_percentile is None:
-            return
-        X_detached = X.detach()
-        Y_detached = Y.detach()
-        total_pairs = int(X_detached.shape[0]) * int(Y_detached.shape[0])
-        if total_pairs <= self.bandwidth_fit_max_pairs:
-            distances = torch.sqrt(torch.clamp(pairwise_squared_distance(X_detached, Y_detached), min=0.0))
-            fit_source = f"all {total_pairs} pairwise distances"
-        else:
-            sample_size = min(self.bandwidth_fit_max_pairs, total_pairs)
-            x_idx = torch.randint(X_detached.shape[0], (sample_size,), device=X_detached.device)
-            y_idx = torch.randint(Y_detached.shape[0], (sample_size,), device=Y_detached.device)
-            distances = torch.linalg.vector_norm(X_detached[x_idx] - Y_detached[y_idx], ord=2, dim=1)
-            fit_source = f"{sample_size} sampled distances from {total_pairs} pairs"
-        distances = distances[distances > 0]
-        if distances.numel() == 0:
-            self.bandwidth = 1.0
-            return
-        percentile = min(max(self.bandwidth_percentile / 100.0, 0.0), 1.0)
-        self.bandwidth = float(torch.quantile(distances.flatten(), percentile).item())
-        print(
-            f"Fitted Gaussian kernel bandwidth={self.bandwidth:.6g} from "
-            f"percentile={self.bandwidth_percentile} using {fit_source} with l2 norm."
-        )
 
 
 def build_kernel_fn(
     kernel_type="inner_product",
     bandwidth=None,
-    bandwidth_percentile=None,
 ):
     return KernelFunction(
         kernel_type=kernel_type,
         bandwidth=bandwidth,
-        bandwidth_percentile=bandwidth_percentile,
     )
 
 

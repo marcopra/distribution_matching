@@ -54,7 +54,8 @@ agent:
     nystrom_exact_grid: true
     nystrom_synthetic_subsamples: true
     debug_fixed_dataset_updates: true
-  kernel_bandwidth: 0.2
+  kernel:
+    bandwidth: 0.2
   subsamples: 8000
   lambda_reg: 1e-6
   batch_size_actor: 8000

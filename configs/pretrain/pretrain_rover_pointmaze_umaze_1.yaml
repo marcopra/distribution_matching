@@ -49,7 +49,8 @@ agent:
   pca_truncation: 4500
   compute_dtype: float64
   sink_schedule: linear(0.0, 1.0, 100000)
-  kernel_bandwidth: 0.15
+  kernel:
+    bandwidth: 0.15
   debug_config:
     nystrom_exact_grid: true
   subsamples: 16000
