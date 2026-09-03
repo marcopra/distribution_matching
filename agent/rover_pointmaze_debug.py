@@ -41,7 +41,7 @@ def _resolve_torch_dtype(dtype):
 torch.set_default_dtype(_resolve_torch_dtype(os.environ.get("ROVER_COMPUTE_DTYPE", "float32")))
 
 logger = logging.getLogger("myapp")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 handler = logging.StreamHandler()
 handler.setLevel(logging.DEBUG)
