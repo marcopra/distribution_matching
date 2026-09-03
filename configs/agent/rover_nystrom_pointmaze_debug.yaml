@@ -1,5 +1,5 @@
 # @package agent
-_target_: agent.rover_nystrom_debug.RoverAgent
+_target_: agent.rover_pointmaze_debug.RoverAgent
 name: dist_matching
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
@@ -26,6 +26,7 @@ max_pending_transitions: null
 kernel_type: gaussian # [inner_product, gaussian, laplacian, dirac]
 kernel_bandwidth: null # fixed Gaussian bandwidth; null lets pivoted Cholesky fit candidates
 kernel_bandwidth_mult: null # candidate median-distance multiplier; null means 1.0
+whiten_representations: false # refit PCA whitening on full actor support at each actor update
 nystrom_grid_border_margin: 0.01
 nystrom_grid_oversample: 2.0
 nystrom_exact_grid: false

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Train PointMaze Rover encoders on fixed debug data and plot embeddings.
+"""Train PointMaze Rover encoders on one cached synthetic pixel dataset.
 
 Example
 -------
 python tests/diagnostics/pointmaze/sweep_pointmaze_encoder_embeddings.py \
-    --feature-dims 2 8 16 32 64 \
+    --feature-dims 16 32 64 128 \
     --updates 1000 \
-    --n-states 1000 \
+    --n-points 32000 \
     --batch-size 1024 \
     --device cuda
 """
@@ -40,7 +40,14 @@ from tqdm.rich import tqdm
 
 import gym_env
 import utils
-from agent.rover_nystrom_pointmaze_debug import RoverAgent
+from agent.rover_pointmaze_debug import RoverAgent
+from tests.diagnostics.pointmaze.synthetic_workflow_utils import (
+    arrays_to_tensors,
+    fixed_encoder_indices,
+    load_dataset,
+    save_dataset,
+    save_encoder_checkpoint,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,31 +55,66 @@ def parse_args() -> argparse.Namespace:
         description="Sweep PointMaze Rover encoder latent sizes on the fixed Nyström debug dataset."
     )
     parser.add_argument("--feature-dims", type=int, nargs="+", required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("tests/outputs/pointmaze/encoder_latent_sweep"))
-    parser.add_argument("--config-name", default="pretrain/pretrain_rover_pointmaze_umaze_1")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("tests/outputs/pointmaze/synthetic_workflow"),
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=None,
+        help="Shared cached dataset directory. Defaults to OUTPUT_DIR/dataset.",
+    )
+    parser.add_argument(
+        "--config-name",
+        default="pretrain_parallel/pretrain_pointmaze_umaze_1_pixels",
+    )
     parser.add_argument("--updates", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument(
-        "--n-states",
+        "--n-points",
         type=int,
-        default=1000,
-        help="Number of fixed reachable XY states. Dataset has n_states * n_actions transitions.",
+        default=32000,
+        help=(
+            "Requested total dataset transitions. Each reachable XY state contributes one "
+            "transition per action, so target XY states = n_points / n_actions. Equispaced "
+            "feasibility may adjust the final count slightly."
+        ),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--mode",
+        choices=("l1", "l2"),
+        default=None,
+        help="Encoder output normalization. Defaults to mode from agent config.",
+    )
+    parser.add_argument(
+        "--grayscale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Render one-channel observations by default; use --no-grayscale for RGB.",
+    )
+    parser.add_argument(
+        "--regenerate-dataset",
+        action="store_true",
+        help="Replace cached synthetic transitions. Default reuses and verifies them.",
+    )
     parser.add_argument("--checkpoint-fractions", type=float, nargs="+", default=[0.0, 0.25, 0.5, 1.0])
     parser.add_argument(
         "--save-every",
         type=int,
-        default=25,
-        help="Refresh metrics and figure every N encoder updates.",
+        default=0,
+        help="Refresh metrics and figures every N updates; 0 saves only checkpoints/final output.",
     )
     parser.add_argument("--border-margin", type=float, default=None)
     parser.add_argument("--oversample", type=float, default=None)
     parser.add_argument(
         "--exact-grid",
-        action="store_true",
-        help="Use exact feasible fixed-grid mode from PointMazeNystromDebugHelper.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use an equally spaced feasible XY lattice; enabled by default.",
     )
     parser.add_argument(
         "--max-plot-points",
@@ -158,7 +200,14 @@ def build_agent(cfg, env, feature_dim: int, args: argparse.Namespace) -> RoverAg
     obs_spec = gym_env.observation_spec(env)
     action_spec = gym_env.action_spec(env)
     action_shape = (action_spec.num_values,) if hasattr(action_spec, "num_values") else action_spec.shape
-    n_transitions = int(args.n_states) * int(action_shape[0])
+    n_actions = int(action_shape[0])
+    if hasattr(args, "n_points"):
+        n_transitions = int(args.n_points)
+    elif hasattr(args, "n_states"):
+        # Compatibility for PMD and cached/live diagnostic scripts importing this helper.
+        n_transitions = int(args.n_states) * n_actions
+    else:
+        raise AttributeError("build_agent requires args.n_points or args.n_states")
 
     agent_cfg = OmegaConf.to_container(cfg.agent, resolve=False)
     agent_cfg.pop("_target_", None)
@@ -203,10 +252,75 @@ def checkpoint_steps(updates: int, fractions: Sequence[float]) -> List[int]:
     return steps
 
 
-def fixed_encoder_tensors(agent: RoverAgent):
-    obs, action, next_obs, reward = agent.nystrom_debug.fixed_encoder_batch(agent)
-    full_obs, full_action, full_next_obs, full_reward = agent.nystrom_debug.fixed_actor_batch(agent)
-    return (obs, action, next_obs, reward), (full_obs, full_action, full_next_obs, full_reward)
+def create_shared_dataset(cfg, args: argparse.Namespace, feature_dim: int):
+    """Render fixed transitions once; later feature dimensions never rerender them."""
+    env = make_pretrain_env(cfg)
+    try:
+        env.reset(seed=int(args.seed))
+        agent = build_agent(cfg, env, feature_dim, args)
+        obs, action, reward, discount, next_obs = agent.nystrom_debug.build_subsample_batch(agent)
+        xy_points = np.asarray(agent.nystrom_debug.fixed_xy_points, dtype=np.float32).reshape(-1, 2)
+        stored_obs = obs.to(torch.uint8) if agent.obs_type == "pixels" else obs
+        stored_next_obs = next_obs.to(torch.uint8) if agent.obs_type == "pixels" else next_obs
+        arrays = {
+            "obs": stored_obs.detach().cpu().numpy(),
+            "action": action.detach().cpu().numpy(),
+            "reward": reward.detach().cpu().numpy(),
+            "discount": discount.detach().cpu().numpy(),
+            "next_obs": stored_next_obs.detach().cpu().numpy(),
+            "xy": xy_points,
+        }
+        metadata = {
+            "config_name": str(args.config_name),
+            "seed": int(args.seed),
+            "n_actions": int(agent.n_actions),
+            "requested_n_points": int(args.n_points),
+            "requested_n_states": int(round(args.n_points / agent.n_actions)),
+            "actual_n_states": int(xy_points.shape[0]),
+            "actual_n_points": int(stored_obs.shape[0]),
+            "obs_shape": list(agent.obs_shape),
+            "obs_type": str(agent.obs_type),
+            "grayscale": bool(agent.grayscale),
+            "resolution": int(cfg.resolution),
+            "frame_stack": int(cfg.frame_stack),
+            "action_repeat": int(cfg.action_repeat),
+            "exact_grid": bool(args.exact_grid),
+            "border_margin": args.border_margin,
+            "oversample": args.oversample,
+            "grid_stats": agent.nystrom_debug.fixed_plot_stats,
+        }
+        return arrays, metadata
+    finally:
+        env.close()
+
+
+def prepare_shared_dataset(cfg, args: argparse.Namespace):
+    dataset_dir = args.dataset_dir if args.dataset_dir is not None else args.output_dir / "dataset"
+    dataset_dir = dataset_dir.resolve()
+    dataset_file = dataset_dir / "transitions.npz"
+    if dataset_file.exists() and not args.regenerate_dataset:
+        arrays, metadata = load_dataset(dataset_dir)
+    else:
+        arrays, metadata = create_shared_dataset(cfg, args, int(args.feature_dims[0]))
+        metadata = save_dataset(dataset_dir, arrays, metadata)
+
+    expected = {
+        "config_name": str(args.config_name),
+        "seed": int(args.seed),
+        "requested_n_points": int(args.n_points),
+        "grayscale": bool(args.grayscale),
+    }
+    mismatches = [
+        f"{key}: cached={metadata.get(key)!r}, requested={value!r}"
+        for key, value in expected.items()
+        if metadata.get(key) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "Cached dataset does not match request; use --regenerate-dataset: "
+            + "; ".join(mismatches)
+        )
+    return arrays, metadata
 
 
 def update_encoders_with_metrics(agent: RoverAgent, obs, action, next_obs, reward) -> Dict[str, float]:
@@ -275,6 +389,45 @@ def tsne_projection(embeddings: np.ndarray, perplexity: float, seed: int) -> np.
 
 def save_metrics(path: Path, metrics_log: Dict[str, List[float]]) -> None:
     np.savez_compressed(path, **{key: np.asarray(value) for key, value in metrics_log.items()})
+
+
+def save_dataset_xy_figure(path: Path, xy_points: np.ndarray, metadata: dict) -> None:
+    """Save full generated XY lattice, without plot subsampling."""
+    xy_points = np.asarray(xy_points, dtype=np.float32).reshape(-1, 2)
+    if xy_points.shape[0] == 0:
+        raise ValueError("Cannot plot empty PointMaze XY dataset")
+    grid_stats = metadata.get("grid_stats") or {}
+    grid_spacing = grid_stats.get("grid_spacing") or {}
+    spacing_x = grid_spacing.get("x", float("nan"))
+    spacing_y = grid_spacing.get("y", float("nan"))
+
+    fig, ax = plt.subplots(figsize=(6.4, 6.0), constrained_layout=True)
+    marker_size = max(1.0, min(14.0, 24000.0 / xy_points.shape[0]))
+    ax.scatter(xy_points[:, 0], xy_points[:, 1], s=marker_size, linewidths=0, alpha=0.9)
+    ax.scatter(
+        xy_points[0, 0],
+        xy_points[0, 1],
+        marker="*",
+        s=130,
+        color="tab:red",
+        edgecolors="black",
+        linewidths=0.7,
+        label="first/start point",
+    )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(
+        "PointMaze generated dataset XY locations\n"
+        f"{xy_points.shape[0]} states × {metadata['n_actions']} actions = "
+        f"{xy_points.shape[0] * metadata['n_actions']} points; "
+        f"dx={spacing_x:.5g}, dy={spacing_y:.5g}"
+    )
+    ax.grid(alpha=0.18, linewidth=0.5)
+    ax.legend(loc="best")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_evolution_figure(
@@ -381,13 +534,19 @@ def write_config(path: Path, args: argparse.Namespace, feature_dim: int, n_actio
     payload = {
         "feature_dim": int(feature_dim),
         "n_actions": int(n_actions),
-        "requested_n_states": int(args.n_states),
+        "requested_n_points": int(args.n_points),
+        "requested_n_states": int(round(args.n_points / n_actions)),
         "actual_n_states": int(actual_n_states),
+        "actual_n_points": int(actual_n_states * n_actions),
         "transitions": int(actual_n_states * n_actions),
         "updates": int(args.updates),
         "batch_size": int(args.batch_size),
         "seed": int(args.seed),
         "device": str(args.device),
+        "mode": str(args.mode),
+        "dataset_dir": str(
+            (args.dataset_dir if args.dataset_dir is not None else args.output_dir / "dataset").resolve()
+        ),
         "config_name": str(args.config_name),
         "checkpoint_fractions": [float(value) for value in args.checkpoint_fractions],
         "save_every": int(args.save_every),
@@ -396,16 +555,23 @@ def write_config(path: Path, args: argparse.Namespace, feature_dim: int, n_actio
     path.write_text(json.dumps(payload, indent=2))
 
 
-def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int) -> None:
+def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int, arrays, dataset_metadata) -> None:
     env = make_pretrain_env(cfg)
     try:
-        env.reset()
+        utils.set_seed_everywhere(args.seed)
+        torch.manual_seed(args.seed)
+        env.reset(seed=int(args.seed))
         agent = build_agent(cfg, env, feature_dim, args)
         n_actions = int(agent.n_actions)
-        train_batch, full_batch = fixed_encoder_tensors(agent)
-        obs, action, next_obs, reward = train_batch
-        full_obs, _, _, _ = full_batch
-        xy_points = np.asarray(agent.nystrom_debug.fixed_xy_points, dtype=np.float32).reshape(-1, 2)
+        tensors = arrays_to_tensors(arrays, args.device, agent.compute_dtype)
+        indices = fixed_encoder_indices(tensors["obs"].shape[0], args.batch_size, n_actions)
+        index = torch.as_tensor(indices, dtype=torch.long, device=args.device)
+        obs = tensors["obs"].index_select(0, index)
+        action = tensors["action"].index_select(0, index)
+        next_obs = tensors["next_obs"].index_select(0, index)
+        reward = tensors["reward"].index_select(0, index)
+        full_obs = tensors["obs"]
+        xy_points = np.asarray(arrays["xy"], dtype=np.float32).reshape(-1, 2)
         if full_obs.shape[0] != xy_points.shape[0] * n_actions:
             raise RuntimeError(
                 f"Fixed dataset mismatch: full_obs={full_obs.shape[0]}, xy={xy_points.shape[0]}, n_actions={n_actions}"
@@ -458,6 +624,16 @@ def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int) -> None
                     n_actions=n_actions,
                     batch_size=args.batch_size,
                 )
+                save_encoder_checkpoint(
+                    experiment_dir / f"encoder_step_{step}.pt",
+                    agent.encoder,
+                    feature_dim=feature_dim,
+                    obs_shape=agent.obs_shape,
+                    mode=agent.mode,
+                    grayscale=agent.grayscale,
+                    dataset_checksum_value=dataset_metadata["checksum"],
+                    training_updates=step,
+                )
             if should_snapshot or should_refresh or step == args.updates:
                 save_metrics(metrics_path, metrics_log)
                 save_projection_figures(
@@ -469,19 +645,46 @@ def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int) -> None
                     feature_dim,
                     args,
                 )
+        save_encoder_checkpoint(
+            experiment_dir / "encoder.pt",
+            agent.encoder,
+            feature_dim=feature_dim,
+            obs_shape=agent.obs_shape,
+            mode=agent.mode,
+            grayscale=agent.grayscale,
+            dataset_checksum_value=dataset_metadata["checksum"],
+            training_updates=args.updates,
+        )
     finally:
         env.close()
 
 
 def main() -> None:
     args = parse_args()
+    if args.n_points <= 0:
+        raise ValueError("--n-points must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     utils.set_seed_everywhere(args.seed)
     torch.manual_seed(args.seed)
     cfg = compose_pretrain_cfg(args.config_name, args.seed)
+    cfg.grayscale = bool(args.grayscale)
+    if args.mode is not None:
+        cfg.agent.mode = str(args.mode)
+    else:
+        args.mode = str(cfg.agent.mode)
+    arrays, dataset_metadata = prepare_shared_dataset(cfg, args)
+    dataset_dir = (
+        args.dataset_dir if args.dataset_dir is not None else args.output_dir / "dataset"
+    ).resolve()
+    dataset_plot = dataset_dir / "dataset_xy_locations.png"
+    save_dataset_xy_figure(dataset_plot, arrays["xy"], dataset_metadata)
+    output_plot = args.output_dir.resolve() / "dataset_xy_locations.png"
+    if output_plot != dataset_plot:
+        save_dataset_xy_figure(output_plot, arrays["xy"], dataset_metadata)
+    print(f"Saved generated dataset XY plot to {dataset_plot} and {output_plot}")
 
     for feature_dim in args.feature_dims:
-        run_one_feature_dim(cfg, args, feature_dim)
+        run_one_feature_dim(cfg, args, feature_dim, arrays, dataset_metadata)
 
     print(f"Saved PointMaze encoder sweep outputs to {args.output_dir}")
 

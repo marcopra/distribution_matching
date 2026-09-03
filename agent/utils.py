@@ -383,10 +383,18 @@ class PointMazeNystromDebugHelper:
         points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
         if points.shape[0] < 2:
             return np.empty((0,), dtype=np.float32)
-        deltas = points[:, None, :] - points[None, :, :]
-        distances = np.linalg.norm(deltas, axis=2)
-        np.fill_diagonal(distances, np.inf)
-        nearest = distances.min(axis=1)
+        # Chunk rows so dense synthetic grids (8k+ points) do not allocate the
+        # full O(N^2) distance matrix. Exact nearest-neighbor values remain the same.
+        nearest_chunks = []
+        all_indices = np.arange(points.shape[0])
+        for start in range(0, points.shape[0], 512):
+            end = min(start + 512, points.shape[0])
+            deltas = points[start:end, None, :] - points[None, :, :]
+            squared_distances = np.sum(deltas * deltas, axis=2)
+            local_indices = np.arange(start, end)
+            squared_distances[np.arange(end - start), all_indices[local_indices]] = np.inf
+            nearest_chunks.append(np.sqrt(squared_distances.min(axis=1)))
+        nearest = np.concatenate(nearest_chunks)
         return nearest[np.isfinite(nearest)].astype(np.float32, copy=False)
 
     @staticmethod
@@ -534,48 +542,48 @@ class PointMazeNystromDebugHelper:
         base_n_x = max(2, int(np.ceil(np.sqrt(n_points * (span[0] / span[1]) * self.oversample))))
         base_n_y = max(2, int(np.ceil(n_points * self.oversample / base_n_x)))
 
-        best = None
-        for radius in (12, 28, 56):
-            for n_x in range(max(2, base_n_x - radius), base_n_x + radius + 1):
-                for n_y in range(max(2, base_n_y - radius), base_n_y + radius + 1):
-                    candidates = self._xy_grid(lower, upper, n_x, n_y)
-                    valid_points = candidates[
-                        self._feasible_points_mask(candidates, wall_rectangles, walkable_rectangles, margin)
-                    ]
-                    valid_count = valid_points.shape[0]
-                    if valid_count < n_points:
-                        continue
-                    spacing = self._regular_grid_spacing(lower, upper, n_x, n_y)
-                    mean_spacing = 0.5 * (spacing["x"] + spacing["y"])
-                    spacing_mismatch = abs(spacing["x"] - spacing["y"]) / max(mean_spacing, 1e-12)
-                    extra = valid_count - n_points
-                    score = (spacing_mismatch, extra, n_x * n_y)
-                    if best is None or score < best[0]:
-                        best = (score, valid_points, spacing, n_x, n_y, valid_count)
-            if best is not None:
+        # Grow one approximately square lattice until enough feasible points
+        # exist, then search only a small neighborhood. Previous exhaustive
+        # shape search became very slow for 8k+ state grids.
+        n_x, n_y = base_n_x, base_n_y
+        valid_points = np.empty((0, 2), dtype=np.float32)
+        for _ in range(10):
+            candidates = self._xy_grid(lower, upper, n_x, n_y)
+            valid_points = candidates[
+                self._feasible_points_mask(candidates, wall_rectangles, walkable_rectangles, margin)
+            ]
+            if valid_points.shape[0] >= n_points:
                 break
+            growth = np.sqrt(n_points / max(valid_points.shape[0], 1)) * 1.02
+            n_x = max(n_x + 1, int(np.ceil(n_x * growth)))
+            n_y = max(n_y + 1, int(np.ceil(n_y * growth)))
 
-        if best is None:
-            n_x, n_y = base_n_x, base_n_y
-            valid_points = np.empty((0, 2), dtype=np.float32)
-            for _ in range(8):
-                candidates = self._xy_grid(lower, upper, n_x, n_y)
-                valid_points = candidates[
+        if valid_points.shape[0] < n_points:
+            raise RuntimeError(
+                f"Could only place {valid_points.shape[0]} reachable PointMaze grid points; "
+                f"requested {n_points}. Try reducing nystrom_grid_border_margin."
+            )
+
+        best = None
+        for candidate_n_x in range(max(2, n_x - 4), n_x + 5):
+            for candidate_n_y in range(max(2, n_y - 4), n_y + 5):
+                candidates = self._xy_grid(lower, upper, candidate_n_x, candidate_n_y)
+                candidate_valid = candidates[
                     self._feasible_points_mask(candidates, wall_rectangles, walkable_rectangles, margin)
                 ]
-                if valid_points.shape[0] >= n_points:
-                    break
-                n_x, n_y = int(np.ceil(n_x * 1.25)) + 1, int(np.ceil(n_y * 1.25)) + 1
+                if candidate_valid.shape[0] < n_points:
+                    continue
+                spacing = self._regular_grid_spacing(lower, upper, candidate_n_x, candidate_n_y)
+                mean_spacing = 0.5 * (spacing["x"] + spacing["y"])
+                spacing_mismatch = abs(spacing["x"] - spacing["y"]) / max(mean_spacing, 1e-12)
+                score = (spacing_mismatch, candidate_valid.shape[0] - n_points, candidate_n_x * candidate_n_y)
+                if best is None or score < best[0]:
+                    best = (score, candidate_valid, spacing, candidate_n_x, candidate_n_y)
 
-            if valid_points.shape[0] < n_points:
-                raise RuntimeError(
-                    f"Could only place {valid_points.shape[0]} reachable PointMaze grid points; "
-                    f"requested {n_points}. Try reducing nystrom_grid_border_margin."
-                )
+        if best is not None:
+            _, valid_points, spacing, n_x, n_y = best
+        else:
             spacing = self._regular_grid_spacing(lower, upper, n_x, n_y)
-            return valid_points, {"x": spacing["x"], "y": spacing["y"], "n_x": int(n_x), "n_y": int(n_y)}
-
-        _, valid_points, spacing, n_x, n_y, _ = best
         return valid_points, {"x": spacing["x"], "y": spacing["y"], "n_x": int(n_x), "n_y": int(n_y)}
 
     def _fixed_start_xy(self):

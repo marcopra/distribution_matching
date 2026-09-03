@@ -15,11 +15,17 @@ sink_schedules=(
     "linear(0.0, 0.001, 500000)"
     "linear(0.0, 0.01,  500000)"
     "linear(0.0, 0.1,   500000)"
-    "linear(0.0, 1.0,   500000)"
+    "linear(0.0, 0.8,   500000)"
     "0.8"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
-RUN_LABEL="bw${KERNEL_BANDWIDTH}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}"
+
+kernel_bandwidth_schedules=(
+    "linear(0.05, 0.3,  500000)"
+    "linear(0.1,  0.25, 500000)"
+)
+KERNEL_BANDWIDTH_SCHEDULE="${kernel_bandwidth_schedules[$KERNEL_BANDWIDTH_IDX]}"
+RUN_LABEL="bw${KERNEL_BANDWIDTH_IDX}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}"
 
 cd "${SLURM_SUBMIT_DIR}"
 source ~/.bashrc
@@ -50,6 +56,6 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.nystrom_exact_grid=false \
     agent.subsamples="${SUBSAMPLE}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
-    agent.kernel_bandwidth="${KERNEL_BANDWIDTH}" \
+    "agent.kernel_bandwidth='${KERNEL_BANDWIDTH_SCHEDULE}'" \
+    agent.kernel_bandwidth_mult=null \
     "agent.sink_schedule='${SINK_SCHEDULE}'"
-    # agent.kernel_bandwidth_mult="${KERNEL_BANDWIDTH}" \
