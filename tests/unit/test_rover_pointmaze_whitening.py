@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import torch
 
 import utils
-from agent.rover_pointmaze_debug import RoverAgent
+from agent.rover_nystrom_debug import RoverAgent
 
 
 class PointMazeWhiteningTest(unittest.TestCase):

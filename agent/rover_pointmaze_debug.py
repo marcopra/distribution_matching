@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import copy
 import os
+import warnings
 import numpy as np
 import torch
 import torch.nn as nn
@@ -63,6 +64,8 @@ from agent.rover_visualization.suite import build_debug_visualizer_suite
 # Main Agent
 # ============================================================================
 class RoverAgent:
+    """Deprecated PointMaze variant; use agent.rover_nystrom_debug.RoverAgent."""
+
     requires_transition_view = True
 
     def __init__(self,
@@ -127,6 +130,13 @@ class RoverAgent:
                  nystrom_exact_grid: bool = False,
                  device: str = "cpu",
                  ):
+
+        warnings.warn(
+            "agent.rover_pointmaze_debug.RoverAgent is deprecated; use "
+            "agent.rover_nystrom_debug.RoverAgent instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
         self.compute_dtype = _resolve_torch_dtype(compute_dtype)
         torch.set_default_dtype(self.compute_dtype)

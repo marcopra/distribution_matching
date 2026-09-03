@@ -1492,7 +1492,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         save_dir: str = "pointmaze_plots",
         rollout_steps: int = 10000,
         bins: int = 36,
-        policy_eval_points: int = 128,
+        policy_eval_points: int = 256,
     ):
         super().__init__(
             agent,

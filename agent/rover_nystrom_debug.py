@@ -115,8 +115,9 @@ class RoverAgent:
                  encoded_fifo_cuda_oom_splits: int = 4,
                  max_pending_transitions: Optional[int] = None,
                  kernel_type: str = "inner_product",
-                 kernel_bandwidth: Optional[float] = None,
+                 kernel_bandwidth=None,
                  kernel_bandwidth_mult: Optional[float] = None,
+                 whiten_representations: bool = False,
                  subsampling_strategy: str = "random",
                  nystrom_candidate_multiplier: float = 5.0,
                  nystrom_cholesky_tolerance: float = 1e-6,
@@ -178,9 +179,17 @@ class RoverAgent:
 
         self.num_expl_steps = num_expl_steps
         self.lambda_reg = lambda_reg
+        self.image_channels = 1 if self.grayscale else 3
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_mult = kernel_bandwidth_mult
+        self.whiten_representations = bool(whiten_representations)
+        self.whitening_mean = None
+        self.whitening_components = None
+        self.whitening_eigenvalues = None
+        self.whitening_eigenvalue_floor = None
+        self.whitening_explained_variance = None
+        self._active_kernel_bandwidth = self._initial_kernel_bandwidth(kernel_bandwidth)
         self.subsampling_strategy = str(subsampling_strategy).lower()
         if self.subsampling_strategy not in (
             "random", "gamma_h", "reverse_gamma_h", "pivoted_cholesky"
@@ -208,7 +217,7 @@ class RoverAgent:
         self.max_distances=1000
         self.kernel_fn = utils.build_kernel_fn(
             self.kernel_type,
-            bandwidth=self.kernel_bandwidth,
+            bandwidth=self._active_kernel_bandwidth,
         )
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
@@ -307,7 +316,7 @@ class RoverAgent:
             lambda_reg=self.lambda_reg,
             pca_truncation=self.pca_truncation,
             kernel_type=self.kernel_type,
-            kernel_bandwidth=self.kernel_bandwidth,
+            kernel_bandwidth=self._active_kernel_bandwidth,
             device=self.device  
         )
         # TODO: sistemare gestione del kernel- Per ora in distribution_matching c'è lo state-action kernel, while qui c'è lo state kernel
@@ -390,6 +399,34 @@ class RoverAgent:
 
         self.subsampled = None
 
+    @staticmethod
+    def _initial_kernel_bandwidth(kernel_bandwidth):
+        if kernel_bandwidth is None:
+            return None
+        try:
+            value = float(kernel_bandwidth)
+        except (TypeError, ValueError):
+            return None
+        if value < 0.0:
+            raise ValueError("kernel_bandwidth must be non-negative")
+        return max(value, 1e-12)
+
+    def _resolve_kernel_bandwidth(self, step: int):
+        """Resolve fixed/scheduled Gaussian bandwidth once per actor update."""
+        if self.kernel_bandwidth is None:
+            self._active_kernel_bandwidth = None
+            return None
+        value = float(utils.schedule(self.kernel_bandwidth, step))
+        if value < 0.0:
+            raise ValueError("kernel_bandwidth schedule must be non-negative")
+        value = max(value, 1e-12)
+        self._active_kernel_bandwidth = value
+        self.kernel_fn.bandwidth = value
+        self.distribution_matcher.kernel_bandwidth = value
+        self.distribution_matcher.kernel_fn.bandwidth = value
+        self.distribution_matcher.state_kernel_fn = self.kernel_fn
+        return value
+
     def _find_discrete_env(self, env):
         current = env
         while current is not None:
@@ -471,6 +508,86 @@ class RoverAgent:
             return module.encode_and_project(obs)
         return module(obs)
 
+    def _apply_whitening(self, features: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, "whiten_representations", False) or getattr(
+            self, "whitening_mean", None
+        ) is None:
+            return features
+        mean = self.whitening_mean.to(device=features.device, dtype=features.dtype)
+        components = self.whitening_components.to(device=features.device, dtype=features.dtype)
+        eigenvalues = self.whitening_eigenvalues.to(device=features.device, dtype=features.dtype)
+        whitened = (features - mean) @ components.T
+        denominator = torch.sqrt(
+            torch.clamp(eigenvalues, min=self.whitening_eigenvalue_floor)
+        )
+        return whitened / denominator / np.sqrt(max(int(components.shape[0]), 1))
+
+    def _fit_actor_whitening(self) -> None:
+        """Fit PCA whitening on current bounded actor support and apply it."""
+        if not getattr(self, "whiten_representations", False):
+            return
+
+        features = self._phi_all_obs[..., :-1]
+        if features.shape[0] < 2:
+            raise ValueError("PCA whitening requires at least two actor observations")
+        encoded = features.detach().double()
+        mean = encoded.mean(dim=0)
+        centered = encoded - mean
+        covariance = centered.T @ centered / (encoded.shape[0] - 1)
+        eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
+        order = torch.argsort(eigenvalues, descending=True)
+        eigenvalues = torch.clamp(eigenvalues[order], min=0.0)
+        eigenvectors = eigenvectors[:, order]
+        total_variance = eigenvalues.sum()
+        if not torch.isfinite(total_variance) or float(total_variance.item()) <= 0.0:
+            raise ValueError("Cannot whiten constant actor representations")
+        cumulative = torch.cumsum(eigenvalues, dim=0) / total_variance
+        retained = int(torch.searchsorted(cumulative, 0.99).item()) + 1
+        retained = min(retained, int(features.shape[0] - 1), int(features.shape[1]))
+        retained_values = eigenvalues[:retained]
+        retained_components = eigenvectors[:, :retained].T
+        largest = max(float(retained_values[0].item()), torch.finfo(torch.float64).eps)
+        eigenvalue_floor = 1e-5 * largest
+        has_distinct_subsample = self._phi_sub_obs is not self._phi_all_obs
+
+        self.whitening_mean = mean.to(device=features.device, dtype=features.dtype)
+        self.whitening_components = retained_components.to(
+            device=features.device, dtype=features.dtype
+        )
+        self.whitening_eigenvalues = retained_values.to(
+            device=features.device, dtype=features.dtype
+        )
+        self.whitening_eigenvalue_floor = eigenvalue_floor
+        self.whitening_explained_variance = float(
+            retained_values.sum().item() / total_variance.item()
+        )
+
+        self._phi_all_obs = self._append_zero_feature_column(
+            self._apply_whitening(features)
+        )
+        self._phi_all_next = self._append_zero_feature_column(
+            self._apply_whitening(self._phi_all_next[..., :-1])
+        )
+        self._psi_all = self._append_zero_feature_column(
+            self._encode_state_action(
+                self._phi_all_obs[..., :-1], self._all_actions.to(self.device)
+            )
+        )
+        if has_distinct_subsample:
+            self._phi_sub_obs = self._append_zero_feature_column(
+                self._apply_whitening(self._phi_sub_obs[..., :-1])
+            )
+            self._phi_sub_next = self._append_zero_feature_column(
+                self._apply_whitening(self._phi_sub_next[..., :-1])
+            )
+            self._psi_sub = self._append_zero_feature_column(
+                self._encode_state_action(
+                    self._phi_sub_obs[..., :-1], self._sub_actions.to(self.device)
+                )
+            )
+        else:
+            self._use_full_features_as_subsample()
+
     def _policy_logits_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Compute policy logits for a given kernel matrix H and PMD coefficient vector."""
         coeff = self.gradient_coeff if coeff is None else coeff
@@ -488,6 +605,10 @@ class RoverAgent:
         return self.kernel_fn(X, Y)
 
     def _fit_state_kernel_bandwidth(self, X: torch.Tensor, Y: torch.Tensor) -> None:
+        if getattr(self, "_active_kernel_bandwidth", None) is not None:
+            self.kernel_fn.bandwidth = self._active_kernel_bandwidth
+            self.distribution_matcher.kernel_fn.bandwidth = self._active_kernel_bandwidth
+            return
         if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
             bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
             if bandwidth is not None:
@@ -649,6 +770,7 @@ class RoverAgent:
                 obs_tensor = torch.as_tensor(obs, device=self.device, dtype=self.compute_dtype).unsqueeze(0)  # [1, obs_dim]
             
             enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+            enc_obs = self._apply_whitening(enc_obs)
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
@@ -676,6 +798,7 @@ class RoverAgent:
                 dtype=self.compute_dtype,
             )
             enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+            enc_obs = self._apply_whitening(enc_obs)
 
             if self.gradient_coeff is None:
                 return np.full(
@@ -888,6 +1011,8 @@ class RoverAgent:
                 sub_action=sub_action,
                 sub_next_obs=sub_next_obs,
             )
+
+        self._fit_actor_whitening()
 
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
@@ -1338,7 +1463,7 @@ class RoverAgent:
             candidate_multiplier=self.nystrom_candidate_multiplier,
             cholesky_tolerance=self.nystrom_cholesky_tolerance,
             kernel_type=self.kernel_type,
-            kernel_bandwidth=self.kernel_bandwidth,
+            kernel_bandwidth=getattr(self, "_active_kernel_bandwidth", None),
             kernel_bandwidth_mult=self.kernel_bandwidth_mult,
             cholesky_progress=self.nystrom_cholesky_progress,
         )
@@ -1607,7 +1732,7 @@ class RoverAgent:
                 candidate_multiplier=self.nystrom_candidate_multiplier,
                 cholesky_tolerance=self.nystrom_cholesky_tolerance,
                 kernel_type=self.kernel_type,
-                kernel_bandwidth=self.kernel_bandwidth,
+                kernel_bandwidth=getattr(self, "_active_kernel_bandwidth", None),
                 kernel_bandwidth_mult=self.kernel_bandwidth_mult,
                 cholesky_progress=self.nystrom_cholesky_progress,
             )
@@ -1910,6 +2035,7 @@ class RoverAgent:
             return metrics
 
         if step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps:
+            self._resolve_kernel_bandwidth(step)
             actor_update_data = self._get_actor_update_data(
                 replay_iter,
                 obs,
