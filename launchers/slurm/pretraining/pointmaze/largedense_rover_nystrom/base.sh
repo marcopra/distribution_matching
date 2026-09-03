@@ -16,10 +16,10 @@ sink_schedules=(
     "linear(0.0, 0.01,  500000)"
     "linear(0.0, 0.1,   500000)"
     "linear(0.0, 1.0,   500000)"
-    "0.0"
+    "0.8"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
-RUN_LABEL="bw${KERNEL_BANDWIDTH_MULTIPLIER}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}"
+RUN_LABEL="bw${KERNEL_BANDWIDTH}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}"
 
 cd "${SLURM_SUBMIT_DIR}"
 source ~/.bashrc
@@ -29,7 +29,7 @@ export HYDRA_FULL_ERROR=1
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_pointmaze_largedense_nystrom \
     seed="${SEED}" \
-    num_train_frames=1000000 \
+    num_train_frames=5000000 \
     eval_every_frames=100_000 \
     coverage_eval_enabled=true \
     coverage_num_trajectories=50 \
@@ -43,11 +43,13 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     wandb_tag="rover_nystrom_largedense_online_${RUN_LABEL}" \
     wandb_run_name="largedense_${RUN_LABEL}_seed${SEED}" \
     agent.embeddings=false \
+    agent.lambda_reg=1e-6 \
+    agent.subsampling_strategy=pivoted_cholesky \
     agent.debug_fixed_dataset_updates=false \
     agent.nystrom_synthetic_subsamples=false \
     agent.nystrom_exact_grid=false \
     agent.subsamples="${SUBSAMPLE}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
-    agent.kernel_bandwidth=null \
-    agent.kernel_bandwidth_mult="${KERNEL_BANDWIDTH_MULTIPLIER}" \
+    agent.kernel_bandwidth="${KERNEL_BANDWIDTH}" \
     "agent.sink_schedule='${SINK_SCHEDULE}'"
+    # agent.kernel_bandwidth_mult="${KERNEL_BANDWIDTH}" \
