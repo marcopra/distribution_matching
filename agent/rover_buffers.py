@@ -210,7 +210,7 @@ class EncodedTransitionFIFO:
                 else:
                     scores = residual.masked_fill(~available, -torch.inf)
                     pivot = int(torch.argmax(scores).item())
-                    if float(scores[pivot].item()) <= stop_threshold:
+                    if tolerance > 0.0 and float(scores[pivot].item()) <= stop_threshold:
                         progress.set_postfix(
                             candidates=count,
                             residual=f"{float(scores[pivot].item()):.2e}",
