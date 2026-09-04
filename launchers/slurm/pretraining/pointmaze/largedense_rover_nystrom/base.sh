@@ -23,6 +23,10 @@ SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 kernel_bandwidth_schedules=(
     "linear(0.05, 0.3,  500000)"
     "linear(0.1,  0.25, 500000)"
+    "linear(0.05,  0.2, 500000)"
+    "linear(0.1,  0.2, 500000)"
+    "linear(0.05,  0.15, 500000)"
+    "linear(0.01,  0.18, 500000)"
 )
 KERNEL_BANDWIDTH_SCHEDULE="${kernel_bandwidth_schedules[$KERNEL_BANDWIDTH_IDX]}"
 RUN_LABEL="bw${KERNEL_BANDWIDTH_IDX}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}"
@@ -36,7 +40,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     --config-name=pretrain_parallel/pretrain_pointmaze_largedense_nystrom \
     seed="${SEED}" \
     num_train_frames=5000000 \
-    eval_every_frames=100_000 \
+    eval_every_frames=50_000 \
     coverage_eval_enabled=true \
     coverage_num_trajectories=50 \
     coverage_grid_size=90 \
