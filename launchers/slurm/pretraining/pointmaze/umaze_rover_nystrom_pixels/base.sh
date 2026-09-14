@@ -7,19 +7,22 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
-#SBATCH --partition=gpua
+#SBATCH --partition=gpuv
 
 sink_schedules=(
     "linear(0.0, 0.001, 500000)"
     "linear(0.0, 0.01,  500000)"
-    "linear(0.0, 0.1,   500000)"
+    "linear(0.0, 1,   500000)"
     "linear(0.0, 0.8,   500000)"
     "0.8"
+    "linear(0.0, 0.1,   500000)"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 kernel_bandwidth_schedules=(
-    "0.28"
+    "0.35"
+    "0.3"
+    "0.25"
     "0.2"
     "0.1"
     "0.15"
@@ -38,8 +41,9 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     obs_type=pixels \
     agent.embeddings=true \
     seed="${SEED}" \
+    agent.lr_actor=1000 \
     num_train_frames=1000000 \
-    eval_every_frames=100_000 \
+    eval_every_frames=10_000 \
     +coverage_eval_enabled=true \
     +coverage_num_trajectories=50 \
     +coverage_grid_size=90 \
@@ -53,6 +57,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     wandb_run_name="umaze_goal_1_pixels_${RUN_LABEL}_seed${SEED}" \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.whiten_representations=true \
+    agent.nystrom_cholesky_tolerance=0 \
     agent.lambda_reg=1e-6 \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.debug_fixed_dataset_updates=false \

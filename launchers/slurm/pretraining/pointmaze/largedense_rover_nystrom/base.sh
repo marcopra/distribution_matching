@@ -54,6 +54,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     wandb_run_name="largedense_${RUN_LABEL}_seed${SEED}" \
     agent.embeddings=false \
     agent.lambda_reg=1e-6 \
+    agent.nystrom_cholesky_tolerance=0 \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.debug_fixed_dataset_updates=false \
     agent.nystrom_synthetic_subsamples=false \

@@ -15,8 +15,8 @@ kernel_bandwidth_idxs=(4 5)
 
 nystrom_points=(
     # 4000
-    # 8000
-    12000
+    8000
+    # 12000
 )
 
 batch_sizes_actor=(
