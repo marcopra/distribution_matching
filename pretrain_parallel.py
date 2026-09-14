@@ -279,6 +279,7 @@ class Workspace:
         
         self.snapshot_steps = cfg.snapshots
         self.save_snapshot_flag =  cfg.save_snapshot if hasattr(cfg, 'save_snapshot') else True
+        self.save_eval_best = bool(getattr(cfg, 'save_eval_best', False))
 
         self.timer = utils.Timer()
         self._global_step = 0
@@ -306,6 +307,10 @@ class Workspace:
                 log(metric_key, float(info[info_key]))
 
     def _validate_coverage_config(self):
+        if bool(getattr(self.cfg, "save_eval_best", False)) and not bool(
+            getattr(self.cfg, "coverage_eval_enabled", False)
+        ):
+            raise ValueError("save_eval_best requires coverage_eval_enabled=true")
         if not bool(getattr(self.cfg, "coverage_eval_enabled", False)):
             return
         if int(getattr(self.cfg, "coverage_num_trajectories", 50)) < 1:
@@ -428,7 +433,13 @@ class Workspace:
                 grid_size=int(getattr(self.cfg, "coverage_grid_size", 90)),
                 radius=float(getattr(self.cfg, "coverage_radius", 0.08)),
             )
+            is_best = (
+                self._coverage_progress.previous_coverage is None
+                or coverage_pct > self._coverage_progress.best_coverage
+            )
             coverage_metrics = self._coverage_progress.update(coverage_pct, self.global_frame)
+            if self.save_eval_best and is_best:
+                self.save_snapshot(filename='snapshot.pt', force=True)
 
             if bool(getattr(self.cfg, "plot_eval_trajectories", False)):
                 save_maze_trajectory_overlay_plot(
@@ -679,15 +690,21 @@ class Workspace:
         for key, value in payload.items():
             setattr(self, key, value)
 
-    def save_snapshot(self):
+    def save_snapshot(self, filename=None, force=False):
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)
         snapshot_dir.mkdir(exist_ok=True, parents=True)
-        if self.snapshot_steps and self.global_frame >= self.snapshot_steps[0]:
+        if filename is not None:
+            snapshot = snapshot_dir / filename
+            print(
+                f'saving best coverage snapshot to {snapshot} at frame '
+                f'{self.global_frame} (coverage={self._coverage_progress.best_coverage:.6f}%)'
+            )
+        elif self.snapshot_steps and self.global_frame >= self.snapshot_steps[0]:
             snapshot = snapshot_dir / f'snapshot_{self.global_frame}.pt'
             self.snapshot_steps.pop(0)
             print(f'saving snapshot to {snapshot} at frame {self.global_frame}')
         else:
-            if self.save_snapshot_flag == False:
+            if self.save_snapshot_flag == False and not force:
                 return
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode', '_coverage_progress']

@@ -229,6 +229,34 @@ def fixed_encoder_indices(total_size: int, batch_size: int, n_actions: int) -> n
     return np.rint(np.linspace(0, total_size - 1, size)).astype(np.int64)
 
 
+def shuffled_encoder_index_batches(
+    total_size: int,
+    batch_size: int,
+    updates: int,
+    seed: int,
+):
+    """Yield shuffled mini-batches, reshuffling after every full dataset pass."""
+    total_size = int(total_size)
+    batch_size = int(batch_size)
+    updates = int(updates)
+    if total_size <= 0:
+        raise ValueError("total_size must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if updates < 0:
+        raise ValueError("updates must be non-negative")
+
+    rng = np.random.default_rng(int(seed))
+    yielded = 0
+    while yielded < updates:
+        permutation = rng.permutation(total_size)
+        for start in range(0, total_size, batch_size):
+            yield permutation[start : start + batch_size]
+            yielded += 1
+            if yielded == updates:
+                return
+
+
 def save_encoder_checkpoint(
     path: Path,
     encoder: torch.nn.Module,

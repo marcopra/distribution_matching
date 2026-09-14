@@ -77,7 +77,7 @@ def parse_args():
     parser.add_argument("--pmd-steps", type=int, nargs="+", default=[10])
     parser.add_argument("--etas", type=float, nargs="+", default=[10.0])
     parser.add_argument("--eta-mode", choices=["none", "adagrad", "backtracking", "adadiff"], default="backtracking")
-    parser.add_argument("--pca-truncation", type=int, default=500)
+    parser.add_argument("--pca-truncation", type=int, default=10000)
     parser.add_argument(
         "--feature-whitening",
         choices=("none", "pca"),
@@ -108,7 +108,15 @@ def parse_args():
         default=True,
         help="Divide whitened vectors by sqrt(retained rank) for dimension-stable distances.",
     )
-    parser.add_argument("--sink", type=float, default=0.8)
+    parser.add_argument(
+        "--sink",
+        "--sinks",
+        dest="sinks",
+        type=float,
+        nargs="+",
+        default=[0.8],
+        help="One or more fixed sink values to sweep (for example: --sink 0.5 0.8 1.0).",
+    )
     parser.add_argument("--eval-trajectories", type=int, default=50)
     parser.add_argument("--coverage-grid-size", type=int, default=90)
     parser.add_argument("--coverage-radius", type=float, default=0.08)
@@ -486,13 +494,14 @@ def main():
     results_path = sweep_root / "results.csv"
 
     combinations = []
-    for feature_dim, kernel, lambda_reg, landmarks, pmd_steps, eta in itertools.product(
+    for feature_dim, kernel, lambda_reg, landmarks, pmd_steps, eta, sink in itertools.product(
         args.feature_dims,
         args.kernels,
         args.lambda_regs,
         args.landmarks,
         args.pmd_steps,
         args.etas,
+        args.sinks,
     ):
         for bandwidth, multiplier in kernel_settings(kernel, bandwidths, multipliers):
             combinations.append(
@@ -505,7 +514,7 @@ def main():
                     "landmarks": landmarks,
                     "pmd_steps": pmd_steps,
                     "eta": eta,
-                    "sink": float(args.sink),
+                    "sink": float(sink),
                     "feature_whitening": str(args.feature_whitening),
                     "whitening_variance": float(args.whitening_variance),
                     "whitening_components": int(args.whitening_components),
@@ -518,7 +527,14 @@ def main():
         identifier = run_id(config)
         run_dir = sweep_root / "individual_run_outputs" / identifier
         result_file = run_dir / "result.json"
-        if args.skip_existing and result_file.exists():
+        action_probability_plot_file = run_dir / "synthetic_dataset_action_probs.png"
+        action_probability_data_file = run_dir / "synthetic_dataset_action_probs.npz"
+        if (
+            args.skip_existing
+            and result_file.exists()
+            and action_probability_plot_file.exists()
+            and action_probability_data_file.exists()
+        ):
             print(f"[{run_number}/{len(combinations)}] skip {identifier}")
             continue
         print(f"[{run_number}/{len(combinations)}] run {identifier}")
@@ -593,7 +609,7 @@ def main():
             agent.pmd_eta_mode = args.eta_mode
             agent.pca_truncation = min(int(args.pca_truncation), int(config["landmarks"]))
             agent.distribution_matcher.pca_truncation = agent.pca_truncation
-            agent.sink_schedule = float(args.sink)
+            agent.sink_schedule = float(config["sink"])
             configure_kernel(agent, config["kernel"], config["bandwidth"], config["bandwidth_mult"])
 
             total_transitions = int(np.asarray(arrays["obs"]).shape[0])

@@ -43,10 +43,10 @@ import utils
 from agent.rover_pointmaze_debug import RoverAgent
 from tests.diagnostics.pointmaze.synthetic_workflow_utils import (
     arrays_to_tensors,
-    fixed_encoder_indices,
     load_dataset,
     save_dataset,
     save_encoder_checkpoint,
+    shuffled_encoder_index_batches,
 )
 
 
@@ -564,12 +564,6 @@ def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int, arrays,
         agent = build_agent(cfg, env, feature_dim, args)
         n_actions = int(agent.n_actions)
         tensors = arrays_to_tensors(arrays, args.device, agent.compute_dtype)
-        indices = fixed_encoder_indices(tensors["obs"].shape[0], args.batch_size, n_actions)
-        index = torch.as_tensor(indices, dtype=torch.long, device=args.device)
-        obs = tensors["obs"].index_select(0, index)
-        action = tensors["action"].index_select(0, index)
-        next_obs = tensors["next_obs"].index_select(0, index)
-        reward = tensors["reward"].index_select(0, index)
         full_obs = tensors["obs"]
         xy_points = np.asarray(arrays["xy"], dtype=np.float32).reshape(-1, 2)
         if full_obs.shape[0] != xy_points.shape[0] * n_actions:
@@ -608,8 +602,23 @@ def run_one_feature_dim(cfg, args: argparse.Namespace, feature_dim: int, arrays,
             args,
         )
 
-        progress = tqdm(range(1, args.updates + 1), desc=f"feature_dim={feature_dim}")
-        for step in progress:
+        batch_indices = shuffled_encoder_index_batches(
+            total_size=tensors["obs"].shape[0],
+            batch_size=args.batch_size,
+            updates=args.updates,
+            seed=args.seed,
+        )
+        progress = tqdm(
+            enumerate(batch_indices, start=1),
+            total=args.updates,
+            desc=f"feature_dim={feature_dim}",
+        )
+        for step, indices in progress:
+            index = torch.as_tensor(indices, dtype=torch.long, device=args.device)
+            obs = tensors["obs"].index_select(0, index)
+            action = tensors["action"].index_select(0, index)
+            next_obs = tensors["next_obs"].index_select(0, index)
+            reward = tensors["reward"].index_select(0, index)
             metrics = update_encoders_with_metrics(agent, obs, action, next_obs, reward)
             metrics_log["step"].append(step)
             for key in ("transition_loss", "contrastive_loss", "curl_loss", "embedding_sum_loss", "reward_loss"):

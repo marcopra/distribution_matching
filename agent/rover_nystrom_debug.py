@@ -118,6 +118,10 @@ class RoverAgent:
                  kernel_bandwidth=None,
                  kernel_bandwidth_mult: Optional[float] = None,
                  whiten_representations: bool = False,
+                 whitening_variance: float = 0.99,
+                 whitening_components: int = 0,
+                 whitening_epsilon: float = 1e-5,
+                 whitening_unit_trace: bool = True,
                  subsampling_strategy: str = "random",
                  nystrom_candidate_multiplier: float = 5.0,
                  nystrom_cholesky_tolerance: float = 1e-6,
@@ -184,6 +188,16 @@ class RoverAgent:
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_mult = kernel_bandwidth_mult
         self.whiten_representations = bool(whiten_representations)
+        self.whitening_variance = float(whitening_variance)
+        if not 0.0 < self.whitening_variance <= 1.0:
+            raise ValueError("whitening_variance must be in (0, 1]")
+        self.whitening_components_requested = int(whitening_components)
+        if self.whitening_components_requested < 0:
+            raise ValueError("whitening_components must be non-negative")
+        self.whitening_epsilon = float(whitening_epsilon)
+        if self.whitening_epsilon <= 0.0:
+            raise ValueError("whitening_epsilon must be positive")
+        self.whitening_unit_trace = bool(whitening_unit_trace)
         self.whitening_mean = None
         self.whitening_components = None
         self.whitening_eigenvalues = None
@@ -520,7 +534,10 @@ class RoverAgent:
         denominator = torch.sqrt(
             torch.clamp(eigenvalues, min=self.whitening_eigenvalue_floor)
         )
-        return whitened / denominator / np.sqrt(max(int(components.shape[0]), 1))
+        whitened = whitened / denominator
+        if getattr(self, "whitening_unit_trace", True):
+            whitened = whitened / np.sqrt(max(int(components.shape[0]), 1))
+        return whitened
 
     def _fit_actor_whitening(self) -> None:
         """Fit PCA whitening on current bounded actor support and apply it."""
@@ -541,13 +558,27 @@ class RoverAgent:
         total_variance = eigenvalues.sum()
         if not torch.isfinite(total_variance) or float(total_variance.item()) <= 0.0:
             raise ValueError("Cannot whiten constant actor representations")
-        cumulative = torch.cumsum(eigenvalues, dim=0) / total_variance
-        retained = int(torch.searchsorted(cumulative, 0.99).item()) + 1
-        retained = min(retained, int(features.shape[0] - 1), int(features.shape[1]))
+        max_rank = min(int(features.shape[0] - 1), int(features.shape[1]))
+        requested_components = int(
+            getattr(self, "whitening_components_requested", 0)
+        )
+        if requested_components > 0:
+            retained = min(requested_components, max_rank)
+        else:
+            cumulative = torch.cumsum(eigenvalues, dim=0) / total_variance
+            retained = int(
+                torch.searchsorted(
+                    cumulative,
+                    float(getattr(self, "whitening_variance", 0.99)),
+                ).item()
+            ) + 1
+            retained = min(max(retained, 1), max_rank)
         retained_values = eigenvalues[:retained]
         retained_components = eigenvectors[:, :retained].T
         largest = max(float(retained_values[0].item()), torch.finfo(torch.float64).eps)
-        eigenvalue_floor = 1e-5 * largest
+        eigenvalue_floor = (
+            float(getattr(self, "whitening_epsilon", 1e-5)) * largest
+        )
         has_distinct_subsample = self._phi_sub_obs is not self._phi_all_obs
 
         self.whitening_mean = mean.to(device=features.device, dtype=features.dtype)

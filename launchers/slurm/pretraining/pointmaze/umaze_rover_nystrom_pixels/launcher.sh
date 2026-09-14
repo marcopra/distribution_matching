@@ -11,9 +11,13 @@ seeds=(1)
 # 3 -> "0.2"
 # 4 -> "0.1"
 # 5 -> "0.15"
-kernel_bandwidth_idxs=(1 3 5)
+kernel_bandwidth_idxs=(1 2 3)
 
 feature_dims=(64)
+
+feature_modes=(l1)
+
+lambda_regs=(1e-2 1e-3 1e-4 1e-6) # 1e-5 1e-7)
 
 nystrom_points=(4000)
 
@@ -31,12 +35,16 @@ sink_idxs=(0 1 3)
 for seed in "${seeds[@]}"; do
     for bandwidth_idx in "${kernel_bandwidth_idxs[@]}"; do
         for feature_dim in "${feature_dims[@]}"; do
-            for subsample in "${nystrom_points[@]}"; do
-                for batch_size_actor in "${batch_sizes_actor[@]}"; do
-                    for sink_idx in "${sink_idxs[@]}"; do
-                        sbatch \
-                            --export=ALL,SEED="${seed}",KERNEL_BANDWIDTH_IDX="${bandwidth_idx}",FEATURE_DIM="${feature_dim}",SUBSAMPLE="${subsample}",BATCH_SIZE_ACTOR="${batch_size_actor}",SINK_IDX="${sink_idx}" \
-                            "${BASE}"
+            for feature_mode in "${feature_modes[@]}"; do
+                for lambda_reg in "${lambda_regs[@]}"; do
+                    for subsample in "${nystrom_points[@]}"; do
+                        for batch_size_actor in "${batch_sizes_actor[@]}"; do
+                            for sink_idx in "${sink_idxs[@]}"; do
+                                sbatch \
+                                    --export=ALL,SEED="${seed}",KERNEL_BANDWIDTH_IDX="${bandwidth_idx}",FEATURE_DIM="${feature_dim}",FEATURE_MODE="${feature_mode}",LAMBDA_REG="${lambda_reg}",SUBSAMPLE="${subsample}",BATCH_SIZE_ACTOR="${batch_size_actor}",SINK_IDX="${sink_idx}" \
+                                    "${BASE}"
+                            done
+                        done
                     done
                 done
             done

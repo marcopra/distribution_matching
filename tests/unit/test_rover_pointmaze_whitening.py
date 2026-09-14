@@ -11,6 +11,10 @@ class PointMazeWhiteningTest(unittest.TestCase):
     def make_agent(self, enabled=True):
         agent = RoverAgent.__new__(RoverAgent)
         agent.whiten_representations = enabled
+        agent.whitening_variance = 0.99
+        agent.whitening_components_requested = 0
+        agent.whitening_epsilon = 1e-5
+        agent.whitening_unit_trace = True
         agent.whitening_mean = None
         agent.whitening_components = None
         agent.whitening_eigenvalues = None
@@ -77,6 +81,32 @@ class PointMazeWhiteningTest(unittest.TestCase):
         disabled = self.make_agent(enabled=False)
         values = torch.randn(4, 3)
         self.assertIs(disabled._apply_whitening(values), values)
+
+    def test_fixed_components_and_configured_epsilon(self):
+        agent = self.make_agent()
+        agent.whitening_components_requested = 3
+        agent.whitening_epsilon = 1e-5
+        raw = self.install_actor_features(agent)
+
+        agent._fit_actor_whitening()
+
+        self.assertEqual(agent.whitening_components.shape, (raw.shape[1], raw.shape[1]))
+        expected_floor = 1e-5 * float(agent.whitening_eigenvalues[0])
+        self.assertAlmostEqual(agent.whitening_eigenvalue_floor, expected_floor)
+
+    def test_unit_trace_can_be_disabled(self):
+        agent = self.make_agent()
+        raw = self.install_actor_features(agent)
+        agent._fit_actor_whitening()
+
+        unit_trace_values = agent._apply_whitening(raw)
+        agent.whitening_unit_trace = False
+        standard_values = agent._apply_whitening(raw)
+
+        torch.testing.assert_close(
+            standard_values,
+            unit_trace_values * (agent.whitening_components.shape[0] ** 0.5),
+        )
 
 
 class PointMazeBandwidthScheduleTest(unittest.TestCase):
