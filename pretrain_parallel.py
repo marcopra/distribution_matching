@@ -372,6 +372,10 @@ class Workspace:
             return
         self.replay_storage.set_synthetic_first_transition(time_step, meta=meta)
 
+    def _prepare_replay_meta(self, time_step, meta):
+        prepare = getattr(self.agent, "prepare_replay_meta", None)
+        return prepare(time_step, meta) if callable(prepare) else meta
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         coverage_enabled = bool(getattr(self.cfg, "coverage_eval_enabled", False))
@@ -578,7 +582,8 @@ class Workspace:
         episode_steps = np.zeros(self.num_envs, dtype=np.int64)
         episode_rewards = np.zeros(self.num_envs, dtype=np.float64)
         for env_id, time_step in enumerate(time_steps):
-            self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
+            replay_meta = self._prepare_replay_meta(time_step, metas[env_id])
+            self.replay_storage.add(time_step, replay_meta, env_id=env_id)
         self.train_video_recorder.init(first_time_step.image_observation)
         metrics = None
 
@@ -619,7 +624,8 @@ class Workspace:
             for env_id, time_step in enumerate(next_time_steps):
                 episode_rewards[env_id] += float(time_step.reward)
                 episode_steps[env_id] += 1
-                self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
+                replay_meta = self._prepare_replay_meta(time_step, metas[env_id])
+                self.replay_storage.add(time_step, replay_meta, env_id=env_id)
                 if env_id == 0:
                     self.train_video_recorder.record(time_step.image_observation)
                 if (self.agent_requires_replay and
@@ -671,7 +677,12 @@ class Workspace:
                     if done[env_id]:
                         metas[env_id] = self.agent.init_meta()
                         time_steps[env_id] = reset_time_steps[env_id]
-                        self.replay_storage.add(time_steps[env_id], metas[env_id], env_id=env_id)
+                        replay_meta = self._prepare_replay_meta(
+                            time_steps[env_id], metas[env_id]
+                        )
+                        self.replay_storage.add(
+                            time_steps[env_id], replay_meta, env_id=env_id
+                        )
                         episode_steps[env_id] = 0
                         episode_rewards[env_id] = 0.0
                         if env_id == 0:

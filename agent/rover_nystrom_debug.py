@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
+from dm_env import specs
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -129,6 +130,7 @@ class RoverAgent:
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  nystrom_exact_grid: bool = False,
+                 diagnostic_coordinate_dims: int = 0,
                  device: str = "cpu",
                  ):
 
@@ -236,6 +238,9 @@ class RoverAgent:
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
         self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates)
+        self.diagnostic_coordinate_dims = int(diagnostic_coordinate_dims)
+        if self.diagnostic_coordinate_dims < 0:
+            raise ValueError("diagnostic_coordinate_dims must be non-negative")
         #####
         if self.debug_fixed_dataset_updates:
             utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed continuous Nyström dataset.")
@@ -481,10 +486,39 @@ class RoverAgent:
         self.policy_encoder.eval()
 
     def init_meta(self):
-        return OrderedDict()
+        meta = OrderedDict()
+        if self.diagnostic_coordinate_dims:
+            meta["diagnostic_coordinates"] = np.zeros(
+                (self.diagnostic_coordinate_dims,), dtype=np.float32
+            )
+        return meta
 
     def get_meta_specs(self):
-        return tuple()
+        if not self.diagnostic_coordinate_dims:
+            return tuple()
+        return (
+            specs.Array(
+                shape=(self.diagnostic_coordinate_dims,),
+                dtype=np.float32,
+                name="diagnostic_coordinates",
+            ),
+        )
+
+    def prepare_replay_meta(self, time_step, meta):
+        """Attach state coordinates used only by PointMaze diagnostics."""
+        if not self.diagnostic_coordinate_dims:
+            return meta
+        replay_meta = OrderedDict(meta)
+        proprio = np.asarray(time_step.proprio_observation, dtype=np.float32).reshape(-1)
+        if proprio.size < self.diagnostic_coordinate_dims:
+            raise ValueError(
+                "Diagnostic coordinates exceed available proprioceptive values: "
+                f"requested {self.diagnostic_coordinate_dims}, got {proprio.size}"
+            )
+        replay_meta["diagnostic_coordinates"] = proprio[
+            :self.diagnostic_coordinate_dims
+        ].copy()
+        return replay_meta
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
         return meta
@@ -1408,10 +1442,15 @@ class RoverAgent:
             "action": action.long().reshape(-1, 1),
             "reward": reward.to(dtype=torch.float32),
         }
-        # TEMP DEBUG: carry PointMaze XY through encoded FIFO so actor dataset
-        # plots still work when using real replay data instead of synthetic
-        # Nyström/debug-fixed data. Remove with encoded plotting helpers below.
-        if self.obs_type != "pixels" and obs.ndim >= 2 and obs.shape[1] >= 2:
+        # Replay metadata follows the five standard transition fields. Keep
+        # coordinates as a diagnostic sidecar; actor features still come only
+        # from observations (including pixels).
+        if len(transitions) > 5:
+            coordinates = torch.as_tensor(transitions[5], device=self.device)
+            coordinates = coordinates.reshape(coordinates.shape[0], -1)
+            if coordinates.shape[1] >= 2:
+                encoded["debug_xy"] = coordinates[:, :2].to(dtype=torch.float32)
+        elif self.obs_type != "pixels" and obs.ndim >= 2 and obs.shape[1] >= 2:
             encoded["debug_xy"] = obs.detach().reshape(obs.shape[0], -1)[:, :2]
         return encoded
 
@@ -1528,7 +1567,9 @@ class RoverAgent:
 
         while collected < max_samples:
             batch = next(replay_iter)
-            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(
+                batch[:5], self.device
+            )
             actor_batch = self._make_actor_batch(obs_b, action_b, next_obs_b, reward_b)
             actor_batches.append(actor_batch)
             collected += obs_b.shape[0]
@@ -1564,7 +1605,9 @@ class RoverAgent:
 
         while collected < remaining_samples:
             batch = next(replay_iter)
-            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+            obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(
+                batch[:5], self.device
+            )
             actor_batch = self._make_actor_batch(obs_b, action_b, next_obs_b, reward_b)
 
             if actor_batch[0].shape[0] > 1:
@@ -2051,7 +2094,7 @@ class RoverAgent:
 
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
-            batch, self.device)
+            batch[:5], self.device)
         if self.debug_fixed_dataset_updates:
             obs, action, next_obs, reward = self.nystrom_debug.fixed_encoder_batch(self)
 

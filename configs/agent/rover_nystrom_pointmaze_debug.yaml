@@ -15,6 +15,7 @@ subsamples: 4000
 pca_truncation: 500
 nystrom_synthetic_subsamples: false # true bypasses FIFO strategy and uses fixed landmarks
 debug_fixed_dataset_updates: false # temporary debug: train encoders and actor from fixed PointMaze grid
+diagnostic_coordinate_dims: 2 # replay-only XY sidecar for dataset/landmark plots
 subsampling_strategy: random # [random, gamma_h, reverse_gamma_h, pivoted_cholesky]
 nystrom_candidate_multiplier: 5.0
 nystrom_cholesky_tolerance: 1e-6

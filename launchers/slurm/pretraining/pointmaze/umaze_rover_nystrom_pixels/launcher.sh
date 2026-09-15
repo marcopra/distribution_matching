@@ -17,7 +17,7 @@ feature_dims=(64)
 
 feature_modes=(l1)
 
-lambda_regs=(1e-2 1e-3 1e-4 1e-6) # 1e-5 1e-7)
+lambda_regs=(1e-3 1e-4 1e-6) # 1e-5 1e-7)
 
 nystrom_points=(4000)
 
