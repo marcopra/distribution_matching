@@ -653,6 +653,13 @@ class RoverAgent:
         else:
             self._use_full_features_as_subsample()
 
+        utils.ColorPrint.green(
+            "Applied PCA whitening to actor features: "
+            f"{features.shape[1]} -> {retained} dims, "
+            f"explained_variance={self.whitening_explained_variance:.6f}, "
+            f"unit_trace={self.whitening_unit_trace}."
+        )
+
     def _policy_logits_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Compute policy logits for a given kernel matrix H and PMD coefficient vector."""
         coeff = self.gradient_coeff if coeff is None else coeff
@@ -674,7 +681,20 @@ class RoverAgent:
             self.kernel_fn.bandwidth = self._active_kernel_bandwidth
             self.distribution_matcher.kernel_fn.bandwidth = self._active_kernel_bandwidth
             return
-        if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
+        # A pivoted-Cholesky sample may carry a bandwidth fitted earlier from
+        # raw FIFO embeddings.  When whitening and a multiplier are enabled,
+        # ignore that cached value: X and Y have already been whitened by
+        # _fit_actor_whitening(), so the multiplier must be applied here.
+        fit_from_actor_features = (
+            self.kernel_type == "gaussian"
+            and self.kernel_bandwidth_mult is not None
+            and getattr(self, "whiten_representations", False)
+        )
+        if (
+            self.subsampling_strategy == "pivoted_cholesky"
+            and self.kernel_type == "gaussian"
+            and not fit_from_actor_features
+        ):
             bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
             if bandwidth is not None:
                 self.kernel_fn.bandwidth = bandwidth
@@ -711,7 +731,8 @@ class RoverAgent:
         self.distribution_matcher.kernel_fn.bandwidth = bandwidth
         utils.ColorPrint.yellow(
             f"Fitted actor Gaussian bandwidth={bandwidth:.6g} "
-            f"(median_distance={float(median_distance.item()):.6g}, multiplier={multiplier:.6g})."
+            f"(median_distance={float(median_distance.item()):.6g}, multiplier={multiplier:.6g}, "
+            f"features={'whitened' if getattr(self, 'whiten_representations', False) else 'raw'})."
         )
 
     def _kernel_status(self, kernel_fn=None) -> str:
@@ -2120,4 +2141,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
+        exit()
         return metrics

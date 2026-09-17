@@ -214,6 +214,15 @@ class Workspace:
                                 action_spec,
                                 cfg.num_seed_frames // cfg.action_repeat,
                                 cfg.agent)
+
+        # Unlike the automatic snapshot.pt resume in main(), p_path is a
+        # representation warm-start.  Keep the newly instantiated agent (and
+        # therefore all CLI-selected PMD hyperparameters), importing only the
+        # learned encoder and transition model from the snapshot.
+        if getattr(cfg, 'p_path', None) not in (None, 'none'):
+            payload = self.load_snapshot_from_path(cfg.p_path)
+            self.load_pretrained_representation(payload['agent'])
+
         self.agent_requires_replay = bool(
             getattr(self.agent, 'requires_replay', True)
         )
@@ -697,9 +706,52 @@ class Workspace:
     def load_snapshot(self):
         snapshot = self.work_dir / 'snapshot.pt'
         with snapshot.open('rb') as f:
-            payload = torch.load(f, map_location=self.device)
+            payload = torch.load(f, weights_only=False, map_location=self.device)
         for key, value in payload.items():
             setattr(self, key, value)
+
+    def load_snapshot_from_path(self, path):
+        snapshot = Path(path).expanduser()
+        print(f'loading pretrained representation: {snapshot.resolve()}')
+        if not snapshot.exists():
+            raise FileNotFoundError(f'Pretrained snapshot not found: {snapshot}')
+        with snapshot.open('rb') as stream:
+            payload = torch.load(stream, weights_only=False, map_location='cpu')
+        if not isinstance(payload, dict) or 'agent' not in payload:
+            raise ValueError(f"Snapshot must contain an 'agent' key: {snapshot}")
+        return payload
+
+    def load_pretrained_representation(self, pretrained_agent):
+        """Warm-start encoder/T while retaining fresh PMD state and config."""
+        loaded = []
+        for name in ('encoder', 'project_sa'):
+            target = getattr(self.agent, name, None)
+            source = getattr(pretrained_agent, name, None)
+            if target is None or source is None:
+                raise ValueError(
+                    f"Cannot warm-start representation: missing '{name}' in "
+                    "current or pretrained agent"
+                )
+            try:
+                target.load_state_dict(source.state_dict(), strict=True)
+            except RuntimeError as exc:
+                raise ValueError(
+                    f"Pretrained '{name}' is incompatible with current agent: {exc}"
+                ) from exc
+            loaded.append(name)
+
+        # Acting/cache paths use this frozen copy, so synchronize it now.
+        if hasattr(self.agent, '_sync_policy_encoder'):
+            self.agent._sync_policy_encoder()
+        elif hasattr(self.agent, 'policy_encoder'):
+            self.agent.policy_encoder.load_state_dict(
+                self.agent.encoder.state_dict(), strict=True
+            )
+
+        print(
+            f"loaded pretrained {', '.join(loaded)}; preserving fresh PMD state "
+            "and current agent hyperparameters"
+        )
 
     def save_snapshot(self, filename=None, force=False):
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)

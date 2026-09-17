@@ -36,6 +36,7 @@ eval_every_frames: 10000
 num_eval_episodes: 1
 
 # snapshot
+p_path: none  # Optional snapshot used to warm-start encoder and transition model.
 snapshots: [3000, 50000, 100000, 200000, 500000, 1000000, 2000000]
 snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
 
