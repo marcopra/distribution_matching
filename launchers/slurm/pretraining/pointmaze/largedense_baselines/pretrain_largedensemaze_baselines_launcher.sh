@@ -1,6 +1,6 @@
 #!/bin/bash
 
-seeds="0"
+seeds="1"
 
 agents=(
     rnd_discrete
@@ -12,7 +12,7 @@ agents=(
 
 for seed in $seeds; do
     for agent in "${agents[@]}"; do
-        sbatch --export=AGENT="${agent}",SEED="${seed}" \
+        sbatch --export=ALL,AGENT="${agent}",SEED="${seed}" \
             launchers/slurm/pretraining/pointmaze/largedense_baselines/pretrain_largedensemaze_baselines_base.sh
     done
 done

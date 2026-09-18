@@ -32,7 +32,12 @@ num_seed_frames: 500
 # eval
 eval_every_frames: 50_000
 num_eval_episodes: 10
-plot_eval_trajectories: true
+coverage_eval_enabled: true
+coverage_num_trajectories: 50
+coverage_grid_size: 90
+coverage_radius: 0.08
+coverage_expansion_tolerance: 0.25
+plot_eval_trajectories: false
 eval_trajectory_plot_dir: eval_trajectory_plots
 eval_trajectory_plot_styles: [maze_overlay]
 eval_trajectory_plot_episodes: [10]
@@ -55,10 +60,11 @@ save_video: true
 save_train_video: false
 save_buffer: false
 save_snapshot: false
+save_eval_best: true
 use_tb: true
 use_wandb: true
 save_log: false
-wandb_project: umaze_baselines
+wandb_project: pointmaze_baselines
 wandb_entity: urlb
 wandb_tag: ${agent.name}
 wandb_run_name: ${agent.name}_seed_${seed}_${now:%Y.%m.%d}_${now:%H%M}_${task_name}
