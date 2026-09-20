@@ -29,7 +29,7 @@ kernel_bandwidth: null # fixed Gaussian bandwidth; null lets pivoted Cholesky fi
 kernel_bandwidth_mult: null # candidate median-distance multiplier; null means 1.0
 whiten_representations: false # true refits PCA whitening on full actor support before each actor update
 whitening_variance: 0.99 # variance retained when whitening_components is 0
-whitening_components: ${feature_dim} # fixed PCA rank; 0 selects rank using whitening_variance
+whitening_components: 0 # fixed PCA rank; 0 selects rank using whitening_variance
 whitening_epsilon: 1e-5 # eigenvalue floor relative to largest retained eigenvalue
 whitening_unit_trace: true # divide whitened vectors by sqrt(retained rank) for stable distances
 nystrom_grid_border_margin: 0.01
