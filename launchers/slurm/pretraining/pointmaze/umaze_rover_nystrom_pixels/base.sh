@@ -20,12 +20,12 @@ sink_schedules=(
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
 
 kernel_bandwidth_schedules=(
-    "0.35"
-    "0.3"
-    "0.25"
-    "0.2"
-    "0.1"
-    "0.15"
+"0.1"
+"0.12"
+"0.15"
+"0.18"
+"0.2"
+"0.22"
 )
 KERNEL_BANDWIDTH_SCHEDULE="${kernel_bandwidth_schedules[$KERNEL_BANDWIDTH_IDX]}"
 RUN_LABEL="bw${KERNEL_BANDWIDTH_IDX}_feat${FEATURE_DIM}_${FEATURE_MODE}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}_lambda${LAMBDA_REG}"
@@ -41,11 +41,11 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     obs_type=pixels \
     agent.embeddings=true \
     seed="${SEED}" \
-    agent.lr_actor=10000 \
-    num_train_frames=600000 \
+    agent.lr_actor=100 \
+    num_train_frames=710000 \
     eval_every_frames=25_000 \
     +coverage_eval_enabled=true \
-    +coverage_num_trajectories=50 \
+    +coverage_num_trajectories=5 \
     +coverage_grid_size=90 \
     +coverage_radius=0.08 \
     +coverage_expansion_tolerance=0.25 \

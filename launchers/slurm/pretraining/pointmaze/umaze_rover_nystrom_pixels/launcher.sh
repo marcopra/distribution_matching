@@ -5,21 +5,21 @@ BASE="launchers/slurm/pretraining/pointmaze/umaze_rover_nystrom_pixels/base.sh"
 seeds=(1)
 
 # Indices into kernel_bandwidth_schedules in base.sh:
-# 0 -> "0.35"
-# 1 -> "0.3"
-# 2 -> "0.25"
-# 3 -> "0.2"
-# 4 -> "0.1"
-# 5 -> "0.15"
+# 0 -> "0.1"
+# 1 -> "0.12"
+# 2 -> "0.15"
+# 3 -> "0.18"
+# 4 -> "0.2"
+# 5 -> "0.22"
 kernel_bandwidth_idxs=(1 2 3)
 
 feature_dims=(64)
 
-feature_modes=(l1)
+feature_modes=(l2)
 
-lambda_regs=(1e-3 1e-4 1e-6) # 1e-5 1e-7)
+lambda_regs=(1e-7 1e-9) # 1e-4 1e-5 1e-7)
 
-nystrom_points=(4000)
+nystrom_points=(8000)
 
 batch_sizes_actor=(16000)
 
@@ -30,7 +30,7 @@ batch_sizes_actor=(16000)
 #   3 -> linear(0.0, 0.8,   500000)
 #   4 -> 0.8
 #   5 -> linear(0.0, 0.1,   500000)
-sink_idxs=(0 1 3)
+sink_idxs=(2 3)
 
 for seed in "${seeds[@]}"; do
     for bandwidth_idx in "${kernel_bandwidth_idxs[@]}"; do

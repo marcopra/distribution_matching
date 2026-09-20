@@ -2,7 +2,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
@@ -24,8 +23,8 @@ python pretrain.py \
     agent="${AGENT}" \
     seed="${SEED}" \
     device="${DEVICE}" \
-    num_train_frames=600000 \
-    eval_every_frames=25000 \
+    num_train_frames=1000000 \
+    eval_every_frames=50000 \
     coverage_eval_enabled=true \
     coverage_num_trajectories=50 \
     coverage_grid_size=90 \

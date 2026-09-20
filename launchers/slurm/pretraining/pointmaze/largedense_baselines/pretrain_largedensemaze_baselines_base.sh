@@ -24,7 +24,7 @@ python pretrain.py \
     agent="${AGENT}" \
     seed="${SEED}" \
     device="${DEVICE}" \
-    num_train_frames=5000000 \
+    num_train_frames=1000000 \
     eval_every_frames=50000 \
     coverage_eval_enabled=true \
     coverage_num_trajectories=50 \
