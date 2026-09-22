@@ -39,30 +39,45 @@ torch.backends.cudnn.benchmark = True
 
 
 class Tee:
-    def __init__(self, *streams):
-        self.streams = streams
+    def __init__(self, console_stream, log_stream):
+        self.console_stream = console_stream
+        self.log_stream = log_stream
+        self.log_buffer = ''
 
     def write(self, data):
-        for stream in self.streams:
-            stream.write(data)
-            stream.flush()
+        self.console_stream.write(data)
+        self.console_stream.flush()
+
+        # tqdm redraws one terminal line by writing records containing '\r'.
+        # Copying those records verbatim makes redirected logs contain one line
+        # per refresh.  Buffer complete records so normal print() calls (which
+        # may write their text and newline separately) are still preserved.
+        self.log_buffer += data
+        while '\n' in self.log_buffer:
+            record, self.log_buffer = self.log_buffer.split('\n', 1)
+            if '\r' not in record:
+                self.log_stream.write(record + '\n')
+        self.log_stream.flush()
 
     def flush(self):
-        for stream in self.streams:
-            stream.flush()
+        self.console_stream.flush()
+        self.log_stream.flush()
+
+    def close_log_record(self):
+        if self.log_buffer and '\r' not in self.log_buffer:
+            self.log_stream.write(self.log_buffer)
+        self.log_buffer = ''
+        self.log_stream.flush()
 
     def isatty(self):
-        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+        return getattr(self.console_stream, "isatty", lambda: False)()
 
     def fileno(self):
-        for stream in self.streams:
-            if hasattr(stream, "fileno"):
-                return stream.fileno()
-        raise OSError("no stream has fileno")
+        return self.console_stream.fileno()
 
     @property
     def encoding(self):
-        return getattr(self.streams[0], "encoding", None)
+        return getattr(self.console_stream, "encoding", None)
 
 
 class ConsoleLog:
@@ -81,6 +96,8 @@ class ConsoleLog:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        sys.stdout.close_log_record()
+        sys.stderr.close_log_record()
         sys.stdout = self.stdout
         sys.stderr = self.stderr
         self.log_file.close()
@@ -216,12 +233,15 @@ class Workspace:
                                 cfg.agent)
 
         # Unlike the automatic snapshot.pt resume in main(), p_path is a
-        # representation warm-start.  Keep the newly instantiated agent (and
-        # therefore all CLI-selected PMD hyperparameters), importing only the
-        # learned encoder and transition model from the snapshot.
+        # representation warm-start. Keep the newly instantiated agent (and
+        # therefore all CLI-selected PMD hyperparameters), importing learned
+        # representation components available in the checkpoint.
         if getattr(cfg, 'p_path', None) not in (None, 'none'):
             payload = self.load_snapshot_from_path(cfg.p_path)
-            self.load_pretrained_representation(payload['agent'])
+            if 'agent' in payload:
+                self.load_pretrained_representation(payload['agent'])
+            else:
+                self.load_pretrained_encoder_checkpoint(payload)
 
         self.agent_requires_replay = bool(
             getattr(self.agent, 'requires_replay', True)
@@ -717,9 +737,60 @@ class Workspace:
             raise FileNotFoundError(f'Pretrained snapshot not found: {snapshot}')
         with snapshot.open('rb') as stream:
             payload = torch.load(stream, weights_only=False, map_location='cpu')
-        if not isinstance(payload, dict) or 'agent' not in payload:
-            raise ValueError(f"Snapshot must contain an 'agent' key: {snapshot}")
+        if not isinstance(payload, dict):
+            raise ValueError(f"Pretrained checkpoint must contain a dictionary: {snapshot}")
+        if 'agent' not in payload and 'encoder_state_dict' not in payload:
+            raise ValueError(
+                "Pretrained checkpoint must contain either an 'agent' or "
+                f"'encoder_state_dict' key: {snapshot}"
+            )
         return payload
+
+    def load_pretrained_encoder_checkpoint(self, payload):
+        """Load encoder-only checkpoints produced by PointMaze diagnostics."""
+        expected = {
+            'feature_dim': int(getattr(self.agent, 'feature_dim', -1)),
+            'obs_shape': tuple(getattr(self.agent, 'obs_shape', ())),
+            'mode': str(getattr(self.agent, 'mode', '')),
+            'grayscale': bool(getattr(self.agent, 'grayscale', False)),
+        }
+        actual = {
+            'feature_dim': int(payload.get('feature_dim', -1)),
+            'obs_shape': tuple(payload.get('obs_shape', ())),
+            'mode': str(payload.get('mode', '')),
+            'grayscale': bool(payload.get('grayscale', False)),
+        }
+        mismatches = [
+            f"{key}: checkpoint={actual[key]!r}, current={expected[key]!r}"
+            for key in expected
+            if actual[key] != expected[key]
+        ]
+        if mismatches:
+            raise ValueError(
+                "Encoder checkpoint is incompatible with current agent: "
+                + "; ".join(mismatches)
+            )
+
+        try:
+            self.agent.encoder.load_state_dict(
+                payload['encoder_state_dict'], strict=True
+            )
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Encoder checkpoint state_dict is incompatible: {exc}"
+            ) from exc
+
+        if hasattr(self.agent, '_sync_policy_encoder'):
+            self.agent._sync_policy_encoder()
+        elif hasattr(self.agent, 'policy_encoder'):
+            self.agent.policy_encoder.load_state_dict(
+                self.agent.encoder.state_dict(), strict=True
+            )
+
+        print(
+            "loaded pretrained encoder; transition model and PMD state remain "
+            "fresh"
+        )
 
     def load_pretrained_representation(self, pretrained_agent):
         """Warm-start encoder/T while retaining fresh PMD state and config."""
