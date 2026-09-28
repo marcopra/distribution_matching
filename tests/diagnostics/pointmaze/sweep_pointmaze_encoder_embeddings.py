@@ -40,7 +40,7 @@ from tqdm.rich import tqdm
 
 import gym_env
 import utils
-from agent.rover_pointmaze_debug import RoverAgent
+from agent.rover_nystrom_debug import RoverAgent
 from tests.diagnostics.pointmaze.synthetic_workflow_utils import (
     arrays_to_tensors,
     load_dataset,
@@ -89,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         choices=("l1", "l2"),
         default=None,
         help="Encoder output normalization. Defaults to mode from agent config.",
+    )
+    parser.add_argument(
+        "--linear-projection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use a linear ProjectSA layer; enabled by default for this diagnostic workflow.",
     )
     parser.add_argument(
         "--grayscale",
@@ -219,6 +225,7 @@ def build_agent(cfg, env, feature_dim: int, args: argparse.Namespace) -> RoverAg
             "grayscale": bool(cfg.grayscale),
             "discount": float(cfg.discount),
             "feature_dim": int(feature_dim),
+            "linear_projection": bool(args.linear_projection),
             "subsamples": n_transitions,
             "batch_size": int(args.batch_size),
             "batch_size_actor": n_transitions,
@@ -544,6 +551,7 @@ def write_config(path: Path, args: argparse.Namespace, feature_dim: int, n_actio
         "seed": int(args.seed),
         "device": str(args.device),
         "mode": str(args.mode),
+        "linear_projection": bool(args.linear_projection),
         "dataset_dir": str(
             (args.dataset_dir if args.dataset_dir is not None else args.output_dir / "dataset").resolve()
         ),

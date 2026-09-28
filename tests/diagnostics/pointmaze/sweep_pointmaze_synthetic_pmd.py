@@ -69,6 +69,12 @@ def parse_args():
         default="pretrain_parallel/pretrain_pointmaze_umaze_1_pixels",
     )
     parser.add_argument("--feature-dims", type=int, nargs="+", default=[16, 32, 64, 128])
+    parser.add_argument(
+        "--linear-projection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use a linear ProjectSA layer; must match encoder pretraining.",
+    )
     parser.add_argument("--kernels", nargs="+", default=["gaussian"])
     parser.add_argument("--bandwidths", nargs="+", default=["none"])
     parser.add_argument("--bandwidth-mults", nargs="+", default=["0.3"])
@@ -435,7 +441,8 @@ def run_id(config) -> str:
             f"eps{config['whitening_epsilon']:g}_ut{int(config['whitening_unit_trace'])}"
         )
     return (
-        f"d{config['feature_dim']}_{config['kernel']}_bw{bandwidth}_mult{multiplier}_"
+        f"d{config['feature_dim']}_lp{int(config['linear_projection'])}_{config['kernel']}_"
+        f"bw{bandwidth}_mult{multiplier}_"
         f"lam{config['lambda_reg']:g}_m{config['landmarks']}_pmd{config['pmd_steps']}_"
         f"eta{config['eta']:g}_sink{config['sink']:g}_white{whitening}"
     ).replace("+", "")
@@ -520,6 +527,7 @@ def main():
                     "whitening_components": int(args.whitening_components),
                     "whitening_epsilon": float(args.whitening_epsilon),
                     "whitening_unit_trace": bool(args.whitening_unit_trace),
+                    "linear_projection": bool(args.linear_projection),
                 }
             )
 
@@ -553,6 +561,7 @@ def main():
                 oversample=dataset_metadata.get("oversample"),
                 device=args.device,
                 updates=1,
+                linear_projection=args.linear_projection,
             )
             agent = build_agent(cfg, env, int(config["feature_dim"]), build_args)
             checkpoint_path = args.workflow_dir / f"featuredim_{config['feature_dim']}" / "encoder.pt"

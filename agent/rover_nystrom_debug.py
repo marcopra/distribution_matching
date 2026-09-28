@@ -100,6 +100,12 @@ class RoverAgent:
                  pca_truncation,
                  embeddings = True,
                  linear_projection = False,
+                 feature_learning_loss: str = "infonce",
+                 infonce_positive_mode: str = "exact_next_obs",
+                 leworld_sigreg_weight: float = 0.1,
+                 leworld_num_projections: int = 1024,
+                 leworld_num_knots: int = 17,
+                 leworld_projection_chunk_size: int = 64,
                  pmd_eta_mode: str = "none",
                  pmd_best_iterate: bool = True,
                  pmd_grad_clip_norm: float = 0.0,
@@ -164,6 +170,26 @@ class RoverAgent:
             utils.ColorPrint.red("CURL is enabled, but stromgly suggested to not use it.\nAll the paper results are without CURL, and it may cause poor performance. Use with caution.")
 
         self.embedding_sum_loss = embedding_sum_loss
+        self.feature_learning_loss = str(feature_learning_loss).strip().lower()
+        if self.feature_learning_loss not in ("infonce", "leworld"):
+            raise ValueError("feature_learning_loss must be 'infonce' or 'leworld'")
+        self.infonce_positive_mode = str(infonce_positive_mode).strip().lower()
+        if self.infonce_positive_mode not in ("diagonal", "exact_next_obs"):
+            raise ValueError(
+                "infonce_positive_mode must be 'diagonal' or 'exact_next_obs'"
+            )
+        self.leworld_sigreg_weight = float(leworld_sigreg_weight)
+        self.leworld_num_projections = int(leworld_num_projections)
+        self.leworld_num_knots = int(leworld_num_knots)
+        self.leworld_projection_chunk_size = int(leworld_projection_chunk_size)
+        if self.leworld_sigreg_weight < 0.0:
+            raise ValueError("leworld_sigreg_weight must be non-negative")
+        if self.leworld_num_projections < 1:
+            raise ValueError("leworld_num_projections must be positive")
+        if self.leworld_num_knots < 2:
+            raise ValueError("leworld_num_knots must be at least 2")
+        if self.leworld_projection_chunk_size < 1:
+            raise ValueError("leworld_projection_chunk_size must be positive")
         self.reward = reward
         self.pmd_eta_mode = pmd_eta_mode.lower()
         assert self.pmd_eta_mode in ["none", "adagrad", "backtracking", "adadiff"], "pmd_eta_mode must be one of ['none', 'adagrad', 'backtracking', 'adadiff']"
@@ -177,6 +203,8 @@ class RoverAgent:
 
         self.mode = mode
         assert self.mode in ['l1', 'l2'], "Mode must be 'l1' or 'l2'"
+        if self.feature_learning_loss == "leworld" and not linear_projection:
+            raise ValueError("LeWorld feature learning requires linear_projection=True")
 
         self.sink_schedule = sink_schedule
         self.epsilon_schedule = epsilon_schedule
@@ -187,6 +215,8 @@ class RoverAgent:
         self.lambda_reg = lambda_reg
         self.image_channels = 1 if self.grayscale else 3
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
+        if self.kernel_type in ("inner_product"):
+            assert whiten_representations is False, "Inner-product kernel does not support whitening"
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_mult = kernel_bandwidth_mult
         self.whiten_representations = bool(whiten_representations)
@@ -553,7 +583,8 @@ class RoverAgent:
         if not self.embeddings:
             return module(obs)
         if project:
-            return module.encode_and_project(obs)
+            normalize = self.feature_learning_loss != "leworld"
+            return module.encode_and_project(obs, normalize=normalize)
         return module(obs)
 
     def _apply_whitening(self, features: torch.Tensor) -> torch.Tensor:
@@ -970,69 +1001,148 @@ class RoverAgent:
     def _is_T_sufficiently_initialized(self, step: int) -> bool:
         """Check if transition learning phase is complete."""
         return step >= self.num_expl_steps + self.T_init_steps 
-       
+
+    @staticmethod
+    def _exact_observation_group_ids(observations: torch.Tensor) -> torch.Tensor:
+        """Assign equal IDs to exactly equal observations without BxB pixel comparisons."""
+        flat = observations.detach().reshape(observations.shape[0], -1)
+        _, inverse = torch.unique(flat, dim=0, return_inverse=True)
+        return inverse
+
+    @staticmethod
+    def _multi_positive_infonce(
+        logits: torch.Tensor,
+        positive_group_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """InfoNCE where every target in an anchor's group is a valid positive."""
+        positive_mask = positive_group_ids[:, None].eq(positive_group_ids[None, :])
+        positive_logits = logits.masked_fill(~positive_mask, -torch.inf)
+        return -(
+            torch.logsumexp(positive_logits, dim=1)
+            - torch.logsumexp(logits, dim=1)
+        ).mean()
+
+    def _sigreg(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Sketched isotropic-Gaussian regularizer from LeWorldModel."""
+        if embeddings.ndim != 2:
+            raise ValueError("SIGReg expects embeddings with shape [batch, features]")
+
+        feature_dim = embeddings.shape[1]
+        knots = torch.linspace(
+            0.2,
+            4.0,
+            self.leworld_num_knots,
+            device=embeddings.device,
+            dtype=embeddings.dtype,
+        )
+        gaussian_cf = torch.exp(-0.5 * knots.square())
+        weights = torch.exp(-0.5 * knots.square())
+        total = embeddings.new_zeros(())
+
+        for start in range(0, self.leworld_num_projections, self.leworld_projection_chunk_size):
+            count = min(
+                self.leworld_projection_chunk_size,
+                self.leworld_num_projections - start,
+            )
+            directions = torch.randn(
+                feature_dim,
+                count,
+                device=embeddings.device,
+                dtype=embeddings.dtype,
+            )
+            directions = F.normalize(directions, p=2, dim=0, eps=1e-12)
+            projected = embeddings @ directions
+            phases = projected.unsqueeze(-1) * knots
+            empirical_real = torch.cos(phases).mean(dim=0)
+            empirical_imag = torch.sin(phases).mean(dim=0)
+            squared_error = (
+                (empirical_real - gaussian_cf).square()
+                + empirical_imag.square()
+            )
+            statistics = torch.trapezoid(weights * squared_error, knots, dim=-1)
+            total = total + statistics.sum()
+
+        return total / self.leworld_num_projections
+
     def update_encoders(self, obs, action, next_obs, reward):
         metrics = dict()
-        
-        # Encode
+
+        # LeWorld keeps raw features for Rover and SIGReg. Unit-normalized copies
+        # are used only by its angular prediction objective.
         obs_en = self.aug_and_encode(obs, project=True)
-        with torch.no_grad():
+        if self.feature_learning_loss == "leworld":
             next_obs_en = self.aug_and_encode(next_obs, project=True)
+        else:
+            with torch.no_grad():
+                next_obs_en = self.aug_and_encode(next_obs, project=True)
 
         encoded_state_action = self._encode_state_action(obs_en, action)
-        
-        # Predict next state
         projected_sa = self.project_sa(encoded_state_action)  
-        
-        # Normalize embeddings L2
-        if self.mode == 'l1':
-            norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-        elif self.mode == 'l2':
-            norm_next_obs_en = next_obs_en
-        norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
 
-        # Compute loss
-        # 1. Contrastive loss: 
-        # Wz = torch.matmul(self.W, norm_next_obs_en.T)  # [feature_dim, B]
-        logits = torch.matmul(norm_projected_sa, norm_next_obs_en.T)  # [B, B]
-        logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        contrastive_loss = self.cross_entropy_loss(logits, labels)
-        
-        z_anchor = self.aug_and_encode(obs, project=True)
-        with torch.no_grad():
-            z_pos = self.aug_and_encode(obs, project=True)
+        zero = obs_en.new_zeros(())
+        prediction_loss = zero
+        sigreg_loss = zero
+        mean_positives = 1.0
+        unique_targets = int(next_obs.shape[0])
 
-        ### Compute CURL loss
-        if self.curl:
-            # Normalize embeddings L2
+        if self.feature_learning_loss == "infonce":
             if self.mode == 'l1':
-                z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
-                z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
-            # Wz = torch.matmul(self.W, z_pos.T)  # [feature_dim, B]
-            logits = torch.matmul(z_anchor, z_pos.T)  # [B, B]
-            logits = logits - torch.max(logits, 1)[0][:, None]  # For numerical stability
-            labels = torch.arange(logits.shape[0]).long().to(self.device)
-            curl_loss = self.cross_entropy_loss(logits, labels)
+                norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
+            else:
+                norm_next_obs_en = next_obs_en
+            norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+            logits = norm_projected_sa @ norm_next_obs_en.T
+            logits = logits - logits.max(dim=1, keepdim=True).values
+
+            if self.infonce_positive_mode == "exact_next_obs":
+                group_ids = self._exact_observation_group_ids(next_obs)
+                contrastive_loss = self._multi_positive_infonce(logits, group_ids)
+                counts = torch.bincount(group_ids)
+                mean_positives = float(counts[group_ids].float().mean().item())
+                unique_targets = int(counts.numel())
+            else:
+                labels = torch.arange(logits.shape[0], device=logits.device)
+                contrastive_loss = self.cross_entropy_loss(logits, labels)
+
+            z_anchor = self.aug_and_encode(obs, project=True)
+            with torch.no_grad():
+                z_pos = self.aug_and_encode(obs, project=True)
+            if self.curl:
+                if self.mode == 'l1':
+                    z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
+                    z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
+                curl_logits = z_anchor @ z_pos.T
+                curl_logits = curl_logits - curl_logits.max(dim=1, keepdim=True).values
+                labels = torch.arange(curl_logits.shape[0], device=curl_logits.device)
+                curl_loss = self.cross_entropy_loss(curl_logits, labels)
+            else:
+                curl_loss = zero
+
+            if self.embedding_sum_loss > 0:
+                sum_next_obs_en = torch.sum(next_obs_en, dim=1)
+                embedding_sum_loss = self.embedding_sum_loss * torch.mean(
+                    (sum_next_obs_en - 1.0) ** 2
+                )
+            else:
+                embedding_sum_loss = zero
+            feature_loss = contrastive_loss + curl_loss + embedding_sum_loss
         else:
-            curl_loss = torch.tensor(0.0, device=self.device)
+            norm_next = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
+            norm_prediction = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+            prediction_loss = F.mse_loss(norm_prediction, norm_next)
+            sigreg_loss = 0.5 * (self._sigreg(obs_en) + self._sigreg(next_obs_en))
+            feature_loss = prediction_loss + self.leworld_sigreg_weight * sigreg_loss
+            contrastive_loss = zero
+            curl_loss = zero
+            embedding_sum_loss = zero
 
         if self.reward:
             reward_pred = self.reward(encoded_state_action)
             reward_loss = F.mse_loss(reward_pred, reward.to(self.device))
         else:
-            reward_loss = torch.tensor(0.0, device=self.device)
+            reward_loss = zero
         metrics['reward_loss'] = reward_loss.item()
-
-
-        if self.embedding_sum_loss>0:
-            # Sum of embeddings loss = 1
-            sum_next_obs_en = torch.sum(next_obs_en, dim=1)  # [B]
-            embedding_sum_loss = self.embedding_sum_loss * torch.mean((sum_next_obs_en - 1.0) ** 2)
-        else:
-            embedding_sum_loss = torch.tensor(0.0, device=self.device)
-
-        loss =  contrastive_loss + curl_loss + embedding_sum_loss+reward_loss
+        loss = feature_loss + reward_loss
         
         # max_grad_norm = 1.0
         # Optimize
@@ -1049,11 +1159,27 @@ class RoverAgent:
         self.encoder_scheduler.step()
 
         # Print losses
-        logger.debug(f"Transition Model Losses: Contrastive={contrastive_loss.item():.4f}, CURL={curl_loss.item():.4f}, Embedding Sum={embedding_sum_loss.item():.4f}, Reward={reward_loss.item():.4f}, Total={loss.item():.4f}")
+        logger.debug(
+            "Transition Model Losses: mode=%s Contrastive=%.4f Prediction=%.4f "
+            "SIGReg=%.4f CURL=%.4f Embedding Sum=%.4f Reward=%.4f Total=%.4f",
+            self.feature_learning_loss,
+            contrastive_loss.item(),
+            prediction_loss.item(),
+            sigreg_loss.item(),
+            curl_loss.item(),
+            embedding_sum_loss.item(),
+            reward_loss.item(),
+            loss.item(),
+        )
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
             metrics['contrastive_loss'] = contrastive_loss.item()
+            metrics['leworld_prediction_loss'] = prediction_loss.item()
+            metrics['sigreg_loss'] = sigreg_loss.item()
             metrics['curl_loss'] = curl_loss.item()
+            metrics['embedding_sum_loss'] = embedding_sum_loss.item()
+            metrics['infonce_mean_positives'] = mean_positives
+            metrics['infonce_unique_targets'] = unique_targets
         return metrics
     
 
@@ -2058,7 +2184,8 @@ class RoverAgent:
         if not self.embeddings:
             return self.encoder(obs)
         if project:
-            return self.encoder.encode_and_project(obs)
+            normalize = self.feature_learning_loss != "leworld"
+            return self.encoder.encode_and_project(obs, normalize=normalize)
         else:
             return self.encoder(obs)
 

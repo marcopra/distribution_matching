@@ -24,13 +24,13 @@ class ParallelEvalBestSnapshotTest(unittest.TestCase):
         workspace._coverage_progress = CoverageProgress()
         workspace._coverage_progress.update(12.0, 10)
 
-        workspace.save_snapshot(filename="snapshot.pt", force=True)
-        snapshot = workspace.work_dir / "models" / "snapshot.pt"
+        workspace.save_snapshot(filename="best_snapshot.pt", force=True)
+        snapshot = workspace.work_dir / "models" / "best_snapshot.pt"
         first_size = snapshot.stat().st_size
 
         workspace._global_step = 20
         workspace._coverage_progress.update(18.0, 20)
-        workspace.save_snapshot(filename="snapshot.pt", force=True)
+        workspace.save_snapshot(filename="best_snapshot.pt", force=True)
 
         self.assertEqual(list(snapshot.parent.glob("*.pt")), [snapshot])
         self.assertGreater(snapshot.stat().st_size, 0)

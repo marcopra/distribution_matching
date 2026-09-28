@@ -472,7 +472,7 @@ class Workspace:
             )
             coverage_metrics = self._coverage_progress.update(coverage_pct, self.global_frame)
             if self.save_eval_best and is_best:
-                self.save_snapshot(filename='snapshot.pt', force=True)
+                self.save_snapshot(filename='best_snapshot.pt', force=True)
 
             if bool(getattr(self.cfg, "plot_eval_trajectories", False)):
                 save_maze_trajectory_overlay_plot(
@@ -623,6 +623,8 @@ class Workspace:
                 self.logger.log('eval_total_time', self.timer.total_time(),
                                 self.global_frame)
                 self.eval()
+                if self.save_snapshot_flag:
+                    self.save_snapshot(filename='snapshot.pt', force=True)
 
             for env_id, step in enumerate(logical_steps):
                 metas[env_id] = self.agent.update_meta(
@@ -722,6 +724,9 @@ class Workspace:
             else:
                 observations = next_observations
                 time_steps = next_time_steps
+
+        if self.save_snapshot_flag:
+            self.save_snapshot(filename='snapshot.pt', force=True)
 
     def load_snapshot(self):
         snapshot = self.work_dir / 'snapshot.pt'
@@ -829,10 +834,14 @@ class Workspace:
         snapshot_dir.mkdir(exist_ok=True, parents=True)
         if filename is not None:
             snapshot = snapshot_dir / filename
-            print(
-                f'saving best coverage snapshot to {snapshot} at frame '
-                f'{self.global_frame} (coverage={self._coverage_progress.best_coverage:.6f}%)'
-            )
+            if filename == 'best_snapshot.pt':
+                print(
+                    f'saving best coverage snapshot to {snapshot} at frame '
+                    f'{self.global_frame} '
+                    f'(coverage={self._coverage_progress.best_coverage:.6f}%)'
+                )
+            else:
+                print(f'saving latest snapshot to {snapshot} at frame {self.global_frame}')
         elif self.snapshot_steps and self.global_frame >= self.snapshot_steps[0]:
             snapshot = snapshot_dir / f'snapshot_{self.global_frame}.pt'
             self.snapshot_steps.pop(0)

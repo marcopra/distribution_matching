@@ -13,7 +13,7 @@ from sklearn.manifold import TSNE
 import torch
 import torch.nn as nn
 import umap
-
+from sklearn.manifold import TSNE
 
 class FixedRandomEncoder(nn.Module):
     """Fixed random encoder for stable state hashing (witness network)."""
@@ -445,7 +445,7 @@ class ExplorationVisualizer:
         
         # Dimensionality reduction
         if method == 'tsne':
-            from sklearn.manifold import TSNE
+            
             z_2d = TSNE(n_components=2, perplexity=min(30, len(z) // 2), random_state=42).fit_transform(z)
             title = f't-SNE Latent Space (Step {step})'
         elif method == 'umap':

@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from agent.rover_visualization.domains import pointmaze_free_space_coverage
 from plot_pointmaze_snapshot_trajectories import (
     find_run_config,
     load_config,
@@ -29,7 +30,6 @@ from plot_pointmaze_snapshot_trajectories import (
 from tests.diagnostics.pointmaze.evaluate_nystrom_coverage import (
     collect_trajectories,
     find_final_snapshot,
-    free_space_coverage,
 )
 
 
@@ -122,7 +122,7 @@ def main() -> None:
             raise RuntimeError(
                 f"Collected {len(trajectories)}/{args.num_trajectories} trajectories"
             )
-        covered, free, coverage_pct = free_space_coverage(
+        covered, free, coverage_pct = pointmaze_free_space_coverage(
             env, trajectories, args.grid_size, args.coverage_radius
         )
     finally:
