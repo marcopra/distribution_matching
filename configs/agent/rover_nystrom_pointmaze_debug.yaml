@@ -14,7 +14,7 @@ batch_size_actor: 10000
 subsamples: 4000
 pca_truncation: 500
 feature_learning_loss: infonce # [infonce, leworld]
-infonce_positive_mode: exact_next_obs # [diagonal, exact_next_obs]
+infonce_positive_mode: diagonal # [diagonal, exact_next_obs]
 leworld_sigreg_weight: 0.1
 leworld_num_projections: 1024
 leworld_num_knots: 17
