@@ -10,26 +10,12 @@
 #SBATCH --partition=gpuv
 
 sink_schedules=(
-    "linear(0.0, 0.001, 500000)"
-    "linear(0.0, 0.1,   1000000)"
-    "linear(0.0, 1,     1000000)"
-    "linear(0.0, 0.8,   1000000)"
     "0.0"
-    "linear(0.0, 0.1,   500000)"
+    "linear(0.0,1.0,25000,50000)"
 )
-SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
+SINK_SCHEDULE="${sink_schedules[$((SINK_IDX - 1))]}"
 
-kernel_bandwidth_schedules=(
-"0.1"
-"0.12"
-"0.15"
-"0.18"
-"0.2"
-"0.22"
-"1.0"
-)
-KERNEL_BANDWIDTH_SCHEDULE="${kernel_bandwidth_schedules[$KERNEL_BANDWIDTH_IDX]}"
-RUN_LABEL="bw${KERNEL_BANDWIDTH_IDX}_feat${FEATURE_DIM}_${FEATURE_MODE}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}_lambda${LAMBDA_REG}"
+RUN_LABEL="feat${FEATURE_DIM}_${FEATURE_MODE}_nys${SUBSAMPLE}_pca${PCA_TRUNCATION}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}_lambda${LAMBDA_REG}"
 
 cd "${SLURM_SUBMIT_DIR}"
 source ~/.bashrc
@@ -45,6 +31,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.lr_actor=10000 \
     agent.kernel_type=inner_product \
     num_train_frames=100000 \
+    agent.update_actor_every_steps=2000 \
     eval_every_frames=25_000 \
     +coverage_eval_enabled=true \
     +coverage_num_trajectories=50 \
@@ -55,28 +42,18 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     save_eval_best=true \
     save_snapshot=false \
     use_wandb=true \
-    snapshot_dir="models/pointmaze/umaze_goal_1/pixels/rover_nystrom_sweep/${RUN_LABEL}/seed_${SEED}" \
     wandb_project=pointmaze_hp \
-    wandb_tag="rover_nystrom_umaze_goal_1_pixels_online_${RUN_LABEL}" \
-    wandb_run_name="umaze_goal_1_pixels_${RUN_LABEL}_seed${SEED}" \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.mode="${FEATURE_MODE}" \
     agent.whiten_representations=false \
-    agent.whitening_variance=0.99 \
-    agent.whitening_components="${FEATURE_DIM}" \
-    agent.whitening_epsilon=1e-5 \
-    agent.whitening_unit_trace=true \
-    agent.nystrom_cholesky_tolerance=0 \
+    agent.nystrom_cholesky_tolerance=1e-5 \
     agent.lambda_reg="${LAMBDA_REG}" \
     agent.subsampling_strategy=pivoted_cholesky \
     agent.debug_fixed_dataset_updates=false \
     agent.nystrom_synthetic_subsamples=false \
     agent.nystrom_exact_grid=false \
     agent.subsamples="${SUBSAMPLE}" \
-    agent.pca_truncation="${SUBSAMPLE}" \
+    agent.pca_truncation="${PCA_TRUNCATION}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
-    "agent.kernel_bandwidth_mult=null" \
-    agent.kernel_bandwidth=null \
     agent.linear_projection=true
-# '${KERNEL_BANDWIDTH_SCHEDULE}'" \
