@@ -11,10 +11,10 @@
 
 sink_schedules=(
     "linear(0.0, 0.001, 500000)"
-    "linear(0.0, 0.01,  500000)"
-    "linear(0.0, 1,   500000)"
-    "linear(0.0, 0.8,   500000)"
-    "0.8"
+    "linear(0.0, 0.1,   1000000)"
+    "linear(0.0, 1,     1000000)"
+    "linear(0.0, 0.8,   1000000)"
+    "0.0"
     "linear(0.0, 0.1,   500000)"
 )
 SINK_SCHEDULE="${sink_schedules[$SINK_IDX]}"
@@ -26,6 +26,7 @@ kernel_bandwidth_schedules=(
 "0.18"
 "0.2"
 "0.22"
+"1.0"
 )
 KERNEL_BANDWIDTH_SCHEDULE="${kernel_bandwidth_schedules[$KERNEL_BANDWIDTH_IDX]}"
 RUN_LABEL="bw${KERNEL_BANDWIDTH_IDX}_feat${FEATURE_DIM}_${FEATURE_MODE}_nys${SUBSAMPLE}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}_lambda${LAMBDA_REG}"
@@ -41,18 +42,18 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     obs_type=pixels \
     agent.embeddings=true \
     seed="${SEED}" \
-    agent.lr_actor=100 \
-    num_train_frames=710000 \
+    agent.lr_actor=10000 \
+    agent.kernel_type=inner_product \
+    num_train_frames=100000 \
     eval_every_frames=25_000 \
     +coverage_eval_enabled=true \
-    +coverage_num_trajectories=5 \
+    +coverage_num_trajectories=50 \
     +coverage_grid_size=90 \
     +coverage_radius=0.08 \
     +coverage_expansion_tolerance=0.25 \
     +plot_eval_trajectories=false \
     save_eval_best=true \
     save_snapshot=false \
-    snapshots=[] \
     use_wandb=true \
     snapshot_dir="models/pointmaze/umaze_goal_1/pixels/rover_nystrom_sweep/${RUN_LABEL}/seed_${SEED}" \
     wandb_project=pointmaze_hp \
@@ -60,7 +61,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     wandb_run_name="umaze_goal_1_pixels_${RUN_LABEL}_seed${SEED}" \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.mode="${FEATURE_MODE}" \
-    agent.whiten_representations=true \
+    agent.whiten_representations=false \
     agent.whitening_variance=0.99 \
     agent.whitening_components="${FEATURE_DIM}" \
     agent.whitening_epsilon=1e-5 \
@@ -74,6 +75,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     agent.subsamples="${SUBSAMPLE}" \
     agent.pca_truncation="${SUBSAMPLE}" \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
-    "agent.kernel_bandwidth='${KERNEL_BANDWIDTH_SCHEDULE}'" \
-    agent.kernel_bandwidth_mult=null \
-    "agent.sink_schedule='${SINK_SCHEDULE}'"
+    "agent.sink_schedule='${SINK_SCHEDULE}'" \
+    "agent.kernel_bandwidth_mult=null" \
+    agent.kernel_bandwidth=null \
+    agent.linear_projection=true
+# '${KERNEL_BANDWIDTH_SCHEDULE}'" \

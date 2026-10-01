@@ -25,6 +25,7 @@ python pretrain.py \
     seed="${SEED}" \
     device="${DEVICE}" \
     num_train_frames=1000000 \
+    num_seed_frames=2000 \
     eval_every_frames=50000 \
     coverage_eval_enabled=true \
     coverage_num_trajectories=50 \

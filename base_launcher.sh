@@ -2,24 +2,20 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
 #SBATCH --partition=gpuv
 
-cd $SLURM_SUBMIT_DIR
-
-# Load environment
+cd "${SLURM_SUBMIT_DIR}"
 source ~/.bashrc
-conda activate cleanrl311
-
+conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
+# python pretrain_parallel.py --config-name=pretrain_parallel/pretrain_pointmaze_umaze_1_pixels env=pointmaze/pointmaze_umaze_goal_1 obs_type=pixels agent.embeddings=true seed=1 agent.lr_actor=10000 num_train_frames=110000 eval_every_frames=25_000 +coverage_eval_enabled=true +coverage_num_trajectories=5 +coverage_grid_size=90 +coverage_radius=0.08 +coverage_expansion_tolerance=0.25 +plot_eval_trajectories=false save_eval_best=true save_snapshot=true snapshots=[] use_wandb=true  agent.feature_dim=512 agent.mode=l1 agent.whiten_representations=false agent.whitening_variance=0.99 agent.whitening_components=512 agent.whitening_epsilon=1e-5 agent.whitening_unit_trace=true agent.nystrom_cholesky_tolerance=0 agent.subsampling_strategy=pivoted_cholesky agent.debug_fixed_dataset_updates=false agent.nystrom_synthetic_subsamples=false agent.nystrom_exact_grid=false agent.subsamples=8000 agent.pca_truncation=8000 agent.batch_size_actor=16000 agent.kernel_bandwidth_mult=null "agent.sink_schedule=0.0"  agent.lambda_reg=1e-9 agent.linear_projection=true agent.kernel_bandwidth=null agent.kernel_type=inner_product
+# python pretrain_parallel.py --config-name=pretrain_parallel/pretrain_pointmaze_umaze_1_pixels env=pointmaze/pointmaze_umaze_goal_1 obs_type=pixels agent.embeddings=true seed=1 agent.lr_actor=10000 num_train_frames=110000 eval_every_frames=25_000 +coverage_eval_enabled=true +coverage_num_trajectories=5 +coverage_grid_size=90 +coverage_radius=0.08 +coverage_expansion_tolerance=0.25 +plot_eval_trajectories=false save_eval_best=true save_snapshot=true snapshots=[] use_wandb=true  agent.feature_dim=512 agent.mode=l1 agent.whiten_representations=false agent.whitening_variance=0.99 agent.whitening_components=512 agent.whitening_epsilon=1e-5 agent.whitening_unit_trace=true agent.nystrom_cholesky_tolerance=0 agent.subsampling_strategy=pivoted_cholesky agent.debug_fixed_dataset_updates=false agent.nystrom_synthetic_subsamples=false agent.nystrom_exact_grid=false agent.subsamples=8000 agent.pca_truncation=8000 agent.batch_size_actor=16000 agent.kernel_bandwidth_mult=null "agent.sink_schedule=0.0"  agent.lambda_reg=1e-9 agent.linear_projection=true agent.kernel_bandwidth=null agent.kernel_type=inner_product agent.infonce_positive_mode=diagonal
+# python pretrain_parallel.py --config-name=pretrain_parallel/pretrain_pointmaze_umaze_1_pixels env=pointmaze/pointmaze_umaze_goal_1 obs_type=pixels agent.embeddings=true seed=1 agent.lr_actor=10000 num_train_frames=110000 eval_every_frames=25_000 +coverage_eval_enabled=true +coverage_num_trajectories=5 +coverage_grid_size=90 +coverage_radius=0.08 +coverage_expansion_tolerance=0.25 +plot_eval_trajectories=false save_eval_best=true save_snapshot=true snapshots=[] use_wandb=true  agent.feature_dim=512 agent.mode=l1 agent.whiten_representations=false agent.whitening_variance=0.99 agent.whitening_components=512 agent.whitening_epsilon=1e-5 agent.whitening_unit_trace=true agent.nystrom_cholesky_tolerance=0 agent.subsampling_strategy=pivoted_cholesky agent.debug_fixed_dataset_updates=false agent.nystrom_synthetic_subsamples=false agent.nystrom_exact_grid=false agent.subsamples=8000 agent.pca_truncation=8000 agent.batch_size_actor=16000 agent.kernel_bandwidth_mult=null "agent.sink_schedule=0.0"  agent.lambda_reg=1e-9 agent.linear_projection=true agent.kernel_bandwidth=null agent.kernel_type=inner_product agent.infonce_positive_mode=diagonal p_path=/home/mprattico-iit.local/distribution_matching/tests/outputs/pointmaze/synthetic_workflow_l1_8k_linear/featuredim_512/encoder.pt
+python pretrain_parallel.py --config-name=pretrain_parallel/pretrain_pointmaze_umaze_1_pixels env=pointmaze/pointmaze_umaze_goal_1 obs_type=pixels agent.embeddings=true seed=1 agent.lr_actor=10000 num_train_frames=110000 eval_every_frames=25_000 +coverage_eval_enabled=true +coverage_num_trajectories=5 +coverage_grid_size=90 +coverage_radius=0.08 +coverage_expansion_tolerance=0.25 +plot_eval_trajectories=false save_eval_best=true save_snapshot=true snapshots=[] use_wandb=true  agent.feature_dim=512 agent.mode=l1 agent.whiten_representations=false agent.whitening_variance=0.99 agent.whitening_components=512 agent.whitening_epsilon=1e-5 agent.whitening_unit_trace=true agent.nystrom_cholesky_tolerance=0 agent.subsampling_strategy=pivoted_cholesky agent.debug_fixed_dataset_updates=false agent.nystrom_synthetic_subsamples=false agent.nystrom_exact_grid=false agent.subsamples=8000 agent.pca_truncation=8000 agent.batch_size_actor=16000 agent.kernel_bandwidth_mult=null "agent.sink_schedule=0.0"  agent.lambda_reg=1e-9 agent.linear_projection=true agent.kernel_bandwidth=null agent.kernel_type=inner_product agent.feature_learning_loss=leworld
 
-
-
-python cleanrl_rnd_ppo.py \
-  --track \
-  --wandb_project_name montezuma_hp \
-  --seed 1
