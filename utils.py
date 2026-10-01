@@ -336,6 +336,11 @@ def schedule(schdl, step):
     try:
         return float(schdl)
     except ValueError:
+        match = re.match(r'linear\((.+),(.+),(.+),(.+)\)', schdl)
+        if match:
+            init, final, delay, duration = [float(g) for g in match.groups()]
+            mix = np.clip((step - delay) / (duration - delay), 0.0, 1.0)
+            return (1.0 - mix) * init + mix * final
         match = re.match(r'linear\((.+),(.+),(.+)\)', schdl)
         if match:
             init, final, duration = [float(g) for g in match.groups()]
