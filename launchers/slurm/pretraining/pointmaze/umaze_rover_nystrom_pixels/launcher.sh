@@ -10,15 +10,15 @@ feature_modes=(l1)
 
 lambda_regs=(1e-3) # 1e-4 1e-5 1e-7)
 
-nystrom_points=(15000 20000)
-pca_truncations=(5000 10000)
+nystrom_points=(10000)
+pca_truncations=(10000)
 
 batch_sizes_actor=(32000)
 
 # Indices into sink_schedules in base.sh: 
 # 1 -> 0.0; 
 # 2 -> linear(0.0,1.0,25000,50000)
-sink_idxs=(1 2)
+sink_idxs=(2)
 
 kernels=(inner_product gaussian)
 encoder_modes=(scratch pretrained_finetune pretrained_frozen)
