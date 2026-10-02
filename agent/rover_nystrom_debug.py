@@ -121,6 +121,7 @@ class RoverAgent:
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
                  max_pending_transitions: Optional[int] = None,
+                 freeze_encoder: bool = False,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth=None,
                  kernel_bandwidth_mult: Optional[float] = None,
@@ -165,6 +166,7 @@ class RoverAgent:
         self.device = device
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
+        self.freeze_encoder = bool(freeze_encoder)
         self.curl = curl
         if curl:
             utils.ColorPrint.red("CURL is enabled, but stromgly suggested to not use it.\nAll the paper results are without CURL, and it may cause poor performance. Use with caution.")
@@ -390,7 +392,8 @@ class RoverAgent:
             parameters += list(self.reward.parameters())
         
         # Optimizers
-        if embeddings:
+        self.encoder_scheduler = None
+        if embeddings and not self.freeze_encoder:
             self.encoder_optimizer = torch.optim.AdamW(
                 parameters,
                 lr=lr_encoder,
@@ -407,6 +410,8 @@ class RoverAgent:
                         
         else:
             self.encoder_optimizer = None
+        if self.freeze_encoder:
+            self._freeze_module(self.encoder)
         self.transition_optimizer = torch.optim.Adam(
             self.project_sa.parameters(),
             lr=lr_T
@@ -511,7 +516,7 @@ class RoverAgent:
     
     def train(self, training=True):
         self.training = training
-        self.encoder.train(training)
+        self.encoder.train(training and not self.freeze_encoder)
         self.project_sa.train(training)
         self.policy_encoder.eval()
 
@@ -1156,7 +1161,8 @@ class RoverAgent:
             self.encoder_optimizer.step()
             self._policy_is_synced = False
         self.transition_optimizer.step()
-        self.encoder_scheduler.step()
+        if self.encoder_scheduler is not None:
+            self.encoder_scheduler.step()
 
         # Print losses
         logger.debug(
@@ -2268,4 +2274,5 @@ class RoverAgent:
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
             metrics = self._run_debug_visualizers(metrics, obs, step)
+            exit(0)
         return metrics

@@ -227,3 +227,4 @@ exp_config.yaml
 *.log
 runs/*
 exp_*
+exploration_video
