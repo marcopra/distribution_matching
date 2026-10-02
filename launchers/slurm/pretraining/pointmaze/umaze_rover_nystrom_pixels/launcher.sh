@@ -38,7 +38,7 @@ for seed in "${seeds[@]}"; do
                                         if [[ "${kernel_type}" == "inner_product" ]]; then
                                             selected_tolerances=("${cholesky_tolerances[@]}")
                                         else
-                                            selected_tolerances=(1e-5)
+                                            selected_tolerances=(0)
                                         fi
                                         for cholesky_tolerance in "${selected_tolerances[@]}"; do
                                             sbatch \
