@@ -66,7 +66,7 @@ epsilon_schedule: 0.15
 mode: l1 # [l1, l2]
 reward: false # whether to learn a reward predictor or not
 embeddings: true  # whether to use embeddings or not, if obs_type is pixels this is always true
-freeze_encoder: false # set true to load encoder via p_path and keep it fixed during training
+freeze_encoder: false # if true, train through T_init_steps then freeze encoder
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 num_expl_steps: ??? # to be specified later

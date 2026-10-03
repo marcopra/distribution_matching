@@ -167,6 +167,9 @@ class RoverAgent:
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
         self.freeze_encoder = bool(freeze_encoder)
+        self._encoder_frozen = self.freeze_encoder and self.T_init_steps <= 0
+        if self.freeze_encoder and self.T_init_steps > 0:
+            utils.ColorPrint.yellow("updating encoder")
         self.curl = curl
         if curl:
             utils.ColorPrint.red("CURL is enabled, but stromgly suggested to not use it.\nAll the paper results are without CURL, and it may cause poor performance. Use with caution.")
@@ -393,7 +396,7 @@ class RoverAgent:
         
         # Optimizers
         self.encoder_scheduler = None
-        if embeddings and not self.freeze_encoder:
+        if embeddings:
             self.encoder_optimizer = torch.optim.AdamW(
                 parameters,
                 lr=lr_encoder,
@@ -410,7 +413,7 @@ class RoverAgent:
                         
         else:
             self.encoder_optimizer = None
-        if self.freeze_encoder:
+        if self._encoder_frozen:
             self._freeze_module(self.encoder)
         self.transition_optimizer = torch.optim.Adam(
             self.project_sa.parameters(),
@@ -516,7 +519,7 @@ class RoverAgent:
     
     def train(self, training=True):
         self.training = training
-        self.encoder.train(training and not self.freeze_encoder)
+        self.encoder.train(training and not self._encoder_frozen)
         self.project_sa.train(training)
         self.policy_encoder.eval()
 
@@ -574,6 +577,16 @@ class RoverAgent:
         module.eval()
         for param in module.parameters():
             param.requires_grad_(False)
+
+    def _maybe_freeze_encoder(self, step: int) -> None:
+        freeze_at_step = self.num_expl_steps + self.T_init_steps
+        if (
+            self.freeze_encoder
+            and not self._encoder_frozen
+            and step >= freeze_at_step
+        ):
+            self._encoder_frozen = True
+            self._freeze_module(self.encoder)
 
     def _sync_policy_encoder(self) -> None:
         self.policy_encoder.load_state_dict(self.encoder.state_dict())
@@ -2242,6 +2255,8 @@ class RoverAgent:
 
     def update(self, replay_iter, step, replay_buffer=None):
         metrics = dict()
+
+        self._maybe_freeze_encoder(step)
 
         if step % self.update_every_steps != 0 and self._is_T_sufficiently_initialized(step) is True:
             return metrics

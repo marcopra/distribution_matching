@@ -52,7 +52,7 @@ agent:
   embeddings: true
   lr_actor: 1000
   pmd_steps: 10
-  update_every_steps: 100
+  update_every_steps: 1000
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64

@@ -21,7 +21,7 @@ batch_sizes_actor=(32000)
 sink_idxs=(2)
 
 kernels=(inner_product gaussian)
-encoder_modes=(scratch pretrained_finetune pretrained_frozen)
+freeze_modes=(false true)
 cholesky_tolerances=(0 1e-6)
 kernel_bandwidth_mult=1.0
 
@@ -34,15 +34,10 @@ for seed in "${seeds[@]}"; do
                         for batch_size_actor in "${batch_sizes_actor[@]}"; do
                             for sink_idx in "${sink_idxs[@]}"; do
                                 for kernel_type in "${kernels[@]}"; do
-                                    for encoder_mode in "${encoder_modes[@]}"; do
-                                        if [[ "${kernel_type}" == "inner_product" ]]; then
-                                            selected_tolerances=("${cholesky_tolerances[@]}")
-                                        else
-                                            selected_tolerances=(0)
-                                        fi
-                                        for cholesky_tolerance in "${selected_tolerances[@]}"; do
+                                    for freeze_encoder in "${freeze_modes[@]}"; do
+                                        for cholesky_tolerance in "${cholesky_tolerances[@]}"; do
                                             sbatch \
-                                                --export=ALL,SEED="${seed}",FEATURE_DIM="${feature_dim}",FEATURE_MODE="${feature_mode}",LAMBDA_REG="${lambda_reg}",SUBSAMPLE="${subsample}",PCA_TRUNCATION="${pca_truncation}",BATCH_SIZE_ACTOR="${batch_size_actor}",SINK_IDX="${sink_idx}",KERNEL_TYPE="${kernel_type}",KERNEL_BANDWIDTH_MULT="${kernel_bandwidth_mult}",ENCODER_MODE="${encoder_mode}",CHOLESKY_TOLERANCE="${cholesky_tolerance}" \
+                                                --export=ALL,SEED="${seed}",FEATURE_DIM="${feature_dim}",FEATURE_MODE="${feature_mode}",LAMBDA_REG="${lambda_reg}",SUBSAMPLE="${subsample}",PCA_TRUNCATION="${pca_truncation}",BATCH_SIZE_ACTOR="${batch_size_actor}",SINK_IDX="${sink_idx}",KERNEL_TYPE="${kernel_type}",KERNEL_BANDWIDTH_MULT="${kernel_bandwidth_mult}",FREEZE_ENCODER="${freeze_encoder}",CHOLESKY_TOLERANCE="${cholesky_tolerance}" \
                                                 "${BASE}"
                                         done
                                     done
