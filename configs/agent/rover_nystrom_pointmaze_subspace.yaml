@@ -1,0 +1,11 @@
+# @package agent
+
+defaults:
+  - rover_nystrom_pointmaze_debug
+  - _self_
+
+_target_: agent.rover_nystrom_subspace.RoverSubspaceCoverageAgent
+coverage_embeddings: false  # keep XY coverage in physical coordinates
+coverage_state_filter: null  # null=all, integer=prefix, list=explicit feature indices
+coverage_kernel_bandwidth: null  # fixed bandwidth; mutually exclusive with multiplier
+coverage_kernel_bandwidth_mult: null  # null follows dynamics bandwidth; otherwise fit in selected coverage space

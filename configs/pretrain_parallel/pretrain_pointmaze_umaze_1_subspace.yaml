@@ -1,0 +1,43 @@
+# @package _global_
+
+defaults:
+  - pretrain_pointmaze_umaze_1
+  - override /agent: rover_nystrom_pointmaze_subspace
+  - override /env: pointmaze/pointmaze_umaze_full_state_discrete
+  - _self_
+
+num_train_frames: 1_000_000
+eval_every_frames: 100_000
+parallel_attach_eval_env_for_debug: false
+
+agent:
+  feature_dim: 256
+  embeddings: true
+  coverage_embeddings: false
+  linear_projection: true
+  feature_learning_loss: leworld
+  lr_actor: 10
+  pmd_steps: 10
+  update_every_steps: 100
+  pmd_eta_mode: backtracking
+  pca_truncation: 4500
+  compute_dtype: float64
+  sink_schedule: linear(0.0, 1.0, 500_000)
+  debug_fixed_dataset_updates: false
+  kernel_type: gaussian
+  kernel_bandwidth: null
+  kernel_bandwidth_mult: 1.0
+  subsampling_strategy: pivoted_cholesky
+  coverage_state_filter: 2
+  coverage_kernel_bandwidth: null
+  coverage_kernel_bandwidth_mult: 1.0
+  nystrom_exact_grid: false
+  subsamples: 4000
+  lambda_reg: 1e-6
+  batch_size_actor: 16000
+  update_actor_every_steps: 10000
+  T_init_steps: 5000
+
+use_wandb: true
+wandb_project: pointmaze_hp
+save_eval_best: false

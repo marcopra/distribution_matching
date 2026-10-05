@@ -1296,7 +1296,7 @@ class RoverAgent:
             f"Nyström state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
         )
 
-        nu_pi = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+        actor_loss = self._compute_actor_occupancy_loss(
                     phi_all_obs=self._phi_all_obs,
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
@@ -1311,7 +1311,6 @@ class RoverAgent:
                     all_actions=self._all_actions,
                     sub_actions=self._sub_actions,
                 )
-        actor_loss = torch.linalg.norm(nu_pi)**2
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
         best_loss = actor_loss
         best_pi = self.pi.clone()
@@ -1320,7 +1319,7 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self.distribution_matcher.compute_gradient_coefficient_nystrom_blockwise_and_proj(
+            grad_update = self._compute_actor_occupancy_gradient(
                 phi_sub_next_obs = self._phi_sub_next,
                 psi_sub_obs_action = self._psi_sub,
                 H = sub_H,
@@ -1355,7 +1354,7 @@ class RoverAgent:
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
             candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
             # candidate_M = sub_H * (self.E @ candidate_pi.T)
-            candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+            candidate_loss = self._compute_actor_occupancy_loss(
                     phi_all_obs=self._phi_all_obs,
                     phi_sub_next_obs = self._phi_sub_next,
                     psi_sub_obs_action = self._psi_sub,
@@ -1370,8 +1369,6 @@ class RoverAgent:
                     all_actions=self._all_actions,
                     sub_actions=self._sub_actions,
                 )
-            
-            candidate_loss = torch.linalg.norm(candidate_nu) ** 2
 
             if self.pmd_eta_mode == "backtracking":
                 trial_eta = eta_t
@@ -1382,7 +1379,7 @@ class RoverAgent:
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
                     candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
 
-                    candidate_nu = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+                    candidate_loss = self._compute_actor_occupancy_loss(
                             phi_all_obs=self._phi_all_obs,
                             phi_sub_next_obs = self._phi_sub_next,
                             psi_sub_obs_action = self._psi_sub,
@@ -1396,8 +1393,7 @@ class RoverAgent:
                             phi_sub_obs=self._phi_sub_obs,
                             all_actions=self._all_actions,
                             sub_actions=self._sub_actions,
-                        )                    
-                    candidate_loss = torch.linalg.norm(candidate_nu) ** 2
+                        )
                     trial += 1
                 eta_t = trial_eta
 
@@ -1428,6 +1424,19 @@ class RoverAgent:
             metrics['sink_norm'] = float(sink_norm)
    
         return metrics
+
+    def _compute_actor_occupancy_loss(self, **kwargs):
+        """Return squared occupancy norm for the standard state coverage objective."""
+        occupancy = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
+            **kwargs
+        )
+        return torch.linalg.norm(occupancy) ** 2
+
+    def _compute_actor_occupancy_gradient(self, **kwargs):
+        """Return gradient coefficient for the standard state coverage objective."""
+        return self.distribution_matcher.compute_gradient_coefficient_nystrom_blockwise_and_proj(
+            **kwargs
+        )
 
     
     def _cache_features(self, obs, action, next_obs, encoder=None, sub_obs=None, sub_action=None, sub_next_obs=None):

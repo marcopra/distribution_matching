@@ -1243,13 +1243,24 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         return image_chw
 
     def _observation_for_policy_probe_point(self, xy: np.ndarray) -> np.ndarray:
+        xy = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
+        if getattr(self.agent, "obs_type", None) != "pixels":
+            obs_shape = tuple(getattr(self.agent, "obs_shape", ()))
+            obs_dim = int(np.prod(obs_shape)) if obs_shape else 0
+            if obs_dim == 4:
+                # Compare policy probabilities at identical zero velocity,
+                # while varying only the XY probe position.
+                return np.concatenate((xy, np.zeros(2, dtype=np.float32))).reshape(obs_shape)
+            if obs_dim == 2:
+                return xy.reshape(obs_shape)
+
         debug_helper = getattr(self.agent, "nystrom_debug", None)
         observation_from_xy = getattr(debug_helper, "observation_from_xy", None)
         if callable(observation_from_xy):
             return observation_from_xy(self.agent, xy)
 
         if getattr(self.agent, "obs_type", None) != "pixels":
-            return np.asarray(xy, dtype=np.float32).reshape(getattr(self.agent, "obs_shape", (2,)))
+            return xy.reshape(getattr(self.agent, "obs_shape", (2,)))
 
         render_from_position = _get_env_method(self.env, "render_from_position")
         if not callable(render_from_position):
@@ -1601,7 +1612,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         self._add_policy_action_legend(axes[1], probabilities.shape[1])
         fig.suptitle(
             f"{self.title_prefix} policy action probabilities at step {step} "
-            f"({points.shape[0]} feasible probe points)",
+            f"({points.shape[0]} feasible XY probes, velocity=(0, 0))",
             fontsize=13,
         )
 

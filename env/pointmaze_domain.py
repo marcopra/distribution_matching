@@ -397,6 +397,63 @@ class PointMazeXYObservationWrapper(gym.Wrapper):
         return getattr(env, name)
 
 
+class PointMazeAgentStateObservationWrapper(gym.Wrapper):
+    """Expose PointMaze's agent observation without achieved/desired-goal fields."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        observation_space = env.observation_space
+        if isinstance(observation_space, spaces.Dict):
+            state_space = observation_space.spaces.get("observation")
+            if state_space is None:
+                raise ValueError(
+                    "PointMaze agent-state observation requires an 'observation' space"
+                )
+            low = np.asarray(state_space.low, dtype=np.float32)
+            high = np.asarray(state_space.high, dtype=np.float32)
+            self.observation_space = spaces.Box(
+                low=low,
+                high=high,
+                shape=state_space.shape,
+                dtype=np.float32,
+            )
+        else:
+            self.observation_space = observation_space
+        shape = getattr(self.observation_space, "shape", None)
+        if shape is None or len(shape) != 1:
+            raise ValueError(
+                "PointMaze agent-state observation must be a flat vector, "
+                f"got shape {shape}"
+            )
+
+    def _agent_state(self, obs):
+        if isinstance(obs, dict):
+            if "observation" not in obs:
+                raise ValueError("PointMaze observation is missing 'observation' state field")
+            obs = obs["observation"]
+        state = np.asarray(obs, dtype=np.float32).reshape(-1)
+        expected = int(np.prod(self.observation_space.shape))
+        if state.size != expected:
+            raise ValueError(
+                f"PointMaze agent state expected {expected} values, got {state.size}"
+            )
+        return state.copy()
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self._agent_state(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self._agent_state(obs), reward, terminated, truncated, info
+
+    def __getattr__(self, name):
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
+
+
 def wrap_point_maze_env(env, pointmaze_kwargs):
     pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
     reward_type = str(pointmaze_kwargs.pop("reward_type", "dense")).lower()
@@ -412,6 +469,7 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     max_velocity = pointmaze_kwargs.pop("max_velocity", 1.0)
     preserve_target_velocity = bool(pointmaze_kwargs.pop("preserve_target_velocity", True))
     only_xy_position = bool(pointmaze_kwargs.pop("only_xy_position", False))
+    only_agent_state = bool(pointmaze_kwargs.pop("only_agent_state", False))
 
     if goal_position is None:
         raise ValueError("PointMaze environments require pointmaze.goal_position to keep the goal fixed")
@@ -452,15 +510,19 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     else:
         action_description = "continuous force actions"
 
+    if only_agent_state:
+        env = PointMazeAgentStateObservationWrapper(env)
     if only_xy_position:
         env = PointMazeXYObservationWrapper(env)
 
     warning = (
         "Warning: PointMaze environment uses fixed goal and initial position, "
-        f"{action_description}, {reward_type} reward, and goal-hidden pixel observations."
+        f"{action_description}, {reward_type} reward, and goal-hidden rendering."
     )
     if only_xy_position:
         warning += " State observations are masked to agent XY position only."
+    elif only_agent_state:
+        warning += " State observations expose full agent state only."
     if getattr(env.unwrapped, "continuing_task", False):
         warning += " continuing_task=True keeps the episode from terminating at success."
     utils.ColorPrint.yellow(warning)
