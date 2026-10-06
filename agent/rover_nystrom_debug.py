@@ -1427,10 +1427,16 @@ class RoverAgent:
 
     def _compute_actor_occupancy_loss(self, **kwargs):
         """Return squared occupancy norm for the standard state coverage objective."""
-        occupancy = self.distribution_matcher.compute_nu_pi_nystrom_memory_efficient(
-            **kwargs
+        return self.distribution_matcher.compute_nu_pi_nystrom_kernel_loss(
+            phi_sub_next_obs=kwargs["phi_sub_next_obs"],
+            psi_sub_obs_action=kwargs["psi_sub_obs_action"],
+            H=kwargs["H"],
+            pi=kwargs["pi"],
+            E=kwargs["E"],
+            alpha=kwargs["alpha"],
+            sink_norm=kwargs["sink_norm"],
+            B_nystrom=kwargs["B_nystrom"],
         )
-        return torch.linalg.norm(occupancy) ** 2
 
     def _compute_actor_occupancy_gradient(self, **kwargs):
         """Return gradient coefficient for the standard state coverage objective."""

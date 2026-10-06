@@ -6,7 +6,10 @@ import torch
 
 import utils
 import matplotlib.pyplot as plt
- 
+from agent.rover_sink import (
+    nystrom_resolvent_coefficients,
+    orthogonal_sink_residual_gram,
+)
 
 class DistributionMatcher:
     """Handles mathematical operations for distribution matching via PMD."""
@@ -74,7 +77,7 @@ class DistributionMatcher:
             sink_norm: float
         ) -> torch.Tensor:
         """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
-       
+
         N = K.shape[0]
        
         # α̃ augmented to be [α; 1]
@@ -123,18 +126,6 @@ class DistributionMatcher:
         # Identity matrix
         I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)
 
-        sink_state = torch.zeros((phi_all_next_obs.shape[1],1), device=self.device, dtype=phi_all_next_obs.dtype)
-        sink_state[-1] = sink_norm
-
-        # Computing Ψ̃ and Φ̃ are now of shape [N+1, d*|A| + 2] and [N+1, d + 2] respectively
-        upper_left = phi_all_next_obs.T - sink_state@torch.ones((1, psi_all_obs_action.shape[1]), device=psi_all_obs_action.device, dtype=psi_all_obs_action.dtype)@psi_all_obs_action.T
-        tilde_phi_all_next_obs_transposed = torch.zeros((phi_all_next_obs.shape[1]+1, phi_all_next_obs.shape[0]+1), device=phi_all_next_obs.device, dtype=phi_all_next_obs.dtype)
-        tilde_phi_all_next_obs_transposed[:upper_left.shape[0], :upper_left.shape[1]] = upper_left
-        assert sink_state.shape[0] == upper_left.shape[0], "Sink state and upper left matrix row size mismatch"
-        tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] = sink_state
-        tilde_phi_all_next_obs = tilde_phi_all_next_obs_transposed.T
-        assert torch.all(tilde_phi_all_next_obs_transposed[:sink_state.shape[0], -1:] == sink_state), "Last column of tilde_phi_all_next_obs should be sink_state"
-
         # Ã augmented to be [A 0; 0 1]
         # Symmetric positive definite matrix A = ψψᵀ + λI
         K = self.kernel(psi_all_obs_action, psi_all_obs_action) if K is None else K
@@ -162,8 +153,11 @@ class DistributionMatcher:
         tilde_B_tilde_M[-1, -1] = 1.0
 
         # gradient = 2 γ (1 - γ)² Ã⁻ᵀ (I - γ Ã⁻¹M̃)⁻ᵀΦ̃Φ̃ᵀ(I - γ Ã⁻¹M̃)⁻¹ α̃ 
-        # State and state-action similarities can use different Gaussian bandwidths.
-        phi_kernel = self.state_kernel(tilde_phi_all_next_obs, tilde_phi_all_next_obs) # [n+1, n+1]
+        state_features = phi_all_next_obs[:, :-1]
+        state_gram = self.state_kernel(state_features, state_features)
+        phi_kernel = orthogonal_sink_residual_gram(
+            state_gram, psi_all_obs_action.sum(dim=1), sink_norm
+        )
         I_n_plus1 = torch.eye(tilde_B_tilde_M.shape[0], device=tilde_B_tilde_M.device, dtype=tilde_B_tilde_M.dtype)
         # Left term: Ã⁻ᵀ(I - γB̃M̃)⁻ᵀΦ̃Φ̃ᵀ
         left_term = torch.linalg.solve((I_n_plus1 - self.gamma * tilde_B_tilde_M).T@tilde_A.T, phi_kernel) # [n+1, n+1]
@@ -387,6 +381,34 @@ class DistributionMatcher:
 
         return occupancy
 
+    def compute_nu_pi_nystrom_kernel_loss(
+        self,
+        *,
+        phi_sub_next_obs: torch.Tensor,
+        psi_sub_obs_action: torch.Tensor,
+        H: torch.Tensor,
+        pi: torch.Tensor,
+        E: torch.Tensor,
+        alpha: torch.Tensor,
+        sink_norm: float,
+        B_nystrom: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute kernel occupancy loss with an orthogonal sink feature."""
+        coefficients = nystrom_resolvent_coefficients(
+            H, pi, E, alpha, B_nystrom, self.gamma
+        )
+        occupancy_coefficients = (1.0 - self.gamma) * coefficients
+        state_features = phi_sub_next_obs[:, :-1]
+        state_gram = self.state_kernel(state_features, state_features)
+        residual_gram = orthogonal_sink_residual_gram(
+            state_gram,
+            psi_sub_obs_action.sum(dim=1),
+            sink_norm,
+        )
+        return (
+            occupancy_coefficients.T @ residual_gram @ occupancy_coefficients
+        ).squeeze()
+
 
     
     def compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
@@ -407,26 +429,6 @@ class DistributionMatcher:
         # I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
         N = H.shape[0]
         m = phi_sub_next_obs.shape[0]
-        d = phi_sub_next_obs.shape[1]
-
-        # Build Phi-tilde directly, without upper_left_sub temporary
-        tilde_phi_sub_next_obs_T = torch.zeros(
-
-            (d + 1, m + 1),
-
-            device=phi_sub_next_obs.device,
-
-            dtype=phi_sub_next_obs.dtype,
-
-        )
-        tilde_phi_sub_next_obs_T[:d, :m] = phi_sub_next_obs.T
-        tilde_phi_sub_next_obs_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
-        tilde_phi_sub_next_obs_T[d - 1, m] = sink_norm
-        tilde_phi_sub_next_obs = tilde_phi_sub_next_obs_T.T
-
-        sink_state = torch.zeros((d,1), device=self.device, dtype=phi_sub_next_obs.dtype)
-        sink_state[-1] = sink_norm
-
         M = H*(E@pi.T) # [n, m]
 
         
@@ -460,9 +462,13 @@ class DistributionMatcher:
         tilde_S_r_reg = tilde_S_r + 1e-6 * torch.eye(tilde_S_r.shape[0], device=tilde_S_r.device, dtype=tilde_S_r.dtype)
         del tilde_S_r
 
-        tilde_phi_kernel = self.state_kernel(tilde_phi_sub_next_obs, tilde_phi_sub_next_obs) 
+        state_features = phi_sub_next_obs[:, :-1]
+        state_gram = self.state_kernel(state_features, state_features)
+        tilde_phi_kernel = orthogonal_sink_residual_gram(
+            state_gram, psi_sub_obs_action.sum(dim=1), sink_norm
+        )
         tilde_phi_kernel_r = tilde_eig_vecs_r.T @ tilde_phi_kernel @ tilde_eig_vecs_r
-        del tilde_phi_kernel, tilde_phi_sub_next_obs
+        del tilde_phi_kernel
         
         tilde_B = torch.zeros(B_nystrom.shape[0] + 1, B_nystrom.shape[1] + 1, device=B_nystrom.device, dtype=B_nystrom.dtype)
         tilde_B[:-1, :-1] = B_nystrom
@@ -502,7 +508,6 @@ class DistributionMatcher:
         """Compute projected Nyström gradient using block augmented algebra."""
         m = phi_sub_next_obs.shape[0]
         r = eig_vecs_r.shape[1]
-        d = phi_sub_next_obs.shape[1]
         eps = 1e-6
         beta = 2 * self.gamma * ((1 - self.gamma) ** 2)
 
@@ -534,21 +539,12 @@ class DistributionMatcher:
         idx_r = torch.arange(r, device=S_r_reg.device)
         S_r_reg[idx_r, idx_r] += eps
 
-        # Build Φ̃, then compute K̃_φ = k(Φ̃, Φ̃) with the configured kernel.
-        tilde_phi_T = torch.zeros(
-            (d + 1, m + 1),
-            device=phi_sub_next_obs.device,
-            dtype=phi_sub_next_obs.dtype,
+        # K̃_{φ,r} combines the state kernel with an orthogonal sink block.
+        state_features = phi_sub_next_obs[:, :-1]
+        state_gram = self.state_kernel(state_features, state_features)
+        tilde_K_phi = orthogonal_sink_residual_gram(
+            state_gram, psi_sub_obs_action.sum(dim=1), sink_norm
         )
-        tilde_phi_T[:d, :m] = phi_sub_next_obs.T
-        tilde_phi_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
-        tilde_phi_T[d - 1, m] = sink_norm
-        tilde_phi = tilde_phi_T.T
-        del tilde_phi_T
-
-        # K̃_{φ,r} = [[K_rr, k_re], [k_erᵀ, k_ee]]
-        tilde_K_phi = self.state_kernel(tilde_phi, tilde_phi)
-        del tilde_phi
 
         # K_rr = Uᵣᵀ K̃_φ[1:m,1:m] Uᵣ
         K_rr = eig_vecs_r.T @ tilde_K_phi[:-1, :-1] @ eig_vecs_r
@@ -625,5 +621,3 @@ class DistributionMatcher:
         #     )
         
         return gradient
-
-       

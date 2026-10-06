@@ -6,6 +6,11 @@ from numbers import Integral
 
 import torch
 
+from agent.rover_sink import (
+    nystrom_resolvent_coefficients,
+    orthogonal_sink_residual_gram,
+)
+
 
 def normalize_coverage_state_filter(state_filter, state_dim: int) -> tuple[int, ...]:
     """Resolve ``None``, prefix length, or explicit indices to feature indices."""
@@ -64,34 +69,16 @@ class SubspaceCoverageMatcher:
     ) -> torch.Tensor:
         # H and E use full-state transition features. Only the coverage Gram
         # matrix below uses the selected state coordinates.
-        M = H * (E @ pi.T)
-        BM = B_nystrom @ M
-        system = torch.eye(BM.shape[0], device=BM.device, dtype=BM.dtype)
-        system = system - gamma * BM
-        augmented = torch.zeros(
-            (system.shape[0] + 1, system.shape[1] + 1),
-            device=system.device,
-            dtype=system.dtype,
+        return nystrom_resolvent_coefficients(
+            H, pi, E, alpha, B_nystrom, gamma
         )
-        augmented[:-1, :-1] = system
-        augmented[-1, -1] = 1.0 - gamma
-        alpha_augmented = torch.ones(
-            (alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype
-        )
-        alpha_augmented[:-1] = alpha
-        return torch.linalg.solve(augmented, alpha_augmented)
 
     @staticmethod
-    def _coverage_points(
+    def _coverage_state_features(
         phi_sub_next_obs: torch.Tensor,
-        psi_sub_obs_action: torch.Tensor,
-        sink_norm: float,
         state_indices: tuple[int, ...],
         coverage_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # The last column of phi_sub_next_obs is ROVER's reserved zero feature
-        # for the sink augmentation. Build an explicit sink coordinate after
-        # projecting the actual state features.
         if coverage_features is None:
             state_features = phi_sub_next_obs[:, :-1]
             if state_features.shape[1] <= max(state_indices):
@@ -102,12 +89,28 @@ class SubspaceCoverageMatcher:
             index = torch.as_tensor(state_indices, device=state_features.device, dtype=torch.long)
             projected = state_features.index_select(1, index)
         else:
-            projected = coverage_features
-        sink_coordinate = -float(sink_norm) * psi_sub_obs_action.sum(dim=1, keepdim=True)
-        points = torch.cat((projected, sink_coordinate), dim=1)
-        sink_point = torch.zeros((1, points.shape[1]), device=points.device, dtype=points.dtype)
-        sink_point[0, -1] = float(sink_norm)
-        return torch.cat((points, sink_point), dim=0)
+            projected = coverage_features.to(
+                device=phi_sub_next_obs.device, dtype=phi_sub_next_obs.dtype
+            )
+        return projected
+
+    def _coverage_gram(
+        self,
+        *,
+        phi_sub_next_obs: torch.Tensor,
+        psi_sub_obs_action: torch.Tensor,
+        sink_norm: float,
+        state_indices: tuple[int, ...],
+        coverage_features: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        state_features = self._coverage_state_features(
+            phi_sub_next_obs, state_indices, coverage_features
+        )
+        state_gram = self.kernel_fn(state_features, state_features)
+        sink_coefficients = psi_sub_obs_action.sum(dim=1)
+        return orthogonal_sink_residual_gram(
+            state_gram, sink_coefficients, sink_norm
+        )
 
     def compute_nystrom_subspace_occupancy_loss(
         self,
@@ -127,14 +130,13 @@ class SubspaceCoverageMatcher:
         coefficients = self._resolvent_coefficients(
             H, pi, E, alpha, B_nystrom, self.gamma
         )
-        points = self._coverage_points(
-            phi_sub_next_obs,
-            psi_sub_obs_action,
-            sink_norm,
-            state_indices,
+        coverage_gram = self._coverage_gram(
+            phi_sub_next_obs=phi_sub_next_obs,
+            psi_sub_obs_action=psi_sub_obs_action,
+            sink_norm=sink_norm,
+            state_indices=state_indices,
             coverage_features=coverage_features,
         )
-        coverage_gram = self.kernel_fn(points, points)
         occupancy_coefficients = (1.0 - self.gamma) * coefficients
         return (occupancy_coefficients.T @ coverage_gram @ occupancy_coefficients).squeeze()
 
@@ -172,19 +174,18 @@ class SubspaceCoverageMatcher:
         diagonal_r = torch.arange(r, device=S_r_reg.device)
         S_r_reg[diagonal_r, diagonal_r] += eps
 
-        points = self._coverage_points(
-            phi_sub_next_obs,
-            psi_sub_obs_action,
-            sink_norm,
-            state_indices,
+        coverage_gram = self._coverage_gram(
+            phi_sub_next_obs=phi_sub_next_obs,
+            psi_sub_obs_action=psi_sub_obs_action,
+            sink_norm=sink_norm,
+            state_indices=state_indices,
             coverage_features=coverage_features,
         )
-        coverage_gram = self.kernel_fn(points, points)
         K_rr = eig_vecs_r.T @ coverage_gram[:-1, :-1] @ eig_vecs_r
         k_re = eig_vecs_r.T @ coverage_gram[:-1, -1:]
         k_er_T = coverage_gram[-1:, :-1] @ eig_vecs_r
         k_ee = coverage_gram[-1:, -1:]
-        del coverage_gram, points
+        del coverage_gram
 
         alpha_r = eig_vecs_r.T @ alpha
         alpha_e = torch.ones((1, 1), device=alpha.device, dtype=alpha.dtype)
