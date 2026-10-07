@@ -63,7 +63,7 @@ class DistributionMatcher:
             X_actions = X_actions.to(device=K.device).reshape(-1)
             Y_actions = Y_actions.to(device=K.device).reshape(-1)
             action_mask = X_actions[:, None] == Y_actions[None, :]
-        return K.masked_fill_(~action_mask, 0.0)
+        return K.mul_(action_mask)
 
     
             

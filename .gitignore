@@ -228,3 +228,4 @@ exp_config.yaml
 runs/*
 exp_*
 exploration_video
+diagnostics

@@ -1623,6 +1623,11 @@ class RoverAgent:
             "action": action.long().reshape(-1, 1),
             "reward": reward.to(dtype=torch.float32),
         }
+        if self.obs_type != "pixels" and self.embeddings:
+            # State observations are small. Retain them so a changing encoder
+            # cannot mix feature maps from different updates in the actor fit.
+            encoded["obs_raw"] = obs.detach().to(dtype=torch.float32)
+            encoded["next_obs_raw"] = next_obs.detach().to(dtype=torch.float32)
         # Replay metadata follows the five standard transition fields. Keep
         # coordinates as a diagnostic sidecar; actor features still come only
         # from observations (including pixels).
@@ -1634,6 +1639,26 @@ class RoverAgent:
         elif self.obs_type != "pixels" and obs.ndim >= 2 and obs.shape[1] >= 2:
             encoded["debug_xy"] = obs.detach().reshape(obs.shape[0], -1)[:, :2]
         return encoded
+
+    def _refresh_encoded_state_features(self, encoded):
+        """Re-encode sampled state support before selecting Nyström landmarks."""
+        if "obs_raw" not in encoded or "next_obs_raw" not in encoded:
+            return encoded
+        transitions = (
+            encoded["obs_raw"],
+            encoded["action"],
+            encoded["reward"],
+            torch.ones_like(encoded["reward"]),
+            encoded["next_obs_raw"],
+        )
+        if "debug_xy" in encoded:
+            transitions += (encoded["debug_xy"],)
+        refreshed = self._encode_actor_transition_batch_with_retries(transitions)
+        # Keep FIFO sampling on CPU and preserve diagnostic sidecars.
+        return {
+            **encoded,
+            **{key: value.detach().cpu() for key, value in refreshed.items()},
+        }
 
     def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
         splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
@@ -1956,6 +1981,7 @@ class RoverAgent:
             "cpu",
             include_first=True,
         )
+        full = self._refresh_encoded_state_features(full)
         rewards = full.get("reward")
         if self.subsamples is None:
             return EncodedActorUpdateData(
