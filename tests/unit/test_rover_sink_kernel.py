@@ -1,9 +1,37 @@
+import pytest
 import torch
 
 import utils
 from agent.rover_matchers import DistributionMatcher
+from agent.rover_networks import FrozenCNNFeatureEncoder
 from agent.rover_sink import orthogonal_sink_residual_gram
 from agent.rover_subspace_matchers import SubspaceCoverageMatcher
+
+
+def test_frozen_cnn_spatial_features_are_unit_mass_and_frozen():
+    encoder = FrozenCNNFeatureEncoder((1, 84, 84), feature_dim=16)
+    observations = torch.randint(0, 256, (3, 1, 84, 84), dtype=torch.uint8)
+
+    features = encoder(observations)
+
+    assert features.shape == (3, 32 * 7 * 7)
+    assert all(not parameter.requires_grad for parameter in encoder.parameters())
+    assert torch.all(features >= 0)
+    torch.testing.assert_close(features.sum(dim=1), torch.ones(3))
+
+
+def test_subspace_sink_requires_unit_mass_dynamics_features():
+    matcher = SubspaceCoverageMatcher(
+        gamma=0.6,
+        kernel_fn=utils.build_kernel_fn("gaussian", bandwidth=0.8),
+    )
+    with pytest.raises(ValueError, match="unit-mass dynamics state-action"):
+        matcher._coverage_gram(
+            phi_sub_next_obs=torch.tensor([[0.2, 0.3, 0.0]]),
+            psi_sub_obs_action=torch.tensor([[0.2, 0.3]]),
+            sink_norm=0.1,
+            state_indices=(0, 1),
+        )
 
 
 def test_orthogonal_sink_residual_gram_matches_linear_feature_construction():

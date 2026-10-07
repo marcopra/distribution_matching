@@ -1263,7 +1263,7 @@ class RoverAgent:
         utils.ColorPrint.yellow(f"Actor state kernel: {self._kernel_status(self.kernel_fn)}")
         base_eta = float(utils.schedule(self.lr_actor, step))
         base_eta = float(np.clip(base_eta, self.pmd_eta_min, self.pmd_eta_max))
-        self.current_eta = base_eta
+        self.current_eta = 0.0
 
         sink_norm = utils.schedule(self.sink_schedule, step)
         self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
@@ -1311,10 +1311,14 @@ class RoverAgent:
                     all_actions=self._all_actions,
                     sub_actions=self._sub_actions,
                 )
+        if not np.isfinite(float(actor_loss)):
+            raise RuntimeError("Initial actor occupancy loss is not finite")
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
         best_loss = actor_loss
         best_pi = self.pi.clone()
         best_coeff = self.gradient_coeff.clone()
+        best_eta = 0.0
+        backtracking_rejections = 0
 
         self._adagrad_accum = 0.0
 
@@ -1373,7 +1377,9 @@ class RoverAgent:
             if self.pmd_eta_mode == "backtracking":
                 trial_eta = eta_t
                 trial = 0
-                while candidate_loss > actor_loss and trial < self.pmd_backtrack_max_trials:
+                while (
+                    not np.isfinite(float(candidate_loss)) or candidate_loss > actor_loss
+                ) and trial < self.pmd_backtrack_max_trials:
                     trial_eta *= self.pmd_backtrack_factor
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
@@ -1396,6 +1402,16 @@ class RoverAgent:
                         )
                     trial += 1
                 eta_t = trial_eta
+                if not np.isfinite(float(candidate_loss)) or candidate_loss > actor_loss:
+                    # No acceptable step was found. Keep the last accepted
+                    # policy and stop: repeating its direction cannot help.
+                    self.current_eta = 0.0
+                    backtracking_rejections += 1
+                    print(
+                        f"  PMD Iteration {iteration}, backtracking rejected, "
+                        f"Actor loss: {actor_loss}, eta: 0"
+                    )
+                    break
 
             self.current_eta = eta_t
             self.gradient_coeff = candidate_coeff
@@ -1407,6 +1423,7 @@ class RoverAgent:
                 best_loss = actor_loss
                 best_pi = self.pi.clone()
                 best_coeff = self.gradient_coeff.clone()
+                best_eta = eta_t
 
             if iteration % 1 == 0 or iteration == self.pmd_steps - 1:
                 print(f"  PMD Iteration {iteration}, Actor loss: {actor_loss}, eta: {self.current_eta:.6g}")
@@ -1415,12 +1432,14 @@ class RoverAgent:
             self.pi = best_pi
             self.gradient_coeff = best_coeff
             actor_loss = best_loss
+            self.current_eta = best_eta
             
 
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss
             metrics['actor_eta'] = float(self.current_eta)
             metrics['actor_best_loss'] = float(best_loss)
+            metrics['actor_backtracking_rejections'] = backtracking_rejections
             metrics['sink_norm'] = float(sink_norm)
    
         return metrics
@@ -1623,11 +1642,16 @@ class RoverAgent:
             "action": action.long().reshape(-1, 1),
             "reward": reward.to(dtype=torch.float32),
         }
-        if self.obs_type != "pixels" and self.embeddings:
-            # State observations are small. Retain them so a changing encoder
-            # cannot mix feature maps from different updates in the actor fit.
-            encoded["obs_raw"] = obs.detach().to(dtype=torch.float32)
-            encoded["next_obs_raw"] = next_obs.detach().to(dtype=torch.float32)
+        if self.embeddings:
+            # Keep raw support for every learned encoder. Pixel replay is
+            # uint8: preserve that dtype on CPU instead of storing float images.
+            raw_dtype = obs.dtype if self.obs_type == "pixels" else torch.float32
+            encoded["obs_raw"] = torch.as_tensor(transitions[0]).detach().to(
+                device="cpu", dtype=raw_dtype
+            )
+            encoded["next_obs_raw"] = torch.as_tensor(transitions[4]).detach().to(
+                device="cpu", dtype=raw_dtype
+            )
         # Replay metadata follows the five standard transition fields. Keep
         # coordinates as a diagnostic sidecar; actor features still come only
         # from observations (including pixels).
@@ -1641,7 +1665,7 @@ class RoverAgent:
         return encoded
 
     def _refresh_encoded_state_features(self, encoded):
-        """Re-encode sampled state support before selecting Nyström landmarks."""
+        """Re-encode sampled support in bounded chunks under one policy encoder."""
         if "obs_raw" not in encoded or "next_obs_raw" not in encoded:
             return encoded
         transitions = (
@@ -1653,12 +1677,21 @@ class RoverAgent:
         )
         if "debug_xy" in encoded:
             transitions += (encoded["debug_xy"],)
-        refreshed = self._encode_actor_transition_batch_with_retries(transitions)
-        # Keep FIFO sampling on CPU and preserve diagnostic sidecars.
-        return {
-            **encoded,
-            **{key: value.detach().cpu() for key, value in refreshed.items()},
-        }
+        chunk_size = max(1, getattr(self, "encoded_fifo_encode_batch_size", 4096))
+        feature_batches = []
+        for start in range(0, self._encoded_batch_size(encoded), chunk_size):
+            chunk = self._slice_raw_transition_batch(
+                transitions, slice(start, start + chunk_size)
+            )
+            refreshed = self._encode_actor_transition_batch_with_retries(chunk)
+            feature_batches.append({
+                key: refreshed[key].detach().cpu()
+                for key in ("phi_obs", "phi_next")
+            })
+            del refreshed
+        # Frozen coverage and raw/diagnostic sidecars remain valid. Refresh only
+        # dynamics features, without rewriting or duplicating raw FIFO history.
+        return {**encoded, **self._concat_encoded_batches(feature_batches)}
 
     def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
         splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
@@ -1693,7 +1726,18 @@ class RoverAgent:
         if replay_buffer is None or not hasattr(replay_buffer, "get_new_transitions_since"):
             return False
 
-        self._sync_policy_encoder()
+        if self.embeddings:
+            for cached in (self._encoded_actor_fifo._first, self._encoded_actor_fifo._data):
+                if cached is not None and (
+                    "obs_raw" not in cached or "next_obs_raw" not in cached
+                ):
+                    raise RuntimeError(
+                        "Legacy actor FIFO has no raw observations for re-encoding. "
+                        "Start a fresh training run; old checkpoints remain usable "
+                        "for evaluation."
+                    )
+        # Draining replay must not change the encoder paired with the acting
+        # policy's fitted support and coefficients.
         inserted = 0
         encode_batch_size = max(1, self.encoded_fifo_encode_batch_size)
 
@@ -1981,6 +2025,9 @@ class RoverAgent:
             "cpu",
             include_first=True,
         )
+        # Publish a new encoder only when rebuilding its actor basis. Every
+        # sampled row, including the pinned reset, is refreshed before landmarks.
+        self._sync_policy_encoder()
         full = self._refresh_encoded_state_features(full)
         rewards = full.get("reward")
         if self.subsamples is None:

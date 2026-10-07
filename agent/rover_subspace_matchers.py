@@ -108,6 +108,16 @@ class SubspaceCoverageMatcher:
         )
         state_gram = self.kernel_fn(state_features, state_features)
         sink_coefficients = psi_sub_obs_action.sum(dim=1)
+        if not torch.allclose(
+            sink_coefficients,
+            torch.ones_like(sink_coefficients),
+            atol=1e-5,
+            rtol=1e-5,
+        ):
+            raise ValueError(
+                "ROVER sink augmentation requires unit-mass dynamics state-action "
+                "features: every row of psi(s, a) must sum to 1"
+            )
         return orthogonal_sink_residual_gram(
             state_gram, sink_coefficients, sink_norm
         )

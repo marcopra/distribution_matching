@@ -229,3 +229,11 @@ runs/*
 exp_*
 exploration_video
 diagnostics
+
+# Keep the reproducible ROVER checks; generated diagnostics remain ignored.
+!tests/diagnostics/
+tests/diagnostics/*
+!tests/diagnostics/pointmaze/
+tests/diagnostics/pointmaze/*
+!tests/diagnostics/pointmaze/reproduce_image_rover_audit.py
+!tests/diagnostics/pointmaze/smoke_image_rover_fixes.py

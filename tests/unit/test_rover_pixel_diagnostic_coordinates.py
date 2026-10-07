@@ -10,7 +10,7 @@ from agent.rover_nystrom_debug import RoverAgent
 
 
 class _PixelProjector(torch.nn.Module):
-    def encode_and_project(self, observation):
+    def encode_and_project(self, observation, normalize=True):
         return observation.float().reshape(observation.shape[0], -1)
 
 
@@ -36,6 +36,7 @@ class RoverPixelDiagnosticCoordinatesTest(unittest.TestCase):
         agent.device = "cpu"
         agent.obs_type = "pixels"
         agent.embeddings = True
+        agent.feature_learning_loss = "infonce"
         agent.aug = torch.nn.Identity()
         agent.policy_encoder = _PixelProjector()
 
@@ -53,6 +54,8 @@ class RoverPixelDiagnosticCoordinatesTest(unittest.TestCase):
         encoded = agent._encode_actor_transition_batch(transitions)
 
         torch.testing.assert_close(encoded["debug_xy"], torch.from_numpy(coordinates))
+        torch.testing.assert_close(encoded["obs_raw"], torch.from_numpy(observations))
+        self.assertEqual(encoded["obs_raw"].dtype, torch.uint8)
 
     def test_nystrom_selection_keeps_coordinates_aligned(self):
         fifo = EncodedTransitionFIFO(capacity=4)

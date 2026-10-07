@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import utils
 from agent.utils import pairwise_squared_distance_torch
 from agent.rover_nystrom_debug import RoverAgent
-from agent.rover_networks import Encoder, ProjectSA
+from agent.rover_networks import Encoder, FrozenCNNFeatureEncoder, ProjectSA
 from agent.rover_subspace_matchers import (
     SubspaceCoverageMatcher,
     normalize_coverage_state_filter,
@@ -27,6 +27,8 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         coverage_kernel_bandwidth=None,
         coverage_kernel_bandwidth_mult=None,
         coverage_embeddings: bool = False,
+        coverage_encoder_type: str = "raw",
+        coverage_frame_index: int = -1,
         linear_projection: bool = False,
         hidden_dim: int = 1024,
         lr_encoder: float = 1e-4,
@@ -41,12 +43,77 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             total_train_steps=total_train_steps,
             **kwargs,
         )
-        raw_state_dim = math.prod(getattr(self, "obs_shape", (self.obs_dim,)))
-        self.coverage_state_indices = normalize_coverage_state_filter(
-            coverage_state_filter, raw_state_dim
-        )
+        if not self.embeddings:
+            raise ValueError(
+                "Subspace ROVER requires normalized learned features for its sink model; "
+                "set embeddings=true"
+            )
+        if self.whiten_representations:
+            raise ValueError(
+                "Subspace ROVER's unit-mass sink features are incompatible with "
+                "whiten_representations; disable whitening"
+            )
         self.coverage_state_filter = coverage_state_filter
         self.coverage_embeddings = bool(coverage_embeddings)
+        self.coverage_encoder_type = str(coverage_encoder_type).strip().lower()
+        if self.coverage_encoder_type not in ("raw", "frozen_cnn"):
+            raise ValueError(
+                "coverage_encoder_type must be 'raw' or 'frozen_cnn'"
+            )
+
+        self.coverage_feature_encoder = None
+        if self.coverage_encoder_type == "frozen_cnn":
+            if self.obs_type != "pixels":
+                raise ValueError("coverage_encoder_type='frozen_cnn' requires pixel observations")
+            if self.coverage_embeddings:
+                raise ValueError(
+                    "coverage_embeddings cannot be enabled with the frozen CNN "
+                    "coverage encoder"
+                )
+            if coverage_state_filter is not None:
+                raise ValueError(
+                    "coverage_state_filter applies to raw state features; set it to null "
+                    "when using coverage_encoder_type='frozen_cnn'"
+                )
+            if len(self.obs_shape) != 3:
+                raise ValueError(
+                    "Frozen CNN coverage requires pixel observations with shape [C, H, W]"
+                )
+            base_channels = int(self.image_channels)
+            stacked_channels, image_height, image_width = map(int, self.obs_shape)
+            if stacked_channels % base_channels != 0:
+                raise ValueError(
+                    "Pixel observation channels must be divisible by image_channels "
+                    f"({stacked_channels} vs {base_channels})"
+                )
+            frame_count = stacked_channels // base_channels
+            frame_index = int(coverage_frame_index)
+            if frame_index < 0:
+                frame_index += frame_count
+            if frame_index < 0 or frame_index >= frame_count:
+                raise ValueError(
+                    f"coverage_frame_index must select one of {frame_count} frames, "
+                    f"got {coverage_frame_index}"
+                )
+            self.coverage_frame_index = frame_index
+            self.coverage_feature_encoder = FrozenCNNFeatureEncoder(
+                (base_channels, image_height, image_width),
+                feature_dim=self.feature_dim,
+            ).to(device=self.device, dtype=torch.float32)
+            self._freeze_module(self.coverage_feature_encoder)
+            self.coverage_state_indices = ()
+        else:
+            if self.obs_type == "pixels":
+                raise ValueError(
+                    "Pixel coverage requires coverage_encoder_type='frozen_cnn' "
+                    "to define a compact spatial feature map"
+                )
+            raw_state_dim = math.prod(getattr(self, "obs_shape", (self.obs_dim,)))
+            self.coverage_state_indices = normalize_coverage_state_filter(
+                coverage_state_filter, raw_state_dim
+            )
+            self.coverage_frame_index = int(coverage_frame_index)
+
         if self.coverage_embeddings and not self.embeddings:
             raise ValueError(
                 "coverage_embeddings=True requires embeddings=True so its transition "
@@ -106,7 +173,32 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 eta_min=lr_encoder * 0.1,
             )
 
+    @staticmethod
+    def _unit_mass_operator_features(features: torch.Tensor) -> torch.Tensor:
+        """Map nonnegative state embeddings to unit-mass ROVER features."""
+        features = features.clamp_min(0.0)
+        mass = features.sum(dim=-1, keepdim=True)
+        normalized = features / mass.clamp_min(1e-12)
+        fallback = torch.full_like(features, 1.0 / features.shape[-1])
+        return torch.where(mass > 1e-12, normalized, fallback)
+
+    def _encode_with_module(self, module, obs, project=False):
+        features = super()._encode_with_module(module, obs, project=project)
+        if project and self.embeddings:
+            # The subspace sink derivation requires unit-mass dynamics features.
+            return self._unit_mass_operator_features(features)
+        return features
+
     def _selected_coverage_observations(self, observations: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "coverage_encoder_type", "raw") == "frozen_cnn":
+            if observations.ndim != 4 or tuple(observations.shape[1:]) != tuple(self.obs_shape):
+                raise ValueError(
+                    "Frozen CNN coverage expects observations matching [B, "
+                    f"{', '.join(map(str, self.obs_shape))}], got {tuple(observations.shape)}"
+                )
+            start = self.coverage_frame_index * self.image_channels
+            return observations[:, start : start + self.image_channels]
+
         flattened = observations.reshape(observations.shape[0], -1)
         if flattened.shape[1] != math.prod(self.obs_shape):
             raise ValueError(
@@ -132,7 +224,15 @@ class RoverSubspaceCoverageAgent(RoverAgent):
 
     def _encode_actor_transition_batch(self, transitions):
         encoded = super()._encode_actor_transition_batch(transitions)
-        if self.obs_type != "pixels":
+        if getattr(self, "coverage_encoder_type", "raw") == "frozen_cnn":
+            raw_next = torch.as_tensor(transitions[4], device=self.device)
+            selected_frame = self._selected_coverage_observations(raw_next)
+            with torch.no_grad():
+                coverage_features = self.coverage_feature_encoder(selected_frame)
+            encoded["coverage_next_features"] = coverage_features.detach().to(
+                device="cpu", dtype=torch.float32
+            )
+        else:
             raw_next = torch.as_tensor(transitions[4], device=self.device)
             encoded["coverage_next_raw"] = self._selected_coverage_observations(
                 raw_next
@@ -142,6 +242,17 @@ class RoverSubspaceCoverageAgent(RoverAgent):
     def _cache_encoded_features(self, encoded_full, encoded_sub=None):
         super()._cache_encoded_features(encoded_full, encoded_sub=encoded_sub)
         coverage_sub = encoded_sub if encoded_sub is not None else encoded_full
+        if getattr(self, "coverage_encoder_type", "raw") == "frozen_cnn":
+            if "coverage_next_features" not in coverage_sub:
+                raise ValueError(
+                    "Encoded pixel actor batch is missing frozen CNN coverage features"
+                )
+            self._raw_coverage_sub_next = None
+            self._coverage_sub_next_features = coverage_sub[
+                "coverage_next_features"
+            ].to(device=self.device, dtype=self.compute_dtype)
+            return
+
         if "coverage_next_raw" not in coverage_sub:
             raise ValueError(
                 "Encoded PointMaze actor batch is missing raw coverage coordinates"
@@ -156,7 +267,10 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             raise RuntimeError("Raw coverage features were not cached for this actor update")
         with torch.no_grad():
             raw = self._raw_coverage_sub_next.to(device=self.device)
-            if self.coverage_embeddings:
+            if getattr(self, "coverage_encoder_type", "raw") == "frozen_cnn":
+                self.coverage_feature_encoder.eval()
+                features = self.coverage_feature_encoder(raw)
+            elif self.coverage_embeddings:
                 self.coverage_encoder.eval()
                 features = self.coverage_encoder.encode_and_project(
                     raw, normalize=self.feature_learning_loss != "leworld"
@@ -223,6 +337,8 @@ class RoverSubspaceCoverageAgent(RoverAgent):
 
     def _coverage_uses_legacy_path(self) -> bool:
         """Preserve exact old objective when coverage spans same geometry/kernel."""
+        if getattr(self, "coverage_encoder_type", "raw") != "raw":
+            return False
         raw_state_dim = math.prod(getattr(self, "obs_shape", (self.obs_dim,)))
         covers_all_features = self.coverage_state_indices == tuple(range(raw_state_dim))
         if getattr(self, "embeddings", False) or getattr(self, "coverage_embeddings", False):
@@ -246,7 +362,8 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             self.coverage_kernel_fn.bandwidth = self.kernel_fn.bandwidth
 
     def _fit_state_kernel_bandwidth(self, X, Y) -> None:
-        self._prepare_coverage_features()
+        if self._coverage_sub_next_features is None:
+            self._prepare_coverage_features()
         super()._fit_state_kernel_bandwidth(X, Y)
         if self.coverage_kernel_bandwidth is None and self.coverage_kernel_bandwidth_mult is not None:
             self._fit_coverage_kernel_bandwidth(self._coverage_sub_next_features)

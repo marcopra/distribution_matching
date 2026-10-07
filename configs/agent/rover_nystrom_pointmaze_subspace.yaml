@@ -5,7 +5,9 @@ defaults:
   - _self_
 
 _target_: agent.rover_nystrom_subspace.RoverSubspaceCoverageAgent
-coverage_embeddings: false  # keep XY coverage in physical coordinates
+coverage_embeddings: false  # train separate state-space coverage features when true
+coverage_encoder_type: raw  # raw state features or frozen spatial CNNEncoder features
+coverage_frame_index: -1  # newest frame by default when using frozen_cnn
 coverage_state_filter: null  # null=all, integer=prefix, list=explicit feature indices
 coverage_kernel_bandwidth: null  # fixed bandwidth; mutually exclusive with multiplier
 coverage_kernel_bandwidth_mult: null  # null follows dynamics bandwidth; otherwise fit in selected coverage space

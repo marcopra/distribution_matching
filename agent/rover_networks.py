@@ -69,12 +69,13 @@ class CNNEncoder(nn.Module):
 
         self.apply(utils.weight_init)
 
-    def forward(self, obs):
+    def forward_spatial(self, obs):
+        """Return pooled convolutional maps before the dense projector."""
         obs = obs.to(dtype=self.conv[0].weight.dtype) / 255.
-        h = self.conv(obs)
-        h = self.adaptive_pool(h)
-        h = h.view(h.shape[0], -1)
-        return h
+        return self.adaptive_pool(self.conv(obs))
+
+    def forward(self, obs):
+        return self.forward_spatial(obs).flatten(start_dim=1)
 
     def encode_and_project(self, obs, normalize=True):
         h = self.forward(obs)
@@ -86,7 +87,44 @@ class CNNEncoder(nn.Module):
         elif self.mode == 'l1':
             z =F.normalize(z, p=1, dim=-1)
         return z
-    
+
+
+class FrozenCNNFeatureEncoder(nn.Module):
+    """Frozen, unit-mass spatial features from Rover's existing CNN trunk."""
+
+    def __init__(self, obs_shape, feature_dim=256):
+        super().__init__()
+        if len(obs_shape) != 3:
+            raise ValueError(
+                f"FrozenCNNFeatureEncoder expects [C, H, W], got {obs_shape}"
+            )
+        self.obs_shape = tuple(int(dim) for dim in obs_shape)
+        self.encoder = CNNEncoder(
+            self.obs_shape,
+            feature_dim=int(feature_dim),
+            mode="l1",
+        )
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        self.eval()
+
+    @property
+    def feature_dim(self):
+        return self.encoder.repr_dim
+
+    def forward(self, obs):
+        if obs.ndim != 4 or tuple(obs.shape[1:]) != self.obs_shape:
+            raise ValueError(
+                "FrozenCNNFeatureEncoder expects a batch matching "
+                f"[B, {', '.join(map(str, self.obs_shape))}], got {tuple(obs.shape)}"
+            )
+        spatial_features = self.encoder.forward_spatial(obs)
+        features = spatial_features.flatten(start_dim=1)
+        mass = features.sum(dim=1, keepdim=True)
+        normalized = features / mass.clamp_min(1e-12)
+        fallback = torch.full_like(features, 1.0 / features.shape[1])
+        return torch.where(mass > 1e-12, normalized, fallback)
+
 class ProjectSA(nn.Module):
     """ Projects state-action embeddings to state embeddings. """
     

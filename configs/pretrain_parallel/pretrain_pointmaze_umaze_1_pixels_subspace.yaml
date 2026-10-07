@@ -1,0 +1,35 @@
+# @package _global_
+defaults:
+  - pretrain_pointmaze_umaze_1_pixels
+  - override /agent: rover_nystrom_pointmaze_subspace
+  - override /env: pointmaze/pointmaze_umaze_full_state_discrete
+  - _self_
+
+obs_type: pixels
+frame_stack: 3
+num_train_frames: 1_000_000
+eval_every_frames: 100_000
+parallel_attach_eval_env_for_debug: true
+
+agent:
+  feature_dim: 256
+  embeddings: true
+  feature_learning_loss: infonce
+  linear_projection: true
+  coverage_embeddings: false
+  coverage_encoder_type: frozen_cnn
+  coverage_frame_index: -1
+  coverage_state_filter: null
+  kernel_type: gaussian
+  kernel_bandwidth: null
+  kernel_bandwidth_mult: 1.0
+  coverage_kernel_bandwidth: null
+  coverage_kernel_bandwidth_mult: 1.0
+  lr_actor: 10
+  lambda_reg: 1e-6
+  sink_schedule: linear(0.0, 0.8, 250000)
+  subsamples: 4000
+  batch_size_actor: 16000
+  update_actor_every_steps: 10000
+
+use_wandb: false
