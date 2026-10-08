@@ -34,7 +34,6 @@ def make_actor(losses, best_iterate):
     agent.pmd_best_iterate = best_iterate
     agent.use_tb = True
     agent.use_wandb = False
-    agent._fit_actor_whitening = lambda: None
     agent._fit_state_kernel_bandwidth = lambda *args: None
     agent._save_actor_kernel_debug_plot = lambda *args, **kwargs: None
     agent._encode_state_action = lambda phi, actions: torch.einsum(

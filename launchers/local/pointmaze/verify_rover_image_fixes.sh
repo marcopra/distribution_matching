@@ -20,7 +20,7 @@ shared=(
     'snapshots=[50000,100000,200000]'
     save_snapshot=true save_eval_best=false use_wandb=false
     parallel_attach_eval_env_for_debug=true
-    agent.embeddings=true agent.feature_learning_loss=infonce
+    agent.embeddings=true
     agent.linear_projection=true agent.coverage_embeddings=false
     agent.kernel_type=gaussian agent.kernel_bandwidth=null
     agent.kernel_bandwidth_mult=1.0 agent.coverage_kernel_bandwidth=null

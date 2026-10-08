@@ -19,11 +19,9 @@ KERNEL_BANDWIDTH_MULT="${KERNEL_BANDWIDTH_MULT:-1.0}"
 
 case "${KERNEL_TYPE}" in
     inner_product)
-        WHITEN_REPRESENTATIONS=false
         NYSTROM_CHOLESKY_TOLERANCE="${CHOLESKY_TOLERANCE}"
         ;;
     gaussian)
-        WHITEN_REPRESENTATIONS=true
         NYSTROM_CHOLESKY_TOLERANCE=0
         ;;
     *)
@@ -63,7 +61,6 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     wandb_project=pointmaze_hp \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.mode="${FEATURE_MODE}" \
-    agent.whiten_representations="${WHITEN_REPRESENTATIONS}" \
     agent.freeze_encoder="${FREEZE_ENCODER}" \
     p_path=none \
     agent.nystrom_cholesky_tolerance="${NYSTROM_CHOLESKY_TOLERANCE}" \

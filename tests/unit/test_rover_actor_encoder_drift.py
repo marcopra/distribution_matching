@@ -12,17 +12,16 @@ class ChangingEncoder(torch.nn.Module):
         super().__init__()
         self.register_buffer("offset", torch.tensor(1.))
 
-    def encode_and_project(self, obs, normalize=True):
+    def encode_and_project(self, obs):
         obs = obs.reshape(obs.shape[0], -1).float()
         raw = torch.stack([obs[:, 0].abs()+self.offset, obs[:, 1].abs()+1], 1)
-        return torch.nn.functional.normalize(raw, p=1, dim=1) if normalize else raw
+        return torch.nn.functional.normalize(raw, p=1, dim=1)
 
 
 def make_agent():
     agent = RoverAgent.__new__(RoverAgent)
     agent.obs_type = "states"
     agent.embeddings = True
-    agent.feature_learning_loss = "infonce"
     agent.device = "cpu"
     agent.aug = torch.nn.Identity()
     agent.encoder = ChangingEncoder()

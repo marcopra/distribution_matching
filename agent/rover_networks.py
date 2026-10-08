@@ -32,9 +32,8 @@ class Encoder(nn.Module):
     def forward(self, obs):
         return F.normalize(self.encode_raw(obs), p=1, dim=-1)
     
-    def encode_and_project(self, obs, normalize=True):
-        h = self.encode_raw(obs)
-        return F.normalize(h, p=1, dim=-1) if normalize else h
+    def encode_and_project(self, obs):
+        return self.forward(obs)
 
 class CNNEncoder(nn.Module):
     def __init__(self, obs_shape, feature_dim, mode='l2'):
@@ -77,11 +76,9 @@ class CNNEncoder(nn.Module):
     def forward(self, obs):
         return self.forward_spatial(obs).flatten(start_dim=1)
 
-    def encode_and_project(self, obs, normalize=True):
+    def encode_and_project(self, obs):
         h = self.forward(obs)
         z = self.projector(h)
-        if not normalize:
-            return z
         if self.mode == 'l2':   
             z =F.normalize(z, p=2, dim=-1)
         elif self.mode == 'l1':

@@ -15,7 +15,6 @@ agent:
   embeddings: true
   coverage_embeddings: false
   linear_projection: true
-  feature_learning_loss: leworld
   lr_actor: 10
   pmd_steps: 10
   update_every_steps: 100

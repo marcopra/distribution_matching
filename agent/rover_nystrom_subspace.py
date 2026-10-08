@@ -48,11 +48,6 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 "Subspace ROVER requires normalized learned features for its sink model; "
                 "set embeddings=true"
             )
-        if self.whiten_representations:
-            raise ValueError(
-                "Subspace ROVER's unit-mass sink features are incompatible with "
-                "whiten_representations; disable whitening"
-            )
         self.coverage_state_filter = coverage_state_filter
         self.coverage_embeddings = bool(coverage_embeddings)
         self.coverage_encoder_type = str(coverage_encoder_type).strip().lower()
@@ -272,9 +267,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 features = self.coverage_feature_encoder(raw)
             elif self.coverage_embeddings:
                 self.coverage_encoder.eval()
-                features = self.coverage_encoder.encode_and_project(
-                    raw, normalize=self.feature_learning_loss != "leworld"
-                )
+                features = self.coverage_encoder.encode_and_project(raw)
             else:
                 features = raw
             self._coverage_sub_next_features = features.to(dtype=self.compute_dtype)
@@ -294,39 +287,24 @@ class RoverSubspaceCoverageAgent(RoverAgent):
 
         coverage_obs = self._selected_coverage_observations(obs)
         coverage_next = self._selected_coverage_observations(next_obs)
-        z_obs = self.coverage_encoder.encode_and_project(
-            coverage_obs, normalize=self.feature_learning_loss != "leworld"
-        )
-        z_next = self.coverage_encoder.encode_and_project(
-            coverage_next, normalize=self.feature_learning_loss != "leworld"
-        )
+        z_obs = self.coverage_encoder.encode_and_project(coverage_obs)
+        z_next = self.coverage_encoder.encode_and_project(coverage_next)
         prediction = self.coverage_project_sa(
             self._encode_coverage_state_action(z_obs, action)
         )
         zero = z_obs.new_zeros(())
-        if self.feature_learning_loss == "infonce":
-            targets = z_next.detach()
-            if self.mode == "l1":
-                targets = F.normalize(targets, p=2, dim=1, eps=1e-10)
-            predicted = F.normalize(prediction, p=2, dim=1, eps=1e-10)
-            logits = predicted @ targets.T
-            logits = logits - logits.max(dim=1, keepdim=True).values
-            if self.infonce_positive_mode == "exact_next_obs":
-                group_ids = self._exact_observation_group_ids(coverage_next)
-                loss = self._multi_positive_infonce(logits, group_ids)
-            else:
-                labels = torch.arange(logits.shape[0], device=logits.device)
-                loss = self.cross_entropy_loss(logits, labels)
-            if self.embedding_sum_loss > 0:
-                loss = loss + self.embedding_sum_loss * (
-                    z_next.sum(dim=1).sub(1.0).square().mean()
-                )
-        else:
-            normalized_prediction = F.normalize(prediction, p=2, dim=1, eps=1e-10)
-            normalized_target = F.normalize(z_next, p=2, dim=1, eps=1e-10)
-            prediction_loss = F.mse_loss(normalized_prediction, normalized_target)
-            sigreg_loss = 0.5 * (self._sigreg(z_obs) + self._sigreg(z_next))
-            loss = prediction_loss + self.leworld_sigreg_weight * sigreg_loss
+        targets = z_next.detach()
+        if self.mode == "l1":
+            targets = F.normalize(targets, p=2, dim=1, eps=1e-10)
+        predicted = F.normalize(prediction, p=2, dim=1, eps=1e-10)
+        logits = predicted @ targets.T
+        logits = logits - logits.max(dim=1, keepdim=True).values
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        loss = self.cross_entropy_loss(logits, labels)
+        if self.embedding_sum_loss > 0:
+            loss = loss + self.embedding_sum_loss * (
+                z_next.sum(dim=1).sub(1.0).square().mean()
+            )
 
         self.coverage_encoder_optimizer.zero_grad(set_to_none=True)
         loss.backward()

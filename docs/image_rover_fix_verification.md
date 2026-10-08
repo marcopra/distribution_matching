@@ -23,14 +23,15 @@ export MUJOCO_GL=egl
   tests/unit/test_rover_pmd_backtracking.py \
   tests/unit/test_rover_sink_kernel.py \
   tests/unit/test_rover_pixel_diagnostic_coordinates.py \
-  tests/unit/test_rover_pointmaze_whitening.py \
+  tests/unit/test_rover_kernel_bandwidth.py \
   tests/unit/test_rover_state_action_kernel.py \
+  tests/unit/test_rover_nystrom_infonce.py \
   tests/unit/test_pretrain_eval_snapshots.py
 
 "$ROVER_VERIFY_PYTHON" tests/diagnostics/pointmaze/smoke_image_rover_fixes.py
 ```
 
-Expected: 40 tests pass. The smoke check uses real environments and the experiment
+Expected: 37 tests pass. The smoke check uses real environments and the experiment
 encoders with 32 support rows/16 requested landmarks. Both modalities report
 `verified=true`, zero support mismatch and zero action-probability drift after an
 encoder update and replay drain. Frozen coverage weights must remain unchanged,

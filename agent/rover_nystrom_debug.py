@@ -100,12 +100,6 @@ class RoverAgent:
                  pca_truncation,
                  embeddings = True,
                  linear_projection = False,
-                 feature_learning_loss: str = "infonce",
-                 infonce_positive_mode: str = "exact_next_obs",
-                 leworld_sigreg_weight: float = 0.1,
-                 leworld_num_projections: int = 1024,
-                 leworld_num_knots: int = 17,
-                 leworld_projection_chunk_size: int = 64,
                  pmd_eta_mode: str = "none",
                  pmd_best_iterate: bool = True,
                  pmd_grad_clip_norm: float = 0.0,
@@ -125,11 +119,6 @@ class RoverAgent:
                  kernel_type: str = "inner_product",
                  kernel_bandwidth=None,
                  kernel_bandwidth_mult: Optional[float] = None,
-                 whiten_representations: bool = False,
-                 whitening_variance: float = 0.99,
-                 whitening_components: int = 0,
-                 whitening_epsilon: float = 1e-5,
-                 whitening_unit_trace: bool = True,
                  subsampling_strategy: str = "random",
                  nystrom_candidate_multiplier: float = 5.0,
                  nystrom_cholesky_tolerance: float = 1e-6,
@@ -175,26 +164,6 @@ class RoverAgent:
             utils.ColorPrint.red("CURL is enabled, but stromgly suggested to not use it.\nAll the paper results are without CURL, and it may cause poor performance. Use with caution.")
 
         self.embedding_sum_loss = embedding_sum_loss
-        self.feature_learning_loss = str(feature_learning_loss).strip().lower()
-        if self.feature_learning_loss not in ("infonce", "leworld"):
-            raise ValueError("feature_learning_loss must be 'infonce' or 'leworld'")
-        self.infonce_positive_mode = str(infonce_positive_mode).strip().lower()
-        if self.infonce_positive_mode not in ("diagonal", "exact_next_obs"):
-            raise ValueError(
-                "infonce_positive_mode must be 'diagonal' or 'exact_next_obs'"
-            )
-        self.leworld_sigreg_weight = float(leworld_sigreg_weight)
-        self.leworld_num_projections = int(leworld_num_projections)
-        self.leworld_num_knots = int(leworld_num_knots)
-        self.leworld_projection_chunk_size = int(leworld_projection_chunk_size)
-        if self.leworld_sigreg_weight < 0.0:
-            raise ValueError("leworld_sigreg_weight must be non-negative")
-        if self.leworld_num_projections < 1:
-            raise ValueError("leworld_num_projections must be positive")
-        if self.leworld_num_knots < 2:
-            raise ValueError("leworld_num_knots must be at least 2")
-        if self.leworld_projection_chunk_size < 1:
-            raise ValueError("leworld_projection_chunk_size must be positive")
         self.reward = reward
         self.pmd_eta_mode = pmd_eta_mode.lower()
         assert self.pmd_eta_mode in ["none", "adagrad", "backtracking", "adadiff"], "pmd_eta_mode must be one of ['none', 'adagrad', 'backtracking', 'adadiff']"
@@ -208,8 +177,6 @@ class RoverAgent:
 
         self.mode = mode
         assert self.mode in ['l1', 'l2'], "Mode must be 'l1' or 'l2'"
-        if self.feature_learning_loss == "leworld" and not linear_projection:
-            raise ValueError("LeWorld feature learning requires linear_projection=True")
 
         self.sink_schedule = sink_schedule
         self.epsilon_schedule = epsilon_schedule
@@ -220,26 +187,8 @@ class RoverAgent:
         self.lambda_reg = lambda_reg
         self.image_channels = 1 if self.grayscale else 3
         self.kernel_type = str(kernel_type or "inner_product").strip().lower()
-        if self.kernel_type in ("inner_product"):
-            assert whiten_representations is False, "Inner-product kernel does not support whitening"
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_bandwidth_mult = kernel_bandwidth_mult
-        self.whiten_representations = bool(whiten_representations)
-        self.whitening_variance = float(whitening_variance)
-        if not 0.0 < self.whitening_variance <= 1.0:
-            raise ValueError("whitening_variance must be in (0, 1]")
-        self.whitening_components_requested = int(whitening_components)
-        if self.whitening_components_requested < 0:
-            raise ValueError("whitening_components must be non-negative")
-        self.whitening_epsilon = float(whitening_epsilon)
-        if self.whitening_epsilon <= 0.0:
-            raise ValueError("whitening_epsilon must be positive")
-        self.whitening_unit_trace = bool(whitening_unit_trace)
-        self.whitening_mean = None
-        self.whitening_components = None
-        self.whitening_eigenvalues = None
-        self.whitening_eigenvalue_floor = None
-        self.whitening_explained_variance = None
         self._active_kernel_bandwidth = self._initial_kernel_bandwidth(kernel_bandwidth)
         self.subsampling_strategy = str(subsampling_strategy).lower()
         if self.subsampling_strategy not in (
@@ -601,113 +550,8 @@ class RoverAgent:
         if not self.embeddings:
             return module(obs)
         if project:
-            normalize = self.feature_learning_loss != "leworld"
-            return module.encode_and_project(obs, normalize=normalize)
+            return module.encode_and_project(obs)
         return module(obs)
-
-    def _apply_whitening(self, features: torch.Tensor) -> torch.Tensor:
-        if not getattr(self, "whiten_representations", False) or getattr(
-            self, "whitening_mean", None
-        ) is None:
-            return features
-        mean = self.whitening_mean.to(device=features.device, dtype=features.dtype)
-        components = self.whitening_components.to(device=features.device, dtype=features.dtype)
-        eigenvalues = self.whitening_eigenvalues.to(device=features.device, dtype=features.dtype)
-        whitened = (features - mean) @ components.T
-        denominator = torch.sqrt(
-            torch.clamp(eigenvalues, min=self.whitening_eigenvalue_floor)
-        )
-        whitened = whitened / denominator
-        if getattr(self, "whitening_unit_trace", True):
-            whitened = whitened / np.sqrt(max(int(components.shape[0]), 1))
-        return whitened
-
-    def _fit_actor_whitening(self) -> None:
-        """Fit PCA whitening on current bounded actor support and apply it."""
-        if not getattr(self, "whiten_representations", False):
-            return
-
-        features = self._phi_all_obs[..., :-1]
-        if features.shape[0] < 2:
-            raise ValueError("PCA whitening requires at least two actor observations")
-        encoded = features.detach().double()
-        mean = encoded.mean(dim=0)
-        centered = encoded - mean
-        covariance = centered.T @ centered / (encoded.shape[0] - 1)
-        eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
-        order = torch.argsort(eigenvalues, descending=True)
-        eigenvalues = torch.clamp(eigenvalues[order], min=0.0)
-        eigenvectors = eigenvectors[:, order]
-        total_variance = eigenvalues.sum()
-        if not torch.isfinite(total_variance) or float(total_variance.item()) <= 0.0:
-            raise ValueError("Cannot whiten constant actor representations")
-        max_rank = min(int(features.shape[0] - 1), int(features.shape[1]))
-        requested_components = int(
-            getattr(self, "whitening_components_requested", 0)
-        )
-        if requested_components > 0:
-            retained = min(requested_components, max_rank)
-        else:
-            cumulative = torch.cumsum(eigenvalues, dim=0) / total_variance
-            retained = int(
-                torch.searchsorted(
-                    cumulative,
-                    float(getattr(self, "whitening_variance", 0.99)),
-                ).item()
-            ) + 1
-            retained = min(max(retained, 1), max_rank)
-        retained_values = eigenvalues[:retained]
-        retained_components = eigenvectors[:, :retained].T
-        largest = max(float(retained_values[0].item()), torch.finfo(torch.float64).eps)
-        eigenvalue_floor = (
-            float(getattr(self, "whitening_epsilon", 1e-5)) * largest
-        )
-        has_distinct_subsample = self._phi_sub_obs is not self._phi_all_obs
-
-        self.whitening_mean = mean.to(device=features.device, dtype=features.dtype)
-        self.whitening_components = retained_components.to(
-            device=features.device, dtype=features.dtype
-        )
-        self.whitening_eigenvalues = retained_values.to(
-            device=features.device, dtype=features.dtype
-        )
-        self.whitening_eigenvalue_floor = eigenvalue_floor
-        self.whitening_explained_variance = float(
-            retained_values.sum().item() / total_variance.item()
-        )
-
-        self._phi_all_obs = self._append_zero_feature_column(
-            self._apply_whitening(features)
-        )
-        self._phi_all_next = self._append_zero_feature_column(
-            self._apply_whitening(self._phi_all_next[..., :-1])
-        )
-        self._psi_all = self._append_zero_feature_column(
-            self._encode_state_action(
-                self._phi_all_obs[..., :-1], self._all_actions.to(self.device)
-            )
-        )
-        if has_distinct_subsample:
-            self._phi_sub_obs = self._append_zero_feature_column(
-                self._apply_whitening(self._phi_sub_obs[..., :-1])
-            )
-            self._phi_sub_next = self._append_zero_feature_column(
-                self._apply_whitening(self._phi_sub_next[..., :-1])
-            )
-            self._psi_sub = self._append_zero_feature_column(
-                self._encode_state_action(
-                    self._phi_sub_obs[..., :-1], self._sub_actions.to(self.device)
-                )
-            )
-        else:
-            self._use_full_features_as_subsample()
-
-        utils.ColorPrint.green(
-            "Applied PCA whitening to actor features: "
-            f"{features.shape[1]} -> {retained} dims, "
-            f"explained_variance={self.whitening_explained_variance:.6f}, "
-            f"unit_trace={self.whitening_unit_trace}."
-        )
 
     def _policy_logits_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Compute policy logits for a given kernel matrix H and PMD coefficient vector."""
@@ -730,19 +574,9 @@ class RoverAgent:
             self.kernel_fn.bandwidth = self._active_kernel_bandwidth
             self.distribution_matcher.kernel_fn.bandwidth = self._active_kernel_bandwidth
             return
-        # A pivoted-Cholesky sample may carry a bandwidth fitted earlier from
-        # raw FIFO embeddings.  When whitening and a multiplier are enabled,
-        # ignore that cached value: X and Y have already been whitened by
-        # _fit_actor_whitening(), so the multiplier must be applied here.
-        fit_from_actor_features = (
-            self.kernel_type == "gaussian"
-            and self.kernel_bandwidth_mult is not None
-            and getattr(self, "whiten_representations", False)
-        )
         if (
             self.subsampling_strategy == "pivoted_cholesky"
             and self.kernel_type == "gaussian"
-            and not fit_from_actor_features
         ):
             bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
             if bandwidth is not None:
@@ -780,8 +614,7 @@ class RoverAgent:
         self.distribution_matcher.kernel_fn.bandwidth = bandwidth
         utils.ColorPrint.yellow(
             f"Fitted actor Gaussian bandwidth={bandwidth:.6g} "
-            f"(median_distance={float(median_distance.item()):.6g}, multiplier={multiplier:.6g}, "
-            f"features={'whitened' if getattr(self, 'whiten_representations', False) else 'raw'})."
+            f"(median_distance={float(median_distance.item()):.6g}, multiplier={multiplier:.6g})."
         )
 
     def _kernel_status(self, kernel_fn=None) -> str:
@@ -905,7 +738,6 @@ class RoverAgent:
                 obs_tensor = torch.as_tensor(obs, device=self.device, dtype=self.compute_dtype).unsqueeze(0)  # [1, obs_dim]
             
             enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
-            enc_obs = self._apply_whitening(enc_obs)
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
@@ -933,7 +765,6 @@ class RoverAgent:
                 dtype=self.compute_dtype,
             )
             enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
-            enc_obs = self._apply_whitening(enc_obs)
 
             if self.gradient_coeff is None:
                 return np.full(
@@ -1020,139 +851,48 @@ class RoverAgent:
         """Check if transition learning phase is complete."""
         return step >= self.num_expl_steps + self.T_init_steps 
 
-    @staticmethod
-    def _exact_observation_group_ids(observations: torch.Tensor) -> torch.Tensor:
-        """Assign equal IDs to exactly equal observations without BxB pixel comparisons."""
-        flat = observations.detach().reshape(observations.shape[0], -1)
-        _, inverse = torch.unique(flat, dim=0, return_inverse=True)
-        return inverse
-
-    @staticmethod
-    def _multi_positive_infonce(
-        logits: torch.Tensor,
-        positive_group_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """InfoNCE where every target in an anchor's group is a valid positive."""
-        positive_mask = positive_group_ids[:, None].eq(positive_group_ids[None, :])
-        positive_logits = logits.masked_fill(~positive_mask, -torch.inf)
-        return -(
-            torch.logsumexp(positive_logits, dim=1)
-            - torch.logsumexp(logits, dim=1)
-        ).mean()
-
-    def _sigreg(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Sketched isotropic-Gaussian regularizer from LeWorldModel."""
-        if embeddings.ndim != 2:
-            raise ValueError("SIGReg expects embeddings with shape [batch, features]")
-
-        feature_dim = embeddings.shape[1]
-        knots = torch.linspace(
-            0.2,
-            4.0,
-            self.leworld_num_knots,
-            device=embeddings.device,
-            dtype=embeddings.dtype,
-        )
-        gaussian_cf = torch.exp(-0.5 * knots.square())
-        weights = torch.exp(-0.5 * knots.square())
-        total = embeddings.new_zeros(())
-
-        for start in range(0, self.leworld_num_projections, self.leworld_projection_chunk_size):
-            count = min(
-                self.leworld_projection_chunk_size,
-                self.leworld_num_projections - start,
-            )
-            directions = torch.randn(
-                feature_dim,
-                count,
-                device=embeddings.device,
-                dtype=embeddings.dtype,
-            )
-            directions = F.normalize(directions, p=2, dim=0, eps=1e-12)
-            projected = embeddings @ directions
-            phases = projected.unsqueeze(-1) * knots
-            empirical_real = torch.cos(phases).mean(dim=0)
-            empirical_imag = torch.sin(phases).mean(dim=0)
-            squared_error = (
-                (empirical_real - gaussian_cf).square()
-                + empirical_imag.square()
-            )
-            statistics = torch.trapezoid(weights * squared_error, knots, dim=-1)
-            total = total + statistics.sum()
-
-        return total / self.leworld_num_projections
-
     def update_encoders(self, obs, action, next_obs, reward):
         metrics = dict()
-
-        # LeWorld keeps raw features for Rover and SIGReg. Unit-normalized copies
-        # are used only by its angular prediction objective.
         obs_en = self.aug_and_encode(obs, project=True)
-        if self.feature_learning_loss == "leworld":
+        with torch.no_grad():
             next_obs_en = self.aug_and_encode(next_obs, project=True)
-        else:
-            with torch.no_grad():
-                next_obs_en = self.aug_and_encode(next_obs, project=True)
 
         encoded_state_action = self._encode_state_action(obs_en, action)
         projected_sa = self.project_sa(encoded_state_action)  
 
         zero = obs_en.new_zeros(())
-        prediction_loss = zero
-        sigreg_loss = zero
-        mean_positives = 1.0
-        unique_targets = int(next_obs.shape[0])
-
-        if self.feature_learning_loss == "infonce":
-            if self.mode == 'l1':
-                norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-            else:
-                norm_next_obs_en = next_obs_en
-            norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
-            logits = norm_projected_sa @ norm_next_obs_en.T
-            logits = logits - logits.max(dim=1, keepdim=True).values
-
-            if self.infonce_positive_mode == "exact_next_obs":
-                group_ids = self._exact_observation_group_ids(next_obs)
-                contrastive_loss = self._multi_positive_infonce(logits, group_ids)
-                counts = torch.bincount(group_ids)
-                mean_positives = float(counts[group_ids].float().mean().item())
-                unique_targets = int(counts.numel())
-            else:
-                labels = torch.arange(logits.shape[0], device=logits.device)
-                contrastive_loss = self.cross_entropy_loss(logits, labels)
-
-            z_anchor = self.aug_and_encode(obs, project=True)
-            with torch.no_grad():
-                z_pos = self.aug_and_encode(obs, project=True)
-            if self.curl:
-                if self.mode == 'l1':
-                    z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
-                    z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
-                curl_logits = z_anchor @ z_pos.T
-                curl_logits = curl_logits - curl_logits.max(dim=1, keepdim=True).values
-                labels = torch.arange(curl_logits.shape[0], device=curl_logits.device)
-                curl_loss = self.cross_entropy_loss(curl_logits, labels)
-            else:
-                curl_loss = zero
-
-            if self.embedding_sum_loss > 0:
-                sum_next_obs_en = torch.sum(next_obs_en, dim=1)
-                embedding_sum_loss = self.embedding_sum_loss * torch.mean(
-                    (sum_next_obs_en - 1.0) ** 2
-                )
-            else:
-                embedding_sum_loss = zero
-            feature_loss = contrastive_loss + curl_loss + embedding_sum_loss
+        if self.mode == 'l1':
+            norm_next_obs_en = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
         else:
-            norm_next = F.normalize(next_obs_en, p=2, dim=1, eps=1e-10)
-            norm_prediction = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
-            prediction_loss = F.mse_loss(norm_prediction, norm_next)
-            sigreg_loss = 0.5 * (self._sigreg(obs_en) + self._sigreg(next_obs_en))
-            feature_loss = prediction_loss + self.leworld_sigreg_weight * sigreg_loss
-            contrastive_loss = zero
+            norm_next_obs_en = next_obs_en
+        norm_projected_sa = F.normalize(projected_sa, p=2, dim=1, eps=1e-10)
+        logits = norm_projected_sa @ norm_next_obs_en.T
+        logits = logits - logits.max(dim=1, keepdim=True).values
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        contrastive_loss = self.cross_entropy_loss(logits, labels)
+
+        z_anchor = self.aug_and_encode(obs, project=True)
+        with torch.no_grad():
+            z_pos = self.aug_and_encode(obs, project=True)
+        if self.curl:
+            if self.mode == 'l1':
+                z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
+                z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
+            curl_logits = z_anchor @ z_pos.T
+            curl_logits = curl_logits - curl_logits.max(dim=1, keepdim=True).values
+            curl_labels = torch.arange(curl_logits.shape[0], device=curl_logits.device)
+            curl_loss = self.cross_entropy_loss(curl_logits, curl_labels)
+        else:
             curl_loss = zero
+
+        if self.embedding_sum_loss > 0:
+            sum_next_obs_en = torch.sum(next_obs_en, dim=1)
+            embedding_sum_loss = self.embedding_sum_loss * torch.mean(
+                (sum_next_obs_en - 1.0) ** 2
+            )
+        else:
             embedding_sum_loss = zero
+        feature_loss = contrastive_loss + curl_loss + embedding_sum_loss
 
         if self.reward:
             reward_pred = self.reward(encoded_state_action)
@@ -1179,12 +919,9 @@ class RoverAgent:
 
         # Print losses
         logger.debug(
-            "Transition Model Losses: mode=%s Contrastive=%.4f Prediction=%.4f "
-            "SIGReg=%.4f CURL=%.4f Embedding Sum=%.4f Reward=%.4f Total=%.4f",
-            self.feature_learning_loss,
+            "Transition Model Losses: Contrastive=%.4f CURL=%.4f "
+            "Embedding Sum=%.4f Reward=%.4f Total=%.4f",
             contrastive_loss.item(),
-            prediction_loss.item(),
-            sigreg_loss.item(),
             curl_loss.item(),
             embedding_sum_loss.item(),
             reward_loss.item(),
@@ -1193,12 +930,8 @@ class RoverAgent:
         if self.use_tb or self.use_wandb:
             metrics['transition_loss'] = loss.item()
             metrics['contrastive_loss'] = contrastive_loss.item()
-            metrics['leworld_prediction_loss'] = prediction_loss.item()
-            metrics['sigreg_loss'] = sigreg_loss.item()
             metrics['curl_loss'] = curl_loss.item()
             metrics['embedding_sum_loss'] = embedding_sum_loss.item()
-            metrics['infonce_mean_positives'] = mean_positives
-            metrics['infonce_unique_targets'] = unique_targets
         return metrics
     
 
@@ -1242,8 +975,6 @@ class RoverAgent:
                 sub_action=sub_action,
                 sub_next_obs=sub_next_obs,
             )
-
-        self._fit_actor_whitening()
 
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
@@ -2291,8 +2022,7 @@ class RoverAgent:
         if not self.embeddings:
             return self.encoder(obs)
         if project:
-            normalize = self.feature_learning_loss != "leworld"
-            return self.encoder.encode_and_project(obs, normalize=normalize)
+            return self.encoder.encode_and_project(obs)
         else:
             return self.encoder(obs)
 

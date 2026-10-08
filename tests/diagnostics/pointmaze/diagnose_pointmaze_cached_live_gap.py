@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
         "--run-dir",
         type=Path,
         required=True,
-        help="PMD individual-run directory containing result.json and optional whitening_transform.npz.",
+        help="PMD individual-run directory containing result.json.",
     )
     parser.add_argument("--dataset-dir", type=Path, default=None)
     parser.add_argument("--live-samples", type=int, default=1000)
@@ -83,24 +83,6 @@ def encode(encoder, observations: np.ndarray, device: str, batch_size: int) -> n
             batch = torch.as_tensor(observations[start : start + batch_size], device=device)
             chunks.append(encoder.encode_and_project(batch.float()).detach().cpu().numpy())
     return np.concatenate(chunks, axis=0).astype(np.float64, copy=False)
-
-
-def apply_whitening(features: np.ndarray, run_dir: Path, result: dict) -> np.ndarray:
-    if result.get("feature_whitening", "none") == "none":
-        return features.copy()
-    transform_path = run_dir / "whitening_transform.npz"
-    if not transform_path.exists():
-        raise FileNotFoundError(f"Missing whitening transform: {transform_path}")
-    with np.load(transform_path, allow_pickle=False) as transform:
-        mean = transform["mean"].astype(np.float64)
-        components = transform["components"].astype(np.float64)
-        eigenvalues = transform["eigenvalues"].astype(np.float64)
-    floor = float(result.get("whitening_epsilon", 1e-5)) * max(float(eigenvalues[0]), np.finfo(float).eps)
-    whitened = (features - mean) @ components.T
-    whitened /= np.sqrt(np.maximum(eigenvalues, floor))
-    if bool(result.get("whitening_unit_trace", True)):
-        whitened /= np.sqrt(max(whitened.shape[1], 1))
-    return whitened
 
 
 def nearest(reference: np.ndarray, queries: np.ndarray, batch_size: int):
@@ -245,24 +227,19 @@ def main() -> None:
     finally:
         env.close()
 
-    cached_white = apply_whitening(cached_raw, run_dir, result)
-    live_white = apply_whitening(live_raw, run_dir, result)
     spatial_idx, spatial_dist = nearest(cached_xy, live_xy, args.distance_batch_size)
-    raw_idx, raw_dist = nearest(cached_raw, live_raw, args.distance_batch_size)
-    white_idx, white_dist = nearest(cached_white, live_white, args.distance_batch_size)
+    latent_idx, latent_dist = nearest(cached_raw, live_raw, args.distance_batch_size)
 
-    spatial_raw_dist = np.linalg.norm(live_raw - cached_raw[spatial_idx], axis=1)
-    spatial_white_dist = np.linalg.norm(live_white - cached_white[spatial_idx], axis=1)
-    raw_xy_error = np.linalg.norm(live_xy - cached_xy[raw_idx], axis=1)
-    white_xy_error = np.linalg.norm(live_xy - cached_xy[white_idx], axis=1)
+    spatial_latent_dist = np.linalg.norm(live_raw - cached_raw[spatial_idx], axis=1)
+    latent_xy_error = np.linalg.norm(live_xy - cached_xy[latent_idx], axis=1)
     pixel_delta = live_obs.astype(np.float64) - cached_obs[spatial_idx].astype(np.float64)
     pixel_mae = np.mean(np.abs(pixel_delta), axis=tuple(range(1, pixel_delta.ndim)))
     pixel_rmse = np.sqrt(np.mean(pixel_delta * pixel_delta, axis=tuple(range(1, pixel_delta.ndim))))
     bandwidth = float(result["fitted_bandwidth"])
     if bandwidth <= 0 or not np.isfinite(bandwidth):
         raise ValueError(f"Invalid fitted Gaussian bandwidth: {bandwidth}")
-    kernel_max = np.exp(-(white_dist ** 2) / (2.0 * bandwidth ** 2))
-    kernel_spatial = np.exp(-(spatial_white_dist ** 2) / (2.0 * bandwidth ** 2))
+    kernel_max = np.exp(-(latent_dist ** 2) / (2.0 * bandwidth ** 2))
+    kernel_spatial = np.exp(-(spatial_latent_dist ** 2) / (2.0 * bandwidth ** 2))
 
     columns = {
         "episode": episode_ids,
@@ -275,14 +252,10 @@ def main() -> None:
         "spatial_xy_distance": spatial_dist,
         "pixel_mae": pixel_mae,
         "pixel_rmse": pixel_rmse,
-        "spatial_raw_latent_distance": spatial_raw_dist,
-        "spatial_whitened_latent_distance": spatial_white_dist,
-        "raw_nearest_cached_index": raw_idx,
-        "raw_nearest_latent_distance": raw_dist,
-        "raw_nearest_xy_error": raw_xy_error,
-        "whitened_nearest_cached_index": white_idx,
-        "whitened_nearest_latent_distance": white_dist,
-        "whitened_nearest_xy_error": white_xy_error,
+        "spatial_latent_distance": spatial_latent_dist,
+        "nearest_cached_index": latent_idx,
+        "nearest_latent_distance": latent_dist,
+        "nearest_xy_error": latent_xy_error,
         "gaussian_kernel_max": kernel_max,
         "gaussian_kernel_spatial": kernel_spatial,
     }
@@ -295,16 +268,15 @@ def main() -> None:
     mapped = {
         "spatial XY distance": spatial_dist,
         "pixel MAE": pixel_mae,
-        "raw latent distance at spatial NN": spatial_raw_dist,
-        "whitened latent distance at spatial NN": spatial_white_dist,
-        "whitened latent NN XY error": white_xy_error,
+        "latent distance at spatial NN": spatial_latent_dist,
+        "latent NN XY error": latent_xy_error,
         "Gaussian kernel maximum": kernel_max,
         "Gaussian kernel at spatial NN": kernel_spatial,
     }
     save_metric_maps(output_dir, live_xy, mapped)
     save_worst_pairs(output_dir, cached_obs, cached_xy, live_obs, live_xy, spatial_idx, pixel_mae, "pixel_mae", args.worst_pairs)
-    save_worst_pairs(output_dir, cached_obs, cached_xy, live_obs, live_xy, spatial_idx, spatial_white_dist, "spatial_whitened_distance", args.worst_pairs)
-    save_worst_pairs(output_dir, cached_obs, cached_xy, live_obs, live_xy, white_idx, white_xy_error, "latent_nn_xy_error", args.worst_pairs)
+    save_worst_pairs(output_dir, cached_obs, cached_xy, live_obs, live_xy, spatial_idx, spatial_latent_dist, "spatial_latent_distance", args.worst_pairs)
+    save_worst_pairs(output_dir, cached_obs, cached_xy, live_obs, live_xy, latent_idx, latent_xy_error, "latent_nn_xy_error", args.worst_pairs)
 
     summary_metrics = {name: summarize(value) for name, value in columns.items() if name not in {"episode", "step"} and "index" not in name and not name.endswith("_x") and not name.endswith("_y")}
     summary = {
@@ -313,9 +285,7 @@ def main() -> None:
         "output_dir": output_dir,
         "dataset_checksum": metadata["checksum"],
         "feature_dim": int(result["feature_dim"]),
-        "feature_whitening": result.get("feature_whitening", "none"),
-        "raw_latent_dim": cached_raw.shape[1],
-        "whitened_latent_dim": cached_white.shape[1],
+        "latent_dim": cached_raw.shape[1],
         "gaussian_bandwidth": bandwidth,
         "cached_states": cached_obs.shape[0],
         "live_samples": live_obs.shape[0],

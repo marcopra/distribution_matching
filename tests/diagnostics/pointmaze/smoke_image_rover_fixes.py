@@ -48,7 +48,7 @@ def check_mode(mode: str, device: str) -> dict:
             "use_wandb=false", f"device={device}", "agent.batch_size_actor=32",
             "agent.subsamples=16", "agent.pca_truncation=16", "agent.pmd_steps=2",
             "agent.encoded_fifo_capacity=64", "agent.encoded_fifo_encode_batch_size=8",
-            "agent.nystrom_cholesky_progress=false", "agent.feature_learning_loss=infonce",
+            "agent.nystrom_cholesky_progress=false",
         ])
     utils.set_seed_everywhere(1)
     kwargs = OmegaConf.to_container(cfg.env, resolve=True)

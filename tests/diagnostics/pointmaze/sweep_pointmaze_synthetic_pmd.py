@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import itertools
 import json
@@ -38,7 +37,6 @@ from tests.diagnostics.pointmaze.sweep_pointmaze_encoder_embeddings import (
 )
 from tests.diagnostics.pointmaze.synthetic_workflow_utils import (
     assert_module_unchanged,
-    fit_pca_whitening,
     load_dataset,
     load_encoder_checkpoint,
 )
@@ -84,36 +82,6 @@ def parse_args():
     parser.add_argument("--etas", type=float, nargs="+", default=[10.0])
     parser.add_argument("--eta-mode", choices=["none", "adagrad", "backtracking", "adadiff"], default="backtracking")
     parser.add_argument("--pca-truncation", type=int, default=10000)
-    parser.add_argument(
-        "--feature-whitening",
-        choices=("none", "pca"),
-        default="none",
-        help="Fit a fixed PCA whitening transform on unique synthetic images before PMD.",
-    )
-    parser.add_argument(
-        "--whitening-variance",
-        type=float,
-        default=0.99,
-        help="Variance retained when --whitening-components is 0.",
-    )
-    parser.add_argument(
-        "--whitening-components",
-        type=int,
-        default=0,
-        help="Fixed PCA rank; 0 chooses rank from --whitening-variance.",
-    )
-    parser.add_argument(
-        "--whitening-epsilon",
-        type=float,
-        default=1e-5,
-        help="Eigenvalue floor relative to largest retained eigenvalue.",
-    )
-    parser.add_argument(
-        "--whitening-unit-trace",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Divide whitened vectors by sqrt(retained rank) for dimension-stable distances.",
-    )
     parser.add_argument(
         "--sink",
         "--sinks",
@@ -434,17 +402,11 @@ def save_synthetic_action_probability_plot(agent, arrays, run_dir: Path, n_actio
 def run_id(config) -> str:
     bandwidth = "auto" if config["bandwidth"] is None else f"{config['bandwidth']:g}"
     multiplier = "none" if config["bandwidth_mult"] is None else f"{config['bandwidth_mult']:g}"
-    whitening = str(config["feature_whitening"])
-    if whitening == "pca":
-        whitening += (
-            f"_var{config['whitening_variance']:g}_c{config['whitening_components']}_"
-            f"eps{config['whitening_epsilon']:g}_ut{int(config['whitening_unit_trace'])}"
-        )
     return (
         f"d{config['feature_dim']}_lp{int(config['linear_projection'])}_{config['kernel']}_"
         f"bw{bandwidth}_mult{multiplier}_"
         f"lam{config['lambda_reg']:g}_m{config['landmarks']}_pmd{config['pmd_steps']}_"
-        f"eta{config['eta']:g}_sink{config['sink']:g}_white{whitening}"
+        f"eta{config['eta']:g}_sink{config['sink']:g}"
     ).replace("+", "")
 
 
@@ -522,11 +484,6 @@ def main():
                     "pmd_steps": pmd_steps,
                     "eta": eta,
                     "sink": float(sink),
-                    "feature_whitening": str(args.feature_whitening),
-                    "whitening_variance": float(args.whitening_variance),
-                    "whitening_components": int(args.whitening_components),
-                    "whitening_epsilon": float(args.whitening_epsilon),
-                    "whitening_unit_trace": bool(args.whitening_unit_trace),
                     "linear_projection": bool(args.linear_projection),
                 }
             )
@@ -578,36 +535,6 @@ def main():
             agent.encoder.mode = agent.mode
             agent.policy_encoder.mode = agent.mode
             agent._sync_policy_encoder()
-            whitening_metadata = None
-            if config["feature_whitening"] == "pca":
-                unique_observations = np.asarray(arrays["obs"])[::n_actions]
-                agent.encoder, whitening_metadata = fit_pca_whitening(
-                    agent.encoder,
-                    unique_observations,
-                    device=args.device,
-                    batch_size=args.action_prob_batch_size,
-                    explained_variance=config["whitening_variance"],
-                    components=config["whitening_components"],
-                    epsilon=config["whitening_epsilon"],
-                    unit_trace=config["whitening_unit_trace"],
-                )
-                agent.policy_encoder = copy.deepcopy(agent.encoder).to(args.device)
-                agent._freeze_module(agent.encoder)
-                agent._freeze_module(agent.policy_encoder)
-                agent._policy_is_synced = True
-                np.savez_compressed(
-                    run_dir / "whitening_transform.npz",
-                    mean=whitening_metadata["mean"],
-                    components=whitening_metadata["components"],
-                    eigenvalues=whitening_metadata["eigenvalues"],
-                    all_eigenvalues=whitening_metadata["all_eigenvalues"],
-                )
-                print(
-                    "PCA whitening: "
-                    f"{whitening_metadata['input_dim']} -> {whitening_metadata['output_dim']} dims, "
-                    f"explained_variance={whitening_metadata['explained_variance']:.6f}, "
-                    f"unit_trace={whitening_metadata['unit_trace']}"
-                )
             encoder_reference = {name: tensor.detach().clone() for name, tensor in agent.encoder.state_dict().items()}
             agent.encoder_optimizer = None
             agent.encoder_scheduler = None
@@ -677,12 +604,6 @@ def main():
                 "run_id": identifier,
                 **config,
                 "fitted_bandwidth": fitted_bandwidth,
-                "whitening_output_dim": (
-                    whitening_metadata["output_dim"] if whitening_metadata is not None else int(config["feature_dim"])
-                ),
-                "whitening_explained_variance": (
-                    whitening_metadata["explained_variance"] if whitening_metadata is not None else 1.0
-                ),
                 "actor_loss": scalar(metrics.get("actor_loss", float("nan"))),
                 "actor_best_loss": scalar(metrics.get("actor_best_loss", float("nan"))),
                 "actor_eta": scalar(metrics.get("actor_eta", float("nan"))),
