@@ -1,9 +1,9 @@
-"""ROVER Nyström agent with independently selected dynamics and coverage inputs."""
+"""ROVER Nyström agent with separate dynamics and coverage representations."""
 
 from __future__ import annotations
 
-import math
 import copy
+import math
 from typing import Optional
 
 import numpy as np
@@ -15,7 +15,7 @@ from agent.rover_nystrom_debug import RoverAgent
 from agent.rover_networks import Encoder, FrozenCNNFeatureEncoder, ProjectSA
 from agent.rover_subspace_matchers import (
     SubspaceCoverageMatcher,
-    normalize_coverage_state_filter,
+    normalize_coverage_state_indices,
 )
 
 
@@ -55,20 +55,19 @@ class _SimplexStateKernel:
 
 
 class RoverSubspaceCoverageAgent(RoverAgent):
-    """Fit dynamics and coverage kernels in independently selected spaces."""
+    """Use separate, configurable representations for dynamics and coverage."""
 
     def __init__(
         self,
         *args,
-        coverage_state_filter=None,
+        coverage_state_indices=None,
         coverage_kernel_bandwidth=None,
         coverage_kernel_bandwidth_mult=None,
-        coverage_embeddings: bool = False,
+        train_coverage_encoder: bool = False,
         coverage_kernel_input: Optional[str] = None,
         coverage_frame_index: int = -1,
         dynamics_kernel_input: str = "states",
-        learn_dynamics_state_embeddings: bool = False,
-        freeze_dynamics_state_encoder: bool = False,
+        dynamics_encoder_mode: str = "raw",
         dynamics_kernel_type: Optional[str] = None,
         coverage_kernel_type: Optional[str] = None,
         linear_projection: bool = False,
@@ -77,8 +76,26 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         total_train_steps: int = 1,
         **kwargs,
     ):
-        # Keep legacy ``kernel_type`` configs working while making the
-        # dynamics-kernel choice explicit for subspace experiments.
+        # Subspace experiments freeze the selected dynamics encoder at
+        # initialization. Do not allow the base agent's delayed freeze option.
+        if "freeze_encoder" in kwargs:
+            old_freeze_encoder = kwargs.pop("freeze_encoder")
+            if old_freeze_encoder:
+                raise ValueError(
+                    "freeze_encoder was renamed; use "
+                    "dynamics_encoder_mode='frozen' for subspace experiments"
+                )
+        freeze_observation_encoder_after_warmup = kwargs.pop(
+            "freeze_observation_encoder_after_warmup", False
+        )
+        if freeze_observation_encoder_after_warmup:
+            raise ValueError(
+                "freeze_observation_encoder_after_warmup is unsupported for "
+                "subspace experiments; set "
+                "dynamics_encoder_mode='frozen' to freeze the selected dynamics "
+                "encoder from initialization"
+            )
+        kwargs["freeze_observation_encoder_after_warmup"] = False
         if dynamics_kernel_type is not None:
             kwargs["kernel_type"] = dynamics_kernel_type
         super().__init__(
@@ -96,13 +113,25 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             raise ValueError(
                 "Subspace ROVER requires normalized learned features for its sink model; "
                 "set embeddings=true"
-        )
+            )
         self.dynamics_kernel_input = str(dynamics_kernel_input).strip().lower()
-        self.learn_dynamics_state_embeddings = bool(learn_dynamics_state_embeddings)
-        self.freeze_dynamics_state_encoder = bool(freeze_dynamics_state_encoder)
+        self.dynamics_encoder_mode = str(dynamics_encoder_mode).strip().lower()
         if self.dynamics_kernel_input not in ("pixels", "states"):
             raise ValueError(
                 "dynamics_kernel_input must be 'pixels' or 'states'"
+            )
+        if self.dynamics_encoder_mode not in ("raw", "trainable", "frozen"):
+            raise ValueError(
+                "dynamics_encoder_mode must be 'raw', 'trainable', or 'frozen'; "
+                "use 'trainable' or 'frozen' for pixel dynamics"
+            )
+        if (
+            self.dynamics_kernel_input == "pixels"
+            and self.dynamics_encoder_mode == "raw"
+        ):
+            raise ValueError(
+                "Pixel dynamics require the CNN encoder; set "
+                "dynamics_encoder_mode='trainable' or 'frozen'"
             )
         if self.dynamics_kernel_input == "pixels" and self.obs_type != "pixels":
             raise ValueError(
@@ -128,24 +157,28 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             if self.obs_type == "pixels"
             else math.prod(getattr(self, "obs_shape", (self.obs_dim,)))
         )
-        if self.learn_dynamics_state_embeddings and self.dynamics_kernel_input != "states":
-            raise ValueError(
-                "learn_dynamics_state_embeddings=True requires dynamics_kernel_input='states'"
-            )
         self.nystrom_kernel_feature_key = (
-            ("phi_obs" if self.learn_dynamics_state_embeddings else "dynamics_state")
-            if self.dynamics_kernel_input == "states" else None
+            ("phi_obs" if self.dynamics_encoder_mode != "raw" else "dynamics_state")
+            if self.dynamics_kernel_input == "states"
+            else None
         )
         if self.dynamics_kernel_input == "states" and self.dynamics_state_dim < 2:
             raise ValueError(
                 "dynamics_kernel_input='states' requires at least two state values"
             )
-        if self.dynamics_kernel_input == "states" and not self.learn_dynamics_state_embeddings:
+        self.uses_state_dynamics_encoder = (
+            self.dynamics_kernel_input == "states"
+            and self.dynamics_encoder_mode != "raw"
+        )
+        if self.dynamics_kernel_input == "states" and not self.uses_state_dynamics_encoder:
             state_kernel = _SimplexStateKernel(self.kernel_fn, self.dynamics_state_dim)
             self.kernel_fn = state_kernel
             self.distribution_matcher.kernel_fn = state_kernel
             self.distribution_matcher.state_kernel_fn = state_kernel
-        if self.learn_dynamics_state_embeddings:
+        self.dynamics_state_encoder = None
+        self.dynamics_state_encoder_optimizer = None
+        self.dynamics_state_encoder_scheduler = None
+        if self.uses_state_dynamics_encoder:
             self.dynamics_state_encoder = Encoder(
                 (self.dynamics_state_dim,), hidden_dim, self.feature_dim
             ).to(self.device)
@@ -153,20 +186,20 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 self.dynamics_state_encoder
             ).to(self.device)
             self._freeze_module(self.policy_dynamics_state_encoder)
-            self.dynamics_state_encoder_optimizer = torch.optim.AdamW(
-                self.dynamics_state_encoder.parameters(),
-                lr=lr_encoder,
-                weight_decay=1e-5,
-            )
-            self.dynamics_state_encoder_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.dynamics_state_encoder_optimizer,
-                T_max=max(int(total_train_steps), 1),
-                eta_min=lr_encoder * 0.1,
-            )
-            if self.freeze_dynamics_state_encoder:
+            if self.dynamics_encoder_mode == "trainable":
+                self.dynamics_state_encoder_optimizer = torch.optim.AdamW(
+                    self.dynamics_state_encoder.parameters(),
+                    lr=lr_encoder,
+                    weight_decay=1e-5,
+                )
+                self.dynamics_state_encoder_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    self.dynamics_state_encoder_optimizer,
+                    T_max=max(int(total_train_steps), 1),
+                    eta_min=lr_encoder * 0.1,
+                )
+            else:
                 self._freeze_module(self.dynamics_state_encoder)
-        self.coverage_state_filter = coverage_state_filter
-        self.coverage_embeddings = bool(coverage_embeddings)
+        self.train_coverage_encoder = bool(train_coverage_encoder)
         self.coverage_kernel_input = coverage_kernel_input
         if self.coverage_kernel_input not in ("states", "pixels"):
             raise ValueError(
@@ -177,15 +210,15 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         if self.coverage_kernel_input == "pixels":
             if self.obs_type != "pixels":
                 raise ValueError("coverage_kernel_input='pixels' requires pixel observations")
-            if self.coverage_embeddings:
+            if self.train_coverage_encoder:
                 raise ValueError(
-                    "coverage_embeddings cannot be enabled with the frozen CNN "
-                    "coverage encoder"
+                    "train_coverage_encoder is incompatible with pixel coverage; "
+                    "pixel coverage uses a frozen CNN"
                 )
-            if coverage_state_filter is not None:
+            if coverage_state_indices is not None:
                 raise ValueError(
-                    "coverage_state_filter applies to raw state features; set it to null "
-                    "when using coverage_kernel_input='pixels'"
+                    "coverage_state_indices applies to raw state features; set it "
+                    "to null when using coverage_kernel_input='pixels'"
                 )
             if len(self.obs_shape) != 3:
                 raise ValueError(
@@ -215,10 +248,10 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             self._freeze_module(self.coverage_feature_encoder)
             self.coverage_state_indices = ()
         else:
-            if self.obs_type == "pixels" and self.coverage_embeddings:
+            if self.obs_type == "pixels" and self.train_coverage_encoder:
                 raise ValueError(
-                    "coverage_embeddings with pixel observations and state coverage "
-                    "is unsupported; use raw filtered state features"
+                    "train_coverage_encoder with pixel observations and state "
+                    "coverage is unsupported; use raw state coordinates"
                 )
             raw_state_dim = (
                 self.proprio_state_dims
@@ -227,31 +260,37 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             )
             if raw_state_dim < 1:
                 raise ValueError(
-                "State coverage requires proprioceptive state for pixels or "
+                    "State coverage requires proprioceptive state for pixels or "
                     "state observations"
                 )
-            self.coverage_state_indices = normalize_coverage_state_filter(
-                coverage_state_filter, raw_state_dim
+            self.coverage_state_indices = normalize_coverage_state_indices(
+                coverage_state_indices, raw_state_dim
             )
             self.coverage_frame_index = int(coverage_frame_index)
 
-        if self.coverage_embeddings and not self.embeddings:
+        if self.train_coverage_encoder and not self.embeddings:
             raise ValueError(
-                "coverage_embeddings=True requires embeddings=True so its transition "
+                "train_coverage_encoder=True requires embeddings=True so its transition "
                 "features can be trained"
             )
         if coverage_kernel_bandwidth is None:
             self.coverage_kernel_bandwidth = None
         else:
             coverage_kernel_bandwidth = float(coverage_kernel_bandwidth)
-            if not math.isfinite(coverage_kernel_bandwidth) or coverage_kernel_bandwidth <= 0:
+            if (
+                not math.isfinite(coverage_kernel_bandwidth)
+                or coverage_kernel_bandwidth <= 0
+            ):
                 raise ValueError("coverage_kernel_bandwidth must be positive when set")
             self.coverage_kernel_bandwidth = coverage_kernel_bandwidth
         if coverage_kernel_bandwidth_mult is None:
             self.coverage_kernel_bandwidth_mult = None
         else:
             coverage_kernel_bandwidth_mult = float(coverage_kernel_bandwidth_mult)
-            if not math.isfinite(coverage_kernel_bandwidth_mult) or coverage_kernel_bandwidth_mult <= 0:
+            if (
+                not math.isfinite(coverage_kernel_bandwidth_mult)
+                or coverage_kernel_bandwidth_mult <= 0
+            ):
                 raise ValueError("coverage_kernel_bandwidth_mult must be positive when set")
             if self.coverage_kernel_bandwidth is not None:
                 raise ValueError(
@@ -272,7 +311,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         self._raw_coverage_sub_next: Optional[torch.Tensor] = None
         self._coverage_sub_next_features: Optional[torch.Tensor] = None
 
-        if self.coverage_embeddings:
+        if self.train_coverage_encoder:
             selected_dim = len(self.coverage_state_indices)
             self.coverage_encoder = Encoder(
                 (selected_dim,), hidden_dim, self.feature_dim
@@ -295,6 +334,16 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 eta_min=lr_encoder * 0.1,
             )
 
+        # Base warm-up freezing is disabled here. Subspace mode='frozen' locks
+        # selected image CNN from initialization.
+        self.freeze_observation_encoder_after_warmup = False
+        self._encoder_frozen = (
+            self.dynamics_kernel_input == "pixels"
+            and self.dynamics_encoder_mode == "frozen"
+        )
+        if self._encoder_frozen:
+            self._freeze_module(self.encoder)
+
     @staticmethod
     def _unit_mass_operator_features(features: torch.Tensor) -> torch.Tensor:
         """Map nonnegative state embeddings to unit-mass ROVER features."""
@@ -315,13 +364,13 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         states = states[:, : self.dynamics_state_dim].to(
             device=self.device, dtype=self.compute_dtype
         )
-        if self.learn_dynamics_state_embeddings:
+        if self.uses_state_dynamics_encoder:
             return self.dynamics_state_encoder(states)
         logits = torch.cat([states, torch.zeros_like(states[:, :1])], dim=1)
         return torch.softmax(logits, dim=1)
 
     def _policy_state_dynamics_features(self, states: torch.Tensor) -> torch.Tensor:
-        if not self.learn_dynamics_state_embeddings:
+        if not self.uses_state_dynamics_encoder:
             return self._state_dynamics_features(states)
         states = states.reshape(states.shape[0], -1)[:, : self.dynamics_state_dim]
         states = states.to(device=self.device, dtype=self.compute_dtype)
@@ -329,15 +378,15 @@ class RoverSubspaceCoverageAgent(RoverAgent):
 
     def train(self, training=True):
         super().train(training)
-        if self.learn_dynamics_state_embeddings:
+        if self.uses_state_dynamics_encoder:
             self.dynamics_state_encoder.train(
-                training and not self.freeze_dynamics_state_encoder
+                training and self.dynamics_encoder_mode == "trainable"
             )
             self.policy_dynamics_state_encoder.eval()
 
     def _sync_policy_encoder(self) -> None:
         super()._sync_policy_encoder()
-        if self.learn_dynamics_state_embeddings:
+        if self.uses_state_dynamics_encoder:
             self.policy_dynamics_state_encoder.load_state_dict(
                 self.dynamics_state_encoder.state_dict()
             )
@@ -374,7 +423,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         return self._policy_state_dynamics_features(states)
 
     def _fit_dynamics_kernel_bandwidth(self, X, Y) -> None:
-        if self.dynamics_kernel_input != "states" or self.learn_dynamics_state_embeddings:
+        if self.dynamics_kernel_input != "states" or self.uses_state_dynamics_encoder:
             return super()._fit_state_kernel_bandwidth(X, Y)
         if getattr(self, "_active_kernel_bandwidth", None) is not None:
             self.kernel_fn.bandwidth = self._active_kernel_bandwidth
@@ -452,7 +501,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         flattened = observations.reshape(observations.shape[0], -1)
         if flattened.shape[1] != math.prod(self.obs_shape):
             raise ValueError(
-                "Coverage embeddings expect raw observations matching obs_shape; "
+                "State coverage expects raw observations matching obs_shape; "
                 f"got {flattened.shape[1]} features, expected {math.prod(self.obs_shape)}"
             )
         indices = torch.as_tensor(
@@ -572,7 +621,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             if self.coverage_kernel_input == "pixels":
                 self.coverage_feature_encoder.eval()
                 features = self.coverage_feature_encoder(raw)
-            elif self.coverage_embeddings:
+            elif self.train_coverage_encoder:
                 self.coverage_encoder.eval()
                 features = self.coverage_encoder.encode_and_project(raw)
             else:
@@ -592,7 +641,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         proprio_state=None, proprio_next_state=None,
     ):
         metrics = {}
-        if self.learn_dynamics_state_embeddings:
+        if self.uses_state_dynamics_encoder:
             if self.obs_type == "pixels":
                 if proprio_state is None or proprio_next_state is None:
                     raise ValueError(
@@ -626,21 +675,22 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 loss = loss + self.embedding_sum_loss * (
                     z_next.sum(dim=1).sub(1.0).square().mean()
                 )
-            self.dynamics_state_encoder_optimizer.zero_grad(set_to_none=True)
+            if self.dynamics_state_encoder_optimizer is not None:
+                self.dynamics_state_encoder_optimizer.zero_grad(set_to_none=True)
             self.transition_optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            if not self.freeze_dynamics_state_encoder:
+            if self.dynamics_state_encoder_optimizer is not None:
                 self.dynamics_state_encoder_optimizer.step()
                 self.dynamics_state_encoder_scheduler.step()
                 self._policy_is_synced = False
             self.transition_optimizer.step()
             metrics["dynamics_state_transition_loss"] = float(loss.detach().item())
-        elif self.dynamics_kernel_input == "states" and not self.coverage_embeddings:
-            # The image encoder does not define the dynamics kernel in this run.
+        elif self.dynamics_kernel_input == "states" and not self.train_coverage_encoder:
+            # Primary image encoder does not define either active representation.
             return {}
         else:
             metrics.update(super().update_encoders(obs, action, next_obs, reward))
-        if not self.coverage_embeddings:
+        if not self.train_coverage_encoder:
             return metrics
 
         coverage_obs = self._selected_coverage_observations(obs)
@@ -650,7 +700,6 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         prediction = self.coverage_project_sa(
             self._encode_coverage_state_action(z_obs, action)
         )
-        zero = z_obs.new_zeros(())
         targets = z_next.detach()
         if self.mode == "l1":
             targets = F.normalize(targets, p=2, dim=1, eps=1e-10)
@@ -674,18 +723,19 @@ class RoverSubspaceCoverageAgent(RoverAgent):
     def _debug_visualizer_text(self, step) -> str:
         text = super()._debug_visualizer_text(step)
         dynamics_space = (
-            "stacked images through learned CNN"
+            f"stacked images through {self.dynamics_encoder_mode} CNN"
             if self.dynamics_kernel_input == "pixels"
             else (
-                f"learned embedding of full state ({self.dynamics_state_dim} values)"
-                if self.learn_dynamics_state_embeddings
+                f"{self.dynamics_encoder_mode} embedding of full state "
+                f"({self.dynamics_state_dim} values)"
+                if self.uses_state_dynamics_encoder
                 else f"full proprioceptive state ({self.dynamics_state_dim} values)"
             )
         )
         coverage_space = (
             f"frozen CNN frame {self.coverage_frame_index}"
             if self.coverage_kernel_input == "pixels"
-            else f"proprioceptive indices {self.coverage_state_indices}"
+            else f"raw proprioceptive indices {self.coverage_state_indices}"
         )
         return (
             f"{text}"
@@ -703,7 +753,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             return False
         raw_state_dim = math.prod(getattr(self, "obs_shape", (self.obs_dim,)))
         covers_all_features = self.coverage_state_indices == tuple(range(raw_state_dim))
-        if getattr(self, "embeddings", False) or getattr(self, "coverage_embeddings", False):
+        if getattr(self, "embeddings", False) or getattr(self, "train_coverage_encoder", False):
             return False
         if not covers_all_features:
             return False

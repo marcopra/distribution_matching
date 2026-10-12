@@ -6,15 +6,15 @@ defaults:
 
 _target_: agent.rover_nystrom_subspace.RoverSubspaceCoverageAgent
 exploration_metrics_enabled: false  # disable random-hash metrics and exploration_metrics.png
-coverage_embeddings: false  # train separate state-space coverage features when true
-coverage_kernel_input: states  # states or pixels; state coverage may select a subspace
-coverage_frame_index: -1  # newest frame when coverage_kernel_input=pixels
-coverage_state_filter: [0, 1]  # indices used when coverage_kernel_input=states; PointMaze XY
-dynamics_kernel_input: states  # states or pixels; states uses full (x, y, vx, vy)
-learn_dynamics_state_embeddings: false  # train state-to-feature MLP for dynamics kernels
-freeze_dynamics_state_encoder: false  # freeze that MLP at initialization when true
-dynamics_kernel_type: gaussian  # [inner_product, gaussian]
-coverage_kernel_type: gaussian  # [inner_product, gaussian]
-proprio_state_dims: 4  # retain full PointMaze state as replay metadata
+coverage_kernel_input: states  # states uses configured raw coordinates; pixels uses frozen CNN
+coverage_frame_index: -1  # frame used by the frozen CNN when coverage_kernel_input=pixels
+coverage_state_indices: [0, 1]  # raw PointMaze x, y coordinates when coverage_kernel_input=states
+train_coverage_encoder: false  # true trains separate coverage features; false keeps coverage fixed
+dynamics_kernel_input: states  # states reads proprio_state; pixels reads configured image observations
+dynamics_encoder_mode: raw  # raw, trainable, frozen; frozen always starts at initialization
+dynamics_kernel_type: gaussian
+kernel_type: ${agent.dynamics_kernel_type}  # base-agent alias; set dynamics_kernel_type only
+coverage_kernel_type: gaussian
+proprio_state_dims: 4  # preserve PointMaze (x, y, vx, vy) in replay metadata
 coverage_kernel_bandwidth: null  # fixed bandwidth; mutually exclusive with multiplier
-coverage_kernel_bandwidth_mult: null  # null shares bandwidth only when kernel types match
+coverage_kernel_bandwidth_mult: null  # null shares dynamics bandwidth only when kernel types match

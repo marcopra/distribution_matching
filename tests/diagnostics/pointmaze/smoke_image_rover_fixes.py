@@ -41,8 +41,11 @@ class PendingReplay:
 
 
 def check_mode(mode: str, device: str) -> dict:
-    config_name = ("pretrain_pointmaze_umaze_1_pixels_subspace" if mode == "image"
-                   else "pretrain_pointmaze_umaze_1_subspace")
+    config_name = (
+        "pretrain_pointmaze_umaze_1_image_dynamics_state_coverage_trainable"
+        if mode == "image"
+        else "pretrain_pointmaze_umaze_1_state_dynamics_image_coverage_trainable"
+    )
     with hydra.initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.1"):
         cfg = hydra.compose(config_name=f"pretrain_parallel/{config_name}", overrides=[
             "use_wandb=false", f"device={device}", "agent.batch_size_actor=32",
@@ -64,24 +67,36 @@ def check_mode(mode: str, device: str) -> dict:
         agent = hydra.utils.instantiate(cfg.agent)
         agent._save_actor_kernel_debug_plot = lambda *args, **kwargs: None
         ts = env.reset(seed=4)
-        observations, following, actions = [], [], []
+        observations, following, actions, states, next_states = [], [], [], [], []
         for index in range(40):
             action = index % agent.n_actions
             nxt = env.step(action)
             observations.append(ts.observation)
             following.append(nxt.observation)
             actions.append(action)
+            states.append(ts.proprio_observation)
+            next_states.append(nxt.proprio_observation)
             ts = nxt
         observations, following = np.stack(observations), np.stack(following)
-        transitions = (observations, np.asarray(actions).reshape(-1, 1), np.zeros((40, 1)),
-                       np.ones((40, 1)), following)
+        transitions = (
+            observations,
+            np.asarray(actions).reshape(-1, 1),
+            np.zeros((40, 1)),
+            np.ones((40, 1)),
+            following,
+            np.asarray(states, dtype=np.float32),
+            np.asarray(next_states, dtype=np.float32),
+        )
         replay = PendingReplay()
         for start, stop in ((0, 16), (16, 32)):
             replay.pending = (np.arange(start, stop), tuple(x[start:stop] for x in transitions))
             agent.drain_encoded_actor_fifo(replay)
 
         training_batch = utils.to_torch(tuple(x[:8] for x in transitions), device)
-        agent.update_encoders(training_batch[0], training_batch[1], training_batch[4], training_batch[2])
+        agent.update_encoders(
+            training_batch[0], training_batch[1], training_batch[4], training_batch[2],
+            proprio_state=training_batch[5], proprio_next_state=training_batch[6],
+        )
         coverage_weights = (None if agent.coverage_feature_encoder is None else
                             {key: value.clone() for key, value in
                              agent.coverage_feature_encoder.state_dict().items()})
@@ -89,22 +104,39 @@ def check_mode(mode: str, device: str) -> dict:
         max_error = 0.
         with torch.no_grad():
             for batch in (data.full, data.subsample):
-                for key, raw_key in (("phi_obs", "obs_raw"), ("phi_next", "next_obs_raw")):
-                    fresh = agent._encode_with_module(agent.policy_encoder,
-                        batch[raw_key].to(device), project=True).float().cpu()
+                for key, raw_key, state_key in (
+                    ("phi_obs", "obs_raw", "proprio_state"),
+                    ("phi_next", "next_obs_raw", "proprio_next_state"),
+                ):
+                    if agent.dynamics_kernel_input == "states":
+                        fresh = agent._policy_state_dynamics_features(
+                            batch[state_key].to(device)
+                        ).float().cpu()
+                    else:
+                        fresh = agent._encode_with_module(
+                            agent.policy_encoder, batch[raw_key].to(device), project=True
+                        ).float().cpu()
                     torch.testing.assert_close(batch[key], fresh, atol=1e-6, rtol=1e-5)
                     max_error = max(max_error, float((batch[key] - fresh).abs().max()))
-                if mode == "image":
-                    assert batch["obs_raw"].dtype == torch.uint8
+                assert batch["obs_raw"].dtype == torch.uint8
+                if agent.coverage_feature_encoder is not None:
                     newest = batch["next_obs_raw"][:, -1:].to(device)
                     expected = agent.coverage_feature_encoder(newest).cpu()
                     torch.testing.assert_close(batch["coverage_next_features"], expected,
                                                atol=1e-7, rtol=1e-5)
+                else:
+                    indices = torch.as_tensor(agent.coverage_state_indices, dtype=torch.long)
+                    expected = batch["proprio_next_state"].index_select(1, indices)
+                    torch.testing.assert_close(batch["coverage_next_raw"], expected,
+                                               atol=0., rtol=0.)
 
         metrics = agent.update_actor_nystrom(None, None, None, 11000,
             encoded_full=data.full, encoded_sub=data.subsample)
         before = agent._compute_action_probs_batch(observations[:4])
-        agent.update_encoders(training_batch[0], training_batch[1], training_batch[4], training_batch[2])
+        agent.update_encoders(
+            training_batch[0], training_batch[1], training_batch[4], training_batch[2],
+            proprio_state=training_batch[5], proprio_next_state=training_batch[6],
+        )
         replay.pending = (np.arange(32, 40), tuple(x[32:40] for x in transitions))
         agent.drain_encoded_actor_fifo(replay)
         after = agent._compute_action_probs_batch(observations[:4])
@@ -114,6 +146,8 @@ def check_mode(mode: str, device: str) -> dict:
             for key, value in agent.coverage_feature_encoder.state_dict().items():
                 torch.testing.assert_close(value, coverage_weights[key], atol=0., rtol=0.)
         return dict(mode=mode, verified=True, support_max_abs_error=max_error,
+                    dynamics_kernel_input=agent.dynamics_kernel_input,
+                    coverage_kernel_input=agent.coverage_kernel_input,
                     action_probability_drift_after_encoder_update_and_drain=float(np.max(abs(after-before))),
                     actor_loss=float(metrics["actor_loss"]),
                     backtracking_rejections=metrics["actor_backtracking_rejections"])

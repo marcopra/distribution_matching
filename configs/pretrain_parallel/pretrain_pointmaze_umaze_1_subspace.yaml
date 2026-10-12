@@ -1,5 +1,6 @@
 # @package _global_
-
+# Baseline-aligned PointMaze subspace setup. Defaults to raw-state dynamics and
+# coverage; image-observation variants override modality and encoder/kernel fields.
 defaults:
   - pretrain_pointmaze_umaze_1
   - override /agent: rover_nystrom_pointmaze_subspace
@@ -8,12 +9,12 @@ defaults:
 
 num_train_frames: 1_000_000
 eval_every_frames: 100_000
-parallel_attach_eval_env_for_debug: false
+parallel_attach_eval_env_for_debug: true
 
 agent:
   feature_dim: 256
   embeddings: true
-  coverage_embeddings: false
+  train_coverage_encoder: false
   linear_projection: true
   lr_actor: 10
   pmd_steps: 10
@@ -21,17 +22,19 @@ agent:
   pmd_eta_mode: backtracking
   pca_truncation: 4500
   compute_dtype: float64
-  sink_schedule: linear(0.0, 1.0, 500_000)
+  sink_schedule: linear(0.0, 0.8, 250000)
   debug_fixed_dataset_updates: false
-  kernel_type: gaussian
+  dynamics_kernel_input: states
+  dynamics_encoder_mode: raw
   dynamics_kernel_type: gaussian
+  coverage_kernel_input: states
+  coverage_state_indices: [0, 1]
   coverage_kernel_type: gaussian
   kernel_bandwidth: null
   kernel_bandwidth_mult: 1.0
-  subsampling_strategy: pivoted_cholesky
-  coverage_state_filter: 2
   coverage_kernel_bandwidth: null
   coverage_kernel_bandwidth_mult: 1.0
+  subsampling_strategy: pivoted_cholesky
   nystrom_exact_grid: false
   subsamples: 4000
   lambda_reg: 1e-6
@@ -39,6 +42,11 @@ agent:
   update_actor_every_steps: 10000
   T_init_steps: 5000
 
-use_wandb: true
+use_wandb: false
 wandb_project: pointmaze_hp
 save_eval_best: false
+coverage_eval_enabled: true
+coverage_num_trajectories: 50
+coverage_grid_size: 90
+coverage_radius: 0.08
+coverage_expansion_tolerance: 0.25

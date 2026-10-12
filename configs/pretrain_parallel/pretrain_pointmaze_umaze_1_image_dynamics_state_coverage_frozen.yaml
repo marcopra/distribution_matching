@@ -1,0 +1,9 @@
+# @package _global_
+# Run 2 Variant B: same random image CNN, frozen at initialization.
+defaults:
+  - pretrain_pointmaze_umaze_1_image_dynamics_state_coverage_trainable
+  - _self_
+
+agent:
+  dynamics_encoder_mode: frozen
+  dynamics_kernel_type: gaussian

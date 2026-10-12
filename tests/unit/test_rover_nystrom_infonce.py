@@ -40,7 +40,7 @@ def test_coverage_encoder_keeps_the_diagonal_infonce_update():
         embeddings=True,
         linear_projection=True,
         device="cpu",
-        coverage_embeddings=True,
+        train_coverage_encoder=True,
     )
     obs = torch.randn(4, 3)
     next_obs = torch.randn(4, 3)

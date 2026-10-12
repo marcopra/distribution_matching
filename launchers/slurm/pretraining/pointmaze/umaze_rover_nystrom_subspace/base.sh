@@ -23,8 +23,7 @@ conda activate dist_matching
 export HYDRA_FULL_ERROR=1
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
-    --config-name=pretrain_parallel/pretrain_pointmaze_umaze_1_subspace \
-    env=pointmaze/pointmaze_umaze_full_state_discrete \
+    --config-name=pretrain_parallel/pretrain_pointmaze_umaze_1_image_dynamics_state_coverage_frozen \
     seed="${SEED}" \
     wandb_project=pointmaze_subspace_hp \
     use_wandb=true \
@@ -37,12 +36,9 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     +coverage_radius=0.08 \
     +coverage_expansion_tolerance=0.25 \
     parallel_attach_eval_env_for_debug=true \
-    snapshot_dir="models/pointmaze/umaze/states/rover_subspace_sweep/${RUN_LABEL}/seed_${SEED}" \
+    snapshot_dir="models/pointmaze/umaze/pixels/image_dynamics_state_coverage/${RUN_LABEL}/seed_${SEED}" \
     agent.embeddings=true \
     agent.linear_projection=true \
-    agent.coverage_embeddings=false \
-    agent.coverage_state_filter=2 \
-    agent.kernel_type=gaussian \
     agent.kernel_bandwidth=null \
     agent.kernel_bandwidth_mult="${KERNEL_BANDWIDTH_MULT}" \
     agent.coverage_kernel_bandwidth=null \

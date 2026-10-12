@@ -127,7 +127,7 @@ class RoverAgent:
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
                  max_pending_transitions: Optional[int] = None,
-                 freeze_encoder: bool = False,
+                 freeze_observation_encoder_after_warmup: bool = False,
                  kernel_type: str = "inner_product",
                  kernel_bandwidth=None,
                  kernel_bandwidth_mult: Optional[float] = None,
@@ -170,9 +170,13 @@ class RoverAgent:
         self.exploration_metrics_enabled = bool(exploration_metrics_enabled)
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
-        self.freeze_encoder = bool(freeze_encoder)
-        self._encoder_frozen = self.freeze_encoder and self.T_init_steps <= 0
-        if self.freeze_encoder and self.T_init_steps > 0:
+        self.freeze_observation_encoder_after_warmup = bool(
+            freeze_observation_encoder_after_warmup
+        )
+        self._encoder_frozen = (
+            self.freeze_observation_encoder_after_warmup and self.T_init_steps <= 0
+        )
+        if self.freeze_observation_encoder_after_warmup and self.T_init_steps > 0:
             utils.ColorPrint.yellow("updating encoder")
         self.curl = curl
         if curl:
@@ -567,7 +571,7 @@ class RoverAgent:
     def _maybe_freeze_encoder(self, step: int) -> None:
         freeze_at_step = self.num_expl_steps + self.T_init_steps
         if (
-            self.freeze_encoder
+            self.freeze_observation_encoder_after_warmup
             and not self._encoder_frozen
             and step >= freeze_at_step
         ):

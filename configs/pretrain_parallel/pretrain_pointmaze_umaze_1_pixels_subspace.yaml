@@ -1,4 +1,6 @@
 # @package _global_
+# Legacy image-dynamics/image-coverage setup. Requested comparisons use the
+# explicit image_dynamics_state_coverage configs.
 defaults:
   - pretrain_pointmaze_umaze_1_pixels
   - override /agent: rover_nystrom_pointmaze_subspace
@@ -10,20 +12,22 @@ frame_stack: 3
 num_train_frames: 1_000_000
 eval_every_frames: 100_000
 parallel_attach_eval_env_for_debug: true
+p_path: none
+p_path_coverage: none
 
 agent:
   feature_dim: 256
   embeddings: true
   linear_projection: true
-  coverage_embeddings: false
+  train_coverage_encoder: false
   dynamics_kernel_input: pixels
+  dynamics_encoder_mode: trainable
   dynamics_kernel_type: gaussian
   coverage_kernel_input: pixels
+  coverage_state_indices: null
   coverage_kernel_type: gaussian
   coverage_frame_index: -1
-  coverage_state_filter: null
   proprio_state_dims: 4
-  kernel_type: gaussian
   kernel_bandwidth: null
   kernel_bandwidth_mult: 1.0
   coverage_kernel_bandwidth: null

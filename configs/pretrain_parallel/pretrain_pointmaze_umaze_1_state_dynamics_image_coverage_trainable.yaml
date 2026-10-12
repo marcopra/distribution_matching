@@ -1,0 +1,22 @@
+# @package _global_
+# Run 1 Variant A: train state dynamics encoder; use fixed image coverage.
+defaults:
+  - pretrain_pointmaze_umaze_1_subspace
+  - _self_
+
+obs_type: pixels
+frame_stack: 1
+p_path: none  # Use random initialization for the state dynamics MLP.
+# Coverage CNN gets random initialization and stays frozen. Set a checkpoint
+# path here only when intentionally loading a pretrained single-frame CNN.
+p_path_coverage: none
+
+agent:
+  train_coverage_encoder: false
+  dynamics_kernel_input: states
+  dynamics_encoder_mode: trainable  # state MLP reads replay (x, y, vx, vy)
+  dynamics_kernel_type: inner_product
+  coverage_kernel_input: pixels
+  coverage_state_indices: null
+  coverage_frame_index: -1
+  coverage_kernel_type: gaussian

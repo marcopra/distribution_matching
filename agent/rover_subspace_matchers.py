@@ -12,41 +12,41 @@ from agent.rover_sink import (
 )
 
 
-def normalize_coverage_state_filter(state_filter, state_dim: int) -> tuple[int, ...]:
-    """Resolve ``None``, prefix length, or explicit indices to feature indices."""
+def normalize_coverage_state_indices(state_indices, state_dim: int) -> tuple[int, ...]:
+    """Resolve ``None``, prefix length, or explicit state-coordinate indices."""
     state_dim = int(state_dim)
     if state_dim < 1:
         raise ValueError(f"coverage state dimension must be positive, got {state_dim}")
 
-    if state_filter is None:
+    if state_indices is None:
         indices = tuple(range(state_dim))
-    elif isinstance(state_filter, Integral) and not isinstance(state_filter, bool):
-        count = int(state_filter)
+    elif isinstance(state_indices, Integral) and not isinstance(state_indices, bool):
+        count = int(state_indices)
         if count < 1 or count > state_dim:
             raise ValueError(
-                f"coverage_state_filter prefix length must be in [1, {state_dim}], got {count}"
+                f"coverage_state_indices prefix length must be in [1, {state_dim}], got {count}"
             )
         indices = tuple(range(count))
     else:
-        if isinstance(state_filter, (str, bytes)):
-            raise TypeError("coverage_state_filter must be null, an integer, or a list of indices")
+        if isinstance(state_indices, (str, bytes)):
+            raise TypeError("coverage_state_indices must be null, an integer, or a list of indices")
         try:
-            raw_indices = list(state_filter)
+            raw_indices = list(state_indices)
         except TypeError as exc:
             raise TypeError(
-                "coverage_state_filter must be null, an integer, or a list of indices"
+                "coverage_state_indices must be null, an integer, or a list of indices"
             ) from exc
         if not raw_indices:
-            raise ValueError("coverage_state_filter index list must not be empty")
+            raise ValueError("coverage_state_indices list must not be empty")
         if any(not isinstance(index, Integral) or isinstance(index, bool) for index in raw_indices):
-            raise TypeError("coverage_state_filter indices must be integers")
+            raise TypeError("coverage_state_indices must contain integers")
         indices = tuple(int(index) for index in raw_indices)
         if len(set(indices)) != len(indices):
-            raise ValueError("coverage_state_filter indices must be unique")
+            raise ValueError("coverage_state_indices must be unique")
         invalid = [index for index in indices if index < 0 or index >= state_dim]
         if invalid:
             raise ValueError(
-                f"coverage_state_filter indices must be in [0, {state_dim - 1}], got {invalid}"
+                f"coverage_state_indices must be in [0, {state_dim - 1}], got {invalid}"
             )
     return indices
 
@@ -83,7 +83,7 @@ class SubspaceCoverageMatcher:
             state_features = phi_sub_next_obs[:, :-1]
             if state_features.shape[1] <= max(state_indices):
                 raise ValueError(
-                    "coverage_state_filter exceeds state feature dimension: "
+                    "coverage_state_indices exceeds state feature dimension: "
                     f"max index {max(state_indices)}, dimension {state_features.shape[1]}"
                 )
             index = torch.as_tensor(state_indices, device=state_features.device, dtype=torch.long)

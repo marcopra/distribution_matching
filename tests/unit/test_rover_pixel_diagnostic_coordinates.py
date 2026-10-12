@@ -163,7 +163,7 @@ class RoverPixelProprioStateTest(unittest.TestCase):
         agent.dynamics_kernel_input = "states"
         agent.coverage_kernel_input = "states"
         agent.coverage_state_indices = (0, 1)
-        agent.coverage_embeddings = False
+        agent.train_coverage_encoder = False
 
         observations = np.arange(12, dtype=np.uint8).reshape(2, 3, 1, 2)
         states = np.asarray(

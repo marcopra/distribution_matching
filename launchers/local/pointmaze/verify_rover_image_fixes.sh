@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Paired image/state runs after the three correctness fixes; sequential on one GPU.
+# Paired PointMaze kernel-input runs; both use images and retain state metadata.
 set -euo pipefail
 
 ROVER_VERIFY_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -21,8 +21,8 @@ shared=(
     save_snapshot=true save_eval_best=false use_wandb=false
     parallel_attach_eval_env_for_debug=true
     agent.embeddings=true
-    agent.linear_projection=true agent.coverage_embeddings=false
-    agent.kernel_type=gaussian agent.kernel_bandwidth=null
+    agent.linear_projection=true agent.train_coverage_encoder=false
+    agent.kernel_bandwidth=null
     agent.kernel_bandwidth_mult=1.0 agent.coverage_kernel_bandwidth=null
     agent.coverage_kernel_bandwidth_mult=1.0
     agent.lambda_reg=1e-6 agent.lr_actor=10
@@ -32,9 +32,9 @@ shared=(
 for rover_verify_seed in "$@"; do
     for rover_verify_mode in image state; do
         if [[ "$rover_verify_mode" == image ]]; then
-            rover_verify_config=pretrain_parallel/pretrain_pointmaze_umaze_1_pixels_subspace
+            rover_verify_config=pretrain_parallel/pretrain_pointmaze_umaze_1_image_dynamics_state_coverage_trainable
         else
-            rover_verify_config=pretrain_parallel/pretrain_pointmaze_umaze_1_subspace
+            rover_verify_config=pretrain_parallel/pretrain_pointmaze_umaze_1_state_dynamics_image_coverage_trainable
         fi
         rover_verify_dir="exp_local_parallel/$(date +%Y.%m.%d/%H%M%S_%N)_fixed_${rover_verify_mode}_s${rover_verify_seed}"
         command=("$ROVER_VERIFY_PYTHON" pretrain_parallel.py

@@ -30,7 +30,7 @@ case "${KERNEL_TYPE}" in
         ;;
 esac
 
-RUN_LABEL="${KERNEL_TYPE}_freeze${FREEZE_ENCODER}_feat${FEATURE_DIM}_${FEATURE_MODE}_nys${SUBSAMPLE}_pca${PCA_TRUNCATION}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}_lambda${LAMBDA_REG}_bw${KERNEL_BANDWIDTH_MULT}_chol${NYSTROM_CHOLESKY_TOLERANCE}"
+RUN_LABEL="${KERNEL_TYPE}_freeze${FREEZE_OBSERVATION_ENCODER_AFTER_WARMUP}_feat${FEATURE_DIM}_${FEATURE_MODE}_nys${SUBSAMPLE}_pca${PCA_TRUNCATION}_batch${BATCH_SIZE_ACTOR}_sink${SINK_IDX}_lambda${LAMBDA_REG}_bw${KERNEL_BANDWIDTH_MULT}_chol${NYSTROM_CHOLESKY_TOLERANCE}"
 
 cd "${SLURM_SUBMIT_DIR}"
 source ~/.bashrc
@@ -61,7 +61,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python pretrain_parallel.py \
     wandb_project=pointmaze_hp \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.mode="${FEATURE_MODE}" \
-    agent.freeze_encoder="${FREEZE_ENCODER}" \
+    agent.freeze_observation_encoder_after_warmup="${FREEZE_OBSERVATION_ENCODER_AFTER_WARMUP}" \
     p_path=none \
     agent.nystrom_cholesky_tolerance="${NYSTROM_CHOLESKY_TOLERANCE}" \
     agent.lambda_reg="${LAMBDA_REG}" \

@@ -1,0 +1,20 @@
+# @package _global_
+# Run 2 Variant A: train image dynamics encoder; use raw PointMaze x/y coverage.
+defaults:
+  - pretrain_pointmaze_umaze_1_subspace
+  - _self_
+
+obs_type: pixels
+frame_stack: 1
+p_path: none  # Image dynamics CNN uses random initialization.
+p_path_coverage: none
+
+agent:
+  train_coverage_encoder: false
+  dynamics_kernel_input: pixels
+  dynamics_encoder_mode: trainable  # train observation CNN from image transitions
+  dynamics_kernel_type: inner_product
+  coverage_kernel_input: states
+  coverage_state_indices: [0, 1]  # raw configured PointMaze x/y; no learned encoder
+  coverage_frame_index: -1
+  coverage_kernel_type: gaussian
