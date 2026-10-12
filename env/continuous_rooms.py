@@ -482,9 +482,10 @@ class ContinuousRoomEnv(gym.Env, ABC):
         if self.show_coordinates:
             font = pygame.font.SysFont('Arial', 14)
             pos_text = font.render(f"Pos: ({self.position[0]:.1f}, {self.position[1]:.1f})", True, COLORS['text'])
-            goal_text = font.render(f"Goal: ({self.goal[0]:.1f}, {self.goal[1]:.1f})", True, COLORS['text'])
             surface.blit(pos_text, (10, 10))
-            surface.blit(goal_text, (10, 28))
+            if show_goal:
+                goal_text = font.render(f"Goal: ({self.goal[0]:.1f}, {self.goal[1]:.1f})", True, COLORS['text'])
+                surface.blit(goal_text, (10, 28))
         
         if self.render_mode == "human":
             self._screen.blit(surface, (0, 0))
@@ -497,7 +498,7 @@ class ContinuousRoomEnv(gym.Env, ABC):
         return self.render(show_goal=False)
 
     def render_image_observation(self) -> Optional[np.ndarray]:
-        return self.render(show_goal=True)
+        return self.render(show_goal=False)
     
     def close(self):
         if self._pygame_initialized:

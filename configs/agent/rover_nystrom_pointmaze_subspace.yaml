@@ -5,9 +5,16 @@ defaults:
   - _self_
 
 _target_: agent.rover_nystrom_subspace.RoverSubspaceCoverageAgent
+exploration_metrics_enabled: false  # disable random-hash metrics and exploration_metrics.png
 coverage_embeddings: false  # train separate state-space coverage features when true
-coverage_encoder_type: raw  # raw state features or frozen spatial CNNEncoder features
-coverage_frame_index: -1  # newest frame by default when using frozen_cnn
-coverage_state_filter: null  # null=all, integer=prefix, list=explicit feature indices
+coverage_kernel_input: states  # states or pixels; state coverage may select a subspace
+coverage_frame_index: -1  # newest frame when coverage_kernel_input=pixels
+coverage_state_filter: [0, 1]  # indices used when coverage_kernel_input=states; PointMaze XY
+dynamics_kernel_input: states  # states or pixels; states uses full (x, y, vx, vy)
+learn_dynamics_state_embeddings: false  # train state-to-feature MLP for dynamics kernels
+freeze_dynamics_state_encoder: false  # freeze that MLP at initialization when true
+dynamics_kernel_type: gaussian  # [inner_product, gaussian]
+coverage_kernel_type: gaussian  # [inner_product, gaussian]
+proprio_state_dims: 4  # retain full PointMaze state as replay metadata
 coverage_kernel_bandwidth: null  # fixed bandwidth; mutually exclusive with multiplier
-coverage_kernel_bandwidth_mult: null  # null follows dynamics bandwidth; otherwise fit in selected coverage space
+coverage_kernel_bandwidth_mult: null  # null shares bandwidth only when kernel types match

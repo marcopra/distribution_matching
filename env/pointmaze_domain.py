@@ -26,9 +26,10 @@ def prepare_point_maze_make_kwargs(name, env_kwargs, url=False):
         )
     env_kwargs["reward_type"] = reward_type
     env_kwargs["reset_target"] = True
-    env_kwargs.setdefault("continuing_task", False)
-    if url:
-        env_kwargs["continuing_task"] = True
+    # Keep an explicit environment setting authoritative. Training entrypoints
+    # pass url=True for legacy wrappers, but PointMaze configs can still require
+    # episodes to terminate when the agent reaches the goal.
+    env_kwargs.setdefault("continuing_task", bool(url))
     return env_kwargs, pointmaze_kwargs
 
 
@@ -332,6 +333,11 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
         finally:
             base_env.model.site_rgba[base_env.target_site_id] = original_rgba
 
+    def render(self):
+        # Hide the target in regular renders too (videos/debugging), not only
+        # in the policy's pixel-observation path.
+        return self._render_without_goal()
+
     def render_observation(self):
         frame = self._render_without_goal()
         self._cached_hidden_render = frame
@@ -340,10 +346,6 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
     def render_image_observation(self):
         if self._cached_hidden_render is None:
             self._cached_hidden_render = self._render_without_goal()
-
-        # Uncomment the next line and comment the return below to render the goal
-        # in image_observation while keeping observation goal-hidden.
-        # return self.env.render()
         return self._cached_hidden_render.copy()
 
     def reset(self, **kwargs):

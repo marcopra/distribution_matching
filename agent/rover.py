@@ -715,13 +715,12 @@ class RoverAgent:
             action_probs: [batch_size, n_actions] action probabilities from current policy
             
         Returns:
-            Mean absolute deviation from uniform (1/n_actions)
+            Mean per-state total variation distance from uniform (1/n_actions)
         """
         uniform_prob = 1.0 / self.n_actions
-        # Average over batch, then compute mean absolute deviation across actions
-        mean_probs = np.mean(action_probs, axis=0)  # [n_actions]
-        deviation = np.mean(np.abs(mean_probs - uniform_prob))
-        return deviation
+        # Measure each state's policy before averaging: opposing deterministic
+        # actions must not cancel. TV ranges from 0 to 1 - 1/n_actions.
+        return float(np.mean(0.5 * np.sum(np.abs(action_probs - uniform_prob), axis=-1)))
     
     def plot_gradient_norm_by_reward(self, save_dir: str = './gradient_plots'):
         """

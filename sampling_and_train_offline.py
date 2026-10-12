@@ -208,14 +208,20 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
+    def _prepare_replay_meta(self, time_step, meta):
+        prepare = getattr(self.agent, "prepare_replay_meta", None)
+        return prepare(time_step, meta) if callable(prepare) else meta
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         meta = self.agent.init_meta()
         while eval_until_episode(episode):
+            meta = self.agent.init_meta()
             time_step = self.eval_env.reset()
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
+                meta = self.agent.update_meta(meta, self.global_step, time_step)
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
                                             meta,
@@ -283,7 +289,8 @@ class Workspace:
         time_step = self.train_env.reset()      
     
         meta = self.agent.init_meta()
-        self.replay_storage.add(time_step, meta)
+        replay_meta = self._prepare_replay_meta(time_step, meta)
+        self.replay_storage.add(time_step, replay_meta)
         self.train_video_recorder.init(time_step.image_observation)
         metrics = None
         # Data collection loop
@@ -310,7 +317,8 @@ class Workspace:
                 # reset env
                 time_step = self.train_env.reset()
                 meta = self.agent.init_meta()
-                self.replay_storage.add(time_step, meta)
+                replay_meta = self._prepare_replay_meta(time_step, meta)
+                self.replay_storage.add(time_step, replay_meta)
                 # self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
                 # self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
                 # self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)
@@ -343,7 +351,8 @@ class Workspace:
             # take env step
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
-            self.replay_storage.add(time_step, meta)
+            replay_meta = self._prepare_replay_meta(time_step, meta)
+            self.replay_storage.add(time_step, replay_meta)
             # self.dataset['states'] = np.append(self.dataset['states'], np.argmax(time_step.observation))
             # self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)
             # self.dataset['rewards'] = np.append(self.dataset['rewards'], time_step.reward)

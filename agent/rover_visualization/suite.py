@@ -89,17 +89,20 @@ def build_debug_visualizer_suite(
     agent,
     exploration_visualizer_cls,
     gridworld_visualizer_cls,
+    exploration_metrics_enabled: bool = True,
 ):
-    exploration_visualizer = exploration_visualizer_cls(
-        obs_shape=agent.obs_shape,
-        obs_type=agent.obs_type,
-        feature_dim=agent.feature_dim,
-        hash_dim=1024,
-        k_neighbors=5,
-        occupancy_window=agent.update_actor_every_steps * 3,
-        save_dir=os.path.join("exploration_plots", os.getcwd()),
-        device=agent.device,
-    )
+    exploration_visualizer = None
+    if exploration_metrics_enabled:
+        exploration_visualizer = exploration_visualizer_cls(
+            obs_shape=agent.obs_shape,
+            obs_type=agent.obs_type,
+            feature_dim=agent.feature_dim,
+            hash_dim=1024,
+            k_neighbors=5,
+            occupancy_window=agent.update_actor_every_steps * 3,
+            save_dir=os.path.join("exploration_plots", os.getcwd()),
+            device=agent.device,
+        )
     return RoverDebugVisualizerSuite(
         agent=agent,
         exploration_visualizer=exploration_visualizer,

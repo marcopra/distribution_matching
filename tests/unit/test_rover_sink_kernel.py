@@ -8,13 +8,13 @@ from agent.rover_sink import orthogonal_sink_residual_gram
 from agent.rover_subspace_matchers import SubspaceCoverageMatcher
 
 
-def test_frozen_cnn_spatial_features_are_unit_mass_and_frozen():
+def test_frozen_cnn_projected_features_use_feature_dim_and_are_unit_mass():
     encoder = FrozenCNNFeatureEncoder((1, 84, 84), feature_dim=16)
     observations = torch.randint(0, 256, (3, 1, 84, 84), dtype=torch.uint8)
 
     features = encoder(observations)
 
-    assert features.shape == (3, 32 * 7 * 7)
+    assert features.shape == (3, 16)
     assert all(not parameter.requires_grad for parameter in encoder.parameters())
     assert torch.all(features >= 0)
     torch.testing.assert_close(features.sum(dim=1), torch.ones(3))

@@ -3,6 +3,7 @@
 env:
   name: "PointMaze_LargeDense-v3"
   render_mode: rgb_array
+  continuing_task: false
   max_episode_steps: 2000
   pointmaze:
     top_down_camera: true

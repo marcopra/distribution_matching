@@ -37,6 +37,7 @@ num_eval_episodes: 1
 
 # snapshot
 p_path: none  # Optional representation checkpoint; encoder_state_dict or agent snapshot.
+p_path_coverage: none  # Optional single-frame CNN checkpoint for frozen coverage features.
 snapshots: [11000, 50000, 100000, 200000, 500000, 1000000, 2000000]
 snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
 

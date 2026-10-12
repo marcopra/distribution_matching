@@ -66,6 +66,18 @@ from agent.rover_visualization.suite import build_debug_visualizer_suite
 class RoverAgent:
     requires_transition_view = True
 
+    @property
+    def proprio_state_dims(self):
+        # Older full snapshots stored this count under a diagnostic label.
+        return self.__dict__.get(
+            "_proprio_state_dims",
+            self.__dict__.get("diagnostic_coordinate_dims", 0),
+        )
+
+    @proprio_state_dims.setter
+    def proprio_state_dims(self, value):
+        self.__dict__["_proprio_state_dims"] = int(value)
+
     def __init__(self,
                  name,
                  obs_type,
@@ -126,7 +138,9 @@ class RoverAgent:
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  nystrom_exact_grid: bool = False,
-                 diagnostic_coordinate_dims: int = 0,
+                 proprio_state_dims: Optional[int] = None,
+                 diagnostic_coordinate_dims: Optional[int] = None,
+                 exploration_metrics_enabled: bool = True,
                  device: str = "cpu",
                  ):
 
@@ -153,6 +167,7 @@ class RoverAgent:
         self.use_tb = use_tb
         self.use_wandb = use_wandb
         self.device = device
+        self.exploration_metrics_enabled = bool(exploration_metrics_enabled)
         self.pmd_steps = pmd_steps
         self.embeddings = embeddings
         self.freeze_encoder = bool(freeze_encoder)
@@ -222,9 +237,15 @@ class RoverAgent:
         self.subsamples = subsamples
         self.nystrom_synthetic_subsamples = bool(nystrom_synthetic_subsamples)
         self.debug_fixed_dataset_updates = bool(debug_fixed_dataset_updates)
-        self.diagnostic_coordinate_dims = int(diagnostic_coordinate_dims)
-        if self.diagnostic_coordinate_dims < 0:
-            raise ValueError("diagnostic_coordinate_dims must be non-negative")
+        if proprio_state_dims is None:
+            proprio_state_dims = diagnostic_coordinate_dims or 0
+        elif diagnostic_coordinate_dims is not None and int(diagnostic_coordinate_dims) != int(proprio_state_dims):
+            raise ValueError(
+                "proprio_state_dims and legacy diagnostic_coordinate_dims disagree"
+            )
+        self.proprio_state_dims = int(proprio_state_dims)
+        if self.proprio_state_dims < 0:
+            raise ValueError("proprio_state_dims must be non-negative")
         #####
         if self.debug_fixed_dataset_updates:
             utils.ColorPrint.yellow("DEBUG: encoder and actor updates use the fixed continuous Nyström dataset.")
@@ -381,6 +402,7 @@ class RoverAgent:
             agent=self,
             exploration_visualizer_cls=ExplorationVisualizer,
             gridworld_visualizer_cls=EmbeddingDistributionVisualizerV2,
+            exploration_metrics_enabled=self.exploration_metrics_enabled,
         )
         self.visualizer = self.debug_visualizer.exploration_visualizer
         self.gridworld_visualizer = None
@@ -474,41 +496,56 @@ class RoverAgent:
 
     def init_meta(self):
         meta = OrderedDict()
-        if self.diagnostic_coordinate_dims:
-            meta["diagnostic_coordinates"] = np.zeros(
-                (self.diagnostic_coordinate_dims,), dtype=np.float32
+        if self.proprio_state_dims:
+            meta["proprio_state"] = np.zeros(
+                (self.proprio_state_dims,), dtype=np.float32
             )
         return meta
 
     def get_meta_specs(self):
-        if not self.diagnostic_coordinate_dims:
+        if not self.proprio_state_dims:
             return tuple()
         return (
             specs.Array(
-                shape=(self.diagnostic_coordinate_dims,),
+                shape=(self.proprio_state_dims,),
                 dtype=np.float32,
-                name="diagnostic_coordinates",
+                name="proprio_state",
             ),
         )
 
     def prepare_replay_meta(self, time_step, meta):
-        """Attach state coordinates used only by PointMaze diagnostics."""
-        if not self.diagnostic_coordinate_dims:
+        """Attach proprioceptive state aligned with this replay observation."""
+        if not self.proprio_state_dims:
             return meta
         replay_meta = OrderedDict(meta)
         proprio = np.asarray(time_step.proprio_observation, dtype=np.float32).reshape(-1)
-        if proprio.size < self.diagnostic_coordinate_dims:
+        if proprio.size < self.proprio_state_dims:
             raise ValueError(
-                "Diagnostic coordinates exceed available proprioceptive values: "
-                f"requested {self.diagnostic_coordinate_dims}, got {proprio.size}"
+                "Requested proprioceptive state exceeds available values: "
+                f"requested {self.proprio_state_dims}, got {proprio.size}"
             )
-        replay_meta["diagnostic_coordinates"] = proprio[
-            :self.diagnostic_coordinate_dims
+        replay_meta["proprio_state"] = proprio[
+            :self.proprio_state_dims
         ].copy()
         return replay_meta
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
-        return meta
+        if not self.proprio_state_dims:
+            return meta
+        proprio = getattr(time_step, "proprio_observation", None)
+        if proprio is None:
+            return meta
+        proprio = np.asarray(proprio, dtype=np.float32).reshape(-1)
+        if proprio.size < self.proprio_state_dims:
+            raise ValueError(
+                "Requested proprioceptive state exceeds available values: "
+                f"requested {self.proprio_state_dims}, got {proprio.size}"
+            )
+        updated_meta = OrderedDict(meta)
+        updated_meta["proprio_state"] = proprio[
+            :self.proprio_state_dims
+        ].copy()
+        return updated_meta
     
     def _encode_state_action(
         self, 
@@ -721,7 +758,12 @@ class RoverAgent:
         print(f"Kernel sigma debug plot saved to: {save_path}")
     
     
-    def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
+    def _policy_query_features(self, obs_tensor, metas=None):
+        """Encode observations in the same feature space used by the actor kernel."""
+        del metas
+        return self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+
+    def compute_action_probs(self, obs: np.ndarray, meta=None) -> np.ndarray:
         """Compute π(·|s) for given observation."""
         with torch.no_grad():
             # Handle different observation types
@@ -737,7 +779,7 @@ class RoverAgent:
                 # State observations: [x, y] -> [1, 2]
                 obs_tensor = torch.as_tensor(obs, device=self.device, dtype=self.compute_dtype).unsqueeze(0)  # [1, obs_dim]
             
-            enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+            enc_obs = self._policy_query_features(obs_tensor, metas=[meta])
     
             if self.gradient_coeff is None:
                 return np.ones(self.n_actions) / self.n_actions
@@ -755,7 +797,7 @@ class RoverAgent:
             logger.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
-    def _compute_action_probs_batch(self, observations: np.ndarray) -> np.ndarray:
+    def _compute_action_probs_batch(self, observations: np.ndarray, metas=None) -> np.ndarray:
         """Compute π(·|s) for a batch of observations."""
         observations = np.asarray(observations)
         with torch.no_grad():
@@ -764,7 +806,7 @@ class RoverAgent:
                 device=self.device,
                 dtype=self.compute_dtype,
             )
-            enc_obs = self._encode_with_module(self.policy_encoder, obs_tensor, project=True)
+            enc_obs = self._policy_query_features(obs_tensor, metas=metas)
 
             if self.gradient_coeff is None:
                 return np.full(
@@ -801,7 +843,7 @@ class RoverAgent:
             return np.random.randint(self.n_actions)
 
         # Compute action probabilities
-        action_probs = self.compute_action_probs(obs)
+        action_probs = self.compute_action_probs(obs, meta=meta)
         self.current_action_probs.append(action_probs)  # Store for visualization
         # print(f"Step {step}: Action probabilities: {action_probs}")
         # Sample action
@@ -826,7 +868,13 @@ class RoverAgent:
         if policy_indices:
             try:
                 batch_obs = observations[policy_indices]
-                action_probs = self._compute_action_probs_batch(batch_obs)
+                batch_metas = (
+                    [metas[env_id] for env_id in policy_indices]
+                    if metas is not None else None
+                )
+                action_probs = self._compute_action_probs_batch(
+                    batch_obs, metas=batch_metas
+                )
                 if action_probs.shape != (len(policy_indices), self.n_actions):
                     raise ValueError(f"Unexpected action_probs shape {action_probs.shape}")
                 for row, env_id in enumerate(policy_indices):
@@ -851,7 +899,10 @@ class RoverAgent:
         """Check if transition learning phase is complete."""
         return step >= self.num_expl_steps + self.T_init_steps 
 
-    def update_encoders(self, obs, action, next_obs, reward):
+    def update_encoders(
+        self, obs, action, next_obs, reward,
+        proprio_state=None, proprio_next_state=None,
+    ):
         metrics = dict()
         obs_en = self.aug_and_encode(obs, project=True)
         with torch.no_grad():
@@ -1325,6 +1376,13 @@ class RoverAgent:
                 first_batch[:5],
                 self.device,
             )
+            helper = getattr(self, "nystrom_debug", None)
+            if helper is not None and helper._has_point_env() and torch.any(first_obs != 0):
+                # Alpha addresses the next-state basis. Use a reset anchor,
+                # as the fixed PointMaze path does, rather than one action
+                # after reset. This row belongs only to the actor fit.
+                first_next_obs = first_obs.clone()
+                first_reward = torch.zeros_like(first_reward)
             return self._make_actor_batch(first_obs, first_action, first_next_obs, first_reward)
 
         if fallback_actor_batch is None:
@@ -1383,16 +1441,31 @@ class RoverAgent:
             encoded["next_obs_raw"] = torch.as_tensor(transitions[4]).detach().to(
                 device="cpu", dtype=raw_dtype
             )
-        # Replay metadata follows the five standard transition fields. Keep
-        # coordinates as a diagnostic sidecar; actor features still come only
-        # from observations (including pixels).
+        # Replay metadata follows the five standard transition fields. Preserve
+        # complete source and target state vectors; XY remains a plotting alias.
         if len(transitions) > 5:
-            coordinates = torch.as_tensor(transitions[5], device=self.device)
-            coordinates = coordinates.reshape(coordinates.shape[0], -1)
-            if coordinates.shape[1] >= 2:
-                encoded["debug_xy"] = coordinates[:, :2].to(dtype=torch.float32)
+            proprio_state = torch.as_tensor(transitions[5], device=self.device)
+            proprio_state = proprio_state.reshape(proprio_state.shape[0], -1)
+            encoded["proprio_state"] = proprio_state.to(dtype=torch.float32)
+            if proprio_state.shape[1] >= 2:
+                encoded["debug_xy"] = proprio_state[:, :2].to(dtype=torch.float32)
+            if len(transitions) > 6:
+                next_state = torch.as_tensor(transitions[6], device=self.device)
+                next_state = next_state.reshape(next_state.shape[0], -1)
+                encoded["proprio_next_state"] = next_state.to(
+                    dtype=torch.float32
+                )
+                if next_state.shape[1] >= 2:
+                    encoded["debug_next_xy"] = next_state[:, :2].to(
+                        dtype=torch.float32
+                    )
         elif self.obs_type != "pixels" and obs.ndim >= 2 and obs.shape[1] >= 2:
-            encoded["debug_xy"] = obs.detach().reshape(obs.shape[0], -1)[:, :2]
+            proprio_state = obs.detach().reshape(obs.shape[0], -1)
+            next_state = next_obs.detach().reshape(next_obs.shape[0], -1)
+            encoded["proprio_state"] = proprio_state
+            encoded["proprio_next_state"] = next_state
+            encoded["debug_xy"] = proprio_state[:, :2]
+            encoded["debug_next_xy"] = next_state[:, :2]
         return encoded
 
     def _refresh_encoded_state_features(self, encoded):
@@ -1406,8 +1479,18 @@ class RoverAgent:
             torch.ones_like(encoded["reward"]),
             encoded["next_obs_raw"],
         )
-        if "debug_xy" in encoded:
-            transitions += (encoded["debug_xy"],)
+        proprio_state = encoded.get("proprio_state", encoded.get("debug_xy"))
+        next_state = encoded.get(
+            "proprio_next_state", encoded.get("debug_next_xy")
+        )
+        if proprio_state is None:
+            proprio_state = next_state
+        if next_state is None:
+            next_state = proprio_state
+        if proprio_state is not None:
+            transitions += (proprio_state,)
+        if next_state is not None:
+            transitions += (next_state,)
         chunk_size = max(1, getattr(self, "encoded_fifo_encode_batch_size", 4096))
         feature_batches = []
         for start in range(0, self._encoded_batch_size(encoded), chunk_size):
@@ -1423,6 +1506,47 @@ class RoverAgent:
         # Frozen coverage and raw/diagnostic sidecars remain valid. Refresh only
         # dynamics features, without rewriting or duplicating raw FIFO history.
         return {**encoded, **self._concat_encoded_batches(feature_batches)}
+
+    def _anchor_pointmaze_actor_batch(self, encoded):
+        """Put initial mass at reset without changing real replay transitions.
+
+        The pinned first row is a synthetic self-transition in actor support,
+        matching the fixed-data PointMaze convention. Rebuild its coverage
+        sidecar too; newest-frame coverage must refer to the same reset state.
+        """
+        helper = getattr(self, "nystrom_debug", None)
+        if helper is None or not helper._has_point_env() or "obs_raw" not in encoded:
+            return encoded
+        initial_obs = encoded["obs_raw"][:1]
+        # Storage's explicit synthetic-first API already uses a zero source
+        # and the intended reset as its target. Keep that boundary convention.
+        if not torch.any(initial_obs != 0):
+            return encoded
+        transitions = (
+            initial_obs,
+            encoded["action"][:1],
+            torch.zeros_like(encoded["reward"][:1]),
+            torch.ones_like(encoded["reward"][:1]),
+            initial_obs,
+        )
+        proprio_state = encoded.get("proprio_state", encoded.get("debug_xy"))
+        next_state = encoded.get(
+            "proprio_next_state", encoded.get("debug_next_xy")
+        )
+        if proprio_state is None:
+            proprio_state = next_state
+        if next_state is None:
+            next_state = proprio_state
+        if proprio_state is not None:
+            transitions += (proprio_state[:1],)
+        if next_state is not None:
+            # Reset anchor is a self-transition at the reset state.
+            transitions += (proprio_state[:1],)
+        anchor = self._encode_actor_transition_batch_with_retries(transitions)
+        return {
+            key: torch.cat([anchor.get(key, value[:1]).to(value), value[1:]], dim=0)
+            for key, value in encoded.items()
+        }
 
     def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
         splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
@@ -1517,6 +1641,7 @@ class RoverAgent:
             kernel_bandwidth=getattr(self, "_active_kernel_bandwidth", None),
             kernel_bandwidth_mult=self.kernel_bandwidth_mult,
             cholesky_progress=self.nystrom_cholesky_progress,
+            kernel_feature_key=getattr(self, "nystrom_kernel_feature_key", None),
         )
         if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
             bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
@@ -1724,7 +1849,7 @@ class RoverAgent:
             step,
             points,
             f"step_{step}_actor_full_dataset.png",
-            "PointMaze actor full dataset",
+            "PointMaze physical XY view of actor support",
         )
 
     def _save_actor_nystrom_subsample_plot(self, actor_data, step):
@@ -1740,7 +1865,7 @@ class RoverAgent:
             step,
             points,
             f"step_{step}_nystrom_subsamples.png",
-            f"PointMaze Nyström subsamples ({self.subsampling_strategy})",
+            f"PointMaze physical XY view of Nyström support ({self.subsampling_strategy})",
         )
 
     def _synthetic_actor_subsample_batch(self):
@@ -1759,6 +1884,7 @@ class RoverAgent:
         # Publish a new encoder only when rebuilding its actor basis. Every
         # sampled row, including the pinned reset, is refreshed before landmarks.
         self._sync_policy_encoder()
+        full = self._anchor_pointmaze_actor_batch(full)
         full = self._refresh_encoded_state_features(full)
         rewards = full.get("reward")
         if self.subsamples is None:
@@ -1794,6 +1920,7 @@ class RoverAgent:
                 kernel_bandwidth=getattr(self, "_active_kernel_bandwidth", None),
                 kernel_bandwidth_mult=self.kernel_bandwidth_mult,
                 cholesky_progress=self.nystrom_cholesky_progress,
+                kernel_feature_key=getattr(self, "nystrom_kernel_feature_key", None),
             )
             subsample_rewards = subsample.get("reward")
             if self.subsampling_strategy == "pivoted_cholesky":
@@ -1944,6 +2071,45 @@ class RoverAgent:
         if obs is None:
             return None, None
 
+        if isinstance(obs, EncodedActorUpdateData):
+            encoded = obs.full
+            if isinstance(encoded, dict) and "obs_raw" in encoded and "phi_obs" in encoded:
+                count = min(max_observations, self._encoded_batch_size(encoded))
+                visualizer_obs = encoded["obs_raw"][:count].to(self.device)
+                visualizer_z = encoded["phi_obs"][:count].to(
+                    device=self.device, dtype=self.compute_dtype
+                )
+                return visualizer_obs, visualizer_z
+            obs = encoded[0]
+        elif isinstance(obs, RawActorUpdateData):
+            transitions = obs.full
+            raw_obs = transitions[0]
+            if getattr(self, "dynamics_kernel_input", None) == "states":
+                if self.obs_type == "pixels":
+                    if len(transitions) < 6:
+                        raise ValueError(
+                            "State dynamics diagnostics require aligned proprio_state metadata"
+                        )
+                    states = torch.as_tensor(
+                        transitions[5], device=self.device, dtype=self.compute_dtype
+                    )
+                else:
+                    states = torch.as_tensor(
+                        raw_obs, device=self.device, dtype=self.compute_dtype
+                    )
+                with torch.no_grad():
+                    feature_fn = getattr(
+                        self, "_policy_state_dynamics_features",
+                        self._state_dynamics_features,
+                    )
+                    z = feature_fn(states)
+                count = min(max_observations, raw_obs.shape[0])
+                return (
+                    torch.as_tensor(raw_obs[:count], device=self.device),
+                    z[:count],
+                )
+            obs = raw_obs
+
         max_observations = min(max_observations, obs.shape[0])
         visualizer_obs = obs[:max_observations]
         with torch.no_grad():
@@ -1962,13 +2128,12 @@ class RoverAgent:
             action_probs: [batch_size, n_actions] action probabilities from current policy
             
         Returns:
-            Mean absolute deviation from uniform (1/n_actions)
+            Mean per-state total variation distance from uniform (1/n_actions)
         """
         uniform_prob = 1.0 / self.n_actions
-        # Average over batch, then compute mean absolute deviation across actions
-        mean_probs = np.mean(action_probs, axis=0)  # [n_actions]
-        deviation = np.mean(np.abs(mean_probs - uniform_prob))
-        return deviation
+        # Measure each state's policy before averaging: opposing deterministic
+        # actions must not cancel. TV ranges from 0 to 1 - 1/n_actions.
+        return float(np.mean(0.5 * np.sum(np.abs(action_probs - uniform_prob), axis=-1)))
 
     def plot_policy_deviation_history(self, save_dir: str = './policy_plots'):
         """
@@ -2042,12 +2207,18 @@ class RoverAgent:
         if self.debug_visualizer is None:
             return metrics
 
-        visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
+        if self.exploration_metrics_enabled:
+            visualizer_obs, visualizer_z = self._build_debug_visualizer_batch(obs)
+        else:
+            visualizer_obs = visualizer_z = None
         metrics.update(
             self.debug_visualizer.save(
                 step=step,
                 obs_batch=visualizer_obs,
-                z_batch=self._unique_rows(visualizer_z),
+                z_batch=(
+                    self._unique_rows(visualizer_z)
+                    if visualizer_z is not None else None
+                ),
                 param_text=self._debug_visualizer_text(step),
             )
         )
@@ -2082,13 +2253,22 @@ class RoverAgent:
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch[:5], self.device)
+        proprio_state = proprio_next_state = None
+        if len(batch) > 5:
+            proprio_state = torch.as_tensor(batch[5], device=self.device)
+        if len(batch) > 6:
+            proprio_next_state = torch.as_tensor(batch[6], device=self.device)
         if self.debug_fixed_dataset_updates:
             obs, action, next_obs, reward = self.nystrom_debug.fixed_encoder_batch(self)
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
         if self.embeddings:
-            metrics.update(self.update_encoders(obs, action, next_obs, reward))
+            metrics.update(self.update_encoders(
+                obs, action, next_obs, reward,
+                proprio_state=proprio_state,
+                proprio_next_state=proprio_next_state,
+            ))
 
         # Train the encoder/transition model first; PMD starts once T is ready.
         if not self._is_T_sufficiently_initialized(step):
@@ -2106,5 +2286,5 @@ class RoverAgent:
                 replay_buffer=replay_buffer,
             )
             metrics.update(self._update_actor_from_data(actor_update_data, step))
-            metrics = self._run_debug_visualizers(metrics, obs, step)
+            metrics = self._run_debug_visualizers(metrics, actor_update_data, step)
         return metrics

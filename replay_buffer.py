@@ -27,6 +27,8 @@ def load_episode(fn):
     with fn.open('rb') as f:
         episode = np.load(f)
         episode = {k: episode[k] for k in episode.keys()}
+        if 'proprio_state' not in episode and 'diagnostic_coordinates' in episode:
+            episode['proprio_state'] = episode['diagnostic_coordinates']
         return episode
 
 
@@ -53,6 +55,15 @@ class ReplayBufferStorage:
                 value = np.full(spec.shape, value, spec.dtype)
             assert spec.shape == value.shape and spec.dtype == value.dtype
             self._current_episode[spec.name].append(value)
+        # Keep PointMaze proprioception beside pixel episodes for offline
+        # diagnostics. This unregistered episode field is not returned by the
+        # replay sampler, so agents still receive their original batch shape.
+        proprio = getattr(time_step, "proprio_observation", None)
+        image = getattr(time_step, "image_observation", None)
+        if proprio is not None and image is not None and "proprio_state" not in meta:
+            proprio = np.asarray(proprio, dtype=np.float32).reshape(-1)
+            if 1 <= proprio.size <= 16:
+                self._current_episode["proprio_state"].append(proprio.copy())
         self._record_pending_transitions()
         if time_step.last():
             episode = dict()
@@ -62,6 +73,15 @@ class ReplayBufferStorage:
             for spec in self._meta_specs:
                 value = self._current_episode[spec.name]
                 episode[spec.name] = np.array(value, spec.dtype)
+            if (
+                "proprio_state" not in episode
+                and "proprio_state" in self._current_episode
+                and len(self._current_episode["proprio_state"])
+                == len(episode["observation"])
+            ):
+                episode["proprio_state"] = np.stack(
+                    self._current_episode["proprio_state"]
+                ).astype(np.float32, copy=False)
             self._current_episode = defaultdict(list)
             self._store_episode(episode)
 
@@ -106,6 +126,7 @@ class ReplayBufferStorage:
         discount = np.ones_like(values['discount'])
 
         meta_values = []
+        next_meta_values = []
         for spec in self._meta_specs:
             value = meta.get(spec.name, None)
             if value is None:
@@ -114,7 +135,8 @@ class ReplayBufferStorage:
                 value = np.full(spec.shape, value, spec.dtype)
             else:
                 value = np.asarray(value, dtype=spec.dtype)
-            meta_values.append(value)
+            meta_values.append(np.zeros(spec.shape, dtype=spec.dtype))
+            next_meta_values.append(value)
 
         self._synthetic_first_transition = (
             obs,
@@ -123,6 +145,7 @@ class ReplayBufferStorage:
             discount,
             next_obs,
             *meta_values,
+            *next_meta_values,
         )
 
     def get_synthetic_first_transition(self):
@@ -168,7 +191,11 @@ class ReplayBufferStorage:
             episode[spec.name][start_idx]
             for spec in self._meta_specs
         ]
-        return (obs, action, reward, discount_acc, next_obs, *meta)
+        next_meta = [
+            episode[spec.name][start_idx + nstep]
+            for spec in self._meta_specs
+        ]
+        return (obs, action, reward, discount_acc, next_obs, *meta, *next_meta)
 
     def get_pending_transition_batch(self, view_key, after_id=None, limit=None):
         view = self._transition_views.get(view_key)
@@ -327,6 +354,10 @@ class ReplayBuffer(IterableDataset):
         meta = []
         for spec in self._storage._meta_specs:
             meta.append(episode[spec.name][idx - 1])
+        next_meta = [
+            episode[spec.name][idx + self._nstep - 1]
+            for spec in self._storage._meta_specs
+        ]
         obs = episode['observation'][idx - 1]
         action = episode['action'][idx]
         next_obs = episode['observation'][idx + self._nstep - 1]
@@ -337,7 +368,7 @@ class ReplayBuffer(IterableDataset):
             reward += discount * step_reward
             discount *= episode['discount'][idx + i] * self._discount
         
-        return (obs, action, reward, discount, next_obs, *meta)
+        return (obs, action, reward, discount, next_obs, *meta, *next_meta)
 
     def _episode_to_transitions(self, eps_fn):
         if eps_fn in self._transition_cache:
@@ -359,7 +390,11 @@ class ReplayBuffer(IterableDataset):
             discount *= episode['discount'][1 + i:transition_count + 1 + i] * self._discount
 
         meta = [episode[spec.name][:transition_count] for spec in self._storage._meta_specs]
-        transitions = (obs, action, reward, discount, next_obs, *meta)
+        next_meta = [
+            episode[spec.name][self._nstep:self._nstep + transition_count]
+            for spec in self._storage._meta_specs
+        ]
+        transitions = (obs, action, reward, discount, next_obs, *meta, *next_meta)
         self._transition_cache[eps_fn] = transitions
         return transitions
 

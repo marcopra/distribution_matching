@@ -342,7 +342,7 @@ class BaseRoomEnv(gym.Env, ABC):
         
         return observation, reward, terminated, truncated, info
     
-    def render(self, show_goal: bool = True):
+    def render(self, show_goal: bool = False):
         """Render the environment."""
         if self.render_mode is None:
             return None
@@ -356,8 +356,8 @@ class BaseRoomEnv(gym.Env, ABC):
         return self._render_rgb(show_goal=False)
 
     def render_image_observation(self) -> np.ndarray:
-        """Render an auxiliary image observation with the goal visible."""
-        return self._render_rgb(show_goal=True)
+        """Render an auxiliary image observation without revealing the goal."""
+        return self._render_rgb(show_goal=False)
 
     def _get_render_layout(self) -> Dict[str, object]:
         """Compute and cache static rendering geometry."""

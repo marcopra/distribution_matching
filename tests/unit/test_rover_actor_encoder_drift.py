@@ -74,10 +74,14 @@ def test_old_encoded_batches_without_raw_states_remain_loadable():
     assert agent._refresh_encoded_state_features(legacy) is legacy
 
 
-def test_subspace_refresh_keeps_raw_xy_coverage_with_full_state_dynamics():
+def test_subspace_refresh_keeps_state_dynamics_independent_of_image_encoder():
     agent = RoverSubspaceCoverageAgent.__new__(RoverSubspaceCoverageAgent)
     agent.__dict__.update(make_agent().__dict__)
     agent.obs_shape = (4,)
+    agent.dynamics_kernel_input = "states"
+    agent.dynamics_state_dim = 4
+    agent.compute_dtype = torch.float32
+    agent.coverage_kernel_input = "states"
     agent.coverage_state_indices = (0, 1)
     obs = torch.tensor([[1., 0., .2, -.1], [0., 1., -.3, .2]])
     next_obs = obs+.25
@@ -86,7 +90,7 @@ def test_subspace_refresh_keeps_raw_xy_coverage_with_full_state_dynamics():
     cached = agent._encode_actor_transition_batch(transitions)
     agent.policy_encoder.offset.fill_(10.)
     refreshed = agent._refresh_encoded_state_features(cached)
-    assert not torch.allclose(cached['phi_obs'], refreshed['phi_obs'])
+    torch.testing.assert_close(cached['phi_obs'], refreshed['phi_obs'])
     torch.testing.assert_close(refreshed['coverage_next_raw'], next_obs[:,:2])
     torch.testing.assert_close(refreshed['next_obs_raw'], next_obs)
 

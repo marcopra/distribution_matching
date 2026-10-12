@@ -56,6 +56,10 @@ class Workspace:
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
+        if gym_env.is_point_maze_env(self.cfg.task_name):
+            with open_dict(self.cfg):
+                self.cfg.env.continuing_task = False
+            print('PointMaze finetuning: continuing_task=false.')
         if cfg.seed == 1:
             cfg.seed = np.random.randint(1, 10000)
         utils.set_seed_everywhere(cfg.seed)
@@ -90,6 +94,9 @@ class Workspace:
         # create envs
         env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
         env_kwargs.pop('name', None)
+        collection_env_kwargs = dict(env_kwargs)
+        if gym_env.is_point_maze_env(self.cfg.task_name):
+            collection_env_kwargs['continuing_task'] = True
 
         self.train_env = gym_env.make(
             self.cfg.task_name,
@@ -100,6 +107,7 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=False,
+            pin_goal=True,
             **env_kwargs,
         )
 
@@ -112,7 +120,8 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=True,
-            **env_kwargs,
+            pin_goal=True,
+            **collection_env_kwargs,
         )
 
         self.eval_env = gym_env.make(
@@ -124,6 +133,7 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=False,
+            pin_goal=True,
             **env_kwargs,
         )
        
@@ -226,14 +236,20 @@ class Workspace:
     def _should_update_agent(self, active_env):
         return active_env is self.train_env
 
+    def _prepare_replay_meta(self, time_step, meta):
+        prepare = getattr(self.agent, "prepare_replay_meta", None)
+        return prepare(time_step, meta) if callable(prepare) else meta
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         meta = self.agent.init_meta()
         while eval_until_episode(episode):
+            meta = self.agent.init_meta()
             time_step = self.eval_env.reset()
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
+                meta = self.agent.update_meta(meta, self.global_step, time_step)
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
                                             meta,
@@ -264,7 +280,8 @@ class Workspace:
         active_env = self.collection_env if self.global_frame < self.cfg.num_seed_frames else self.train_env
         time_step = active_env.reset()
         meta = self.agent.init_meta()
-        self.replay_storage.add(time_step, meta)
+        replay_meta = self._prepare_replay_meta(time_step, meta)
+        self.replay_storage.add(time_step, replay_meta)
         self.train_video_recorder.init(time_step.image_observation)
         metrics = None
         while train_until_step(self.global_step):
@@ -291,7 +308,8 @@ class Workspace:
                     active_env = self.train_env
                 time_step = active_env.reset()
                 meta = self.agent.init_meta()
-                self.replay_storage.add(time_step, meta)
+                replay_meta = self._prepare_replay_meta(time_step, meta)
+                self.replay_storage.add(time_step, replay_meta)
                 self.train_video_recorder.init(time_step.image_observation)
 
                 episode_step = 0
@@ -334,7 +352,8 @@ class Workspace:
             # take env step
             time_step = active_env.step(action)
             episode_reward += time_step.reward
-            self.replay_storage.add(time_step, meta)
+            replay_meta = self._prepare_replay_meta(time_step, meta)
+            self.replay_storage.add(time_step, replay_meta)
             if not self.INITIAL_HEATMAP:
                 self.dataset['states'] = np.append(self.dataset['states'],  time_step.proprio_observation if time_step.proprio_observation.shape[0] == 2 else  np.argmax(time_step.proprio_observation))
                 self.dataset['actions'] = np.append(self.dataset['actions'], time_step.action)

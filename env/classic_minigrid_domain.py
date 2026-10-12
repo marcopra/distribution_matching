@@ -90,6 +90,32 @@ class ClassicMiniGridInterfaceMixin:
         info.setdefault("state_index", self.state_to_idx[state])
         return info
 
+    def _render_without_goal(self):
+        base_env = self.env.unwrapped
+        grid = getattr(base_env, "grid", None)
+        hidden_goals = []
+        if grid is not None:
+            for y in range(base_env.height):
+                for x in range(base_env.width):
+                    obj = grid.get(x, y)
+                    if getattr(obj, "type", None) == "goal":
+                        hidden_goals.append((x, y, obj))
+                        grid.set(x, y, None)
+        try:
+            return self.env.render()
+        finally:
+            for x, y, obj in hidden_goals:
+                grid.set(x, y, obj)
+
+    def render(self):
+        return self._render_without_goal()
+
+    def render_observation(self):
+        return self._render_without_goal()
+
+    def render_image_observation(self):
+        return self._render_without_goal()
+
     def render_from_position(self, position):
         """
         Render the current MiniGrid layout from a given agent pose.
@@ -111,7 +137,7 @@ class ClassicMiniGridInterfaceMixin:
         try:
             base_env.agent_pos = np.array(state[:2], dtype=np.int64)
             base_env.agent_dir = int(state[2])
-            return self.env.render()
+            return self._render_without_goal()
         finally:
             base_env.agent_pos = original_pos
             base_env.agent_dir = original_dir
@@ -169,11 +195,11 @@ class ClassicMiniGridTopDownObservationWrapper(ClassicMiniGridInterfaceMixin, gy
 
     def reset(self, **kwargs):
         _, info = self.env.reset(**kwargs)
-        return self.env.render(), self._augment_info(info)
+        return self._render_without_goal(), self._augment_info(info)
 
     def step(self, action):
         _, reward, terminated, truncated, info = self.env.step(action)
-        return self.env.render(), reward, terminated, truncated, self._augment_info(info)
+        return self._render_without_goal(), reward, terminated, truncated, self._augment_info(info)
 
     def __getattr__(self, name):
         return getattr(self.env, name)

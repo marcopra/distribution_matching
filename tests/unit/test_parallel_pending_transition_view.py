@@ -8,6 +8,8 @@ from dm_env import specs
 
 from agent.image_uniqueness import BoundedUniqueCounter
 from replay_buffer_parallel import ReplayBuffer, ReplayBufferStorageParallel
+from replay_buffer import ReplayBuffer as SerialReplayBuffer
+from replay_buffer import ReplayBufferStorage as SerialReplayBufferStorage
 
 
 class FakeTimeStep:
@@ -43,6 +45,19 @@ def make_storage(path, num_envs=1):
     )
 
 
+def make_proprio_storage(path):
+    data_specs = (
+        specs.Array((3, 8, 8), np.uint8, "observation"),
+        specs.Array((), np.int64, "action"),
+        specs.Array((1,), np.float32, "reward"),
+        specs.Array((1,), np.float32, "discount"),
+    )
+    return ReplayBufferStorageParallel(
+        data_specs,
+        (specs.Array((4,), np.float32, "proprio_state"),),
+        Path(path),
+        retain_episodes=True,
+    )
 def make_replay(storage, **kwargs):
     return ReplayBuffer(
         storage,
@@ -109,6 +124,97 @@ class FakeDrainMetricAgent(FakeAgent):
 
 
 class ParallelPendingTransitionViewTest(unittest.TestCase):
+    def test_synthetic_transition_metadata_starts_at_zero_and_targets_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = make_proprio_storage(tmp)
+            reset_state = np.asarray([1, 2, 3, 4], dtype=np.float32)
+
+            storage.set_synthetic_first_transition(
+                FakeTimeStep(7), {"proprio_state": reset_state}
+            )
+
+            synthetic = storage.get_synthetic_first_transition()
+            np.testing.assert_array_equal(synthetic[5], np.zeros(4, dtype=np.float32))
+            np.testing.assert_array_equal(synthetic[6], reset_state)
+
+    def test_nstep_metadata_matches_current_and_next_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = make_proprio_storage(tmp)
+            replay = ReplayBuffer(
+                storage,
+                max_size=100,
+                num_workers=1,
+                nstep=2,
+                discount=0.99,
+                fetch_every=1000,
+                save_snapshot=True,
+                transition_view=True,
+            )
+            states = [
+                np.asarray([1, 2, 3, 4], dtype=np.float32),
+                np.asarray([5, 6, 7, 8], dtype=np.float32),
+                np.asarray([9, 10, 11, 12], dtype=np.float32),
+            ]
+            storage.add(FakeTimeStep(0), {"proprio_state": states[0]})
+            storage.add(FakeTimeStep(1), {"proprio_state": states[1]})
+            storage.add(
+                FakeTimeStep(2, last=True), {"proprio_state": states[2]}
+            )
+
+            _, pending = replay.get_new_transitions_since()
+            self.assertEqual(len(pending), 7)
+            self.assertEqual(int(pending[0][0, 0, 0, 0]), 0)
+            self.assertEqual(int(pending[4][0, 0, 0, 0]), 2)
+            np.testing.assert_array_equal(pending[5][0], states[0])
+            np.testing.assert_array_equal(pending[6][0], states[2])
+
+            replay._try_fetch()
+            sampled = replay._episode_to_transitions(replay._episode_fns[0])
+            np.testing.assert_array_equal(sampled[5][0], states[0])
+            np.testing.assert_array_equal(sampled[6][0], states[2])
+
+    def test_serial_replay_nstep_metadata_matches_current_and_next(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_specs = (
+                specs.Array((3, 8, 8), np.uint8, "observation"),
+                specs.Array((), np.int64, "action"),
+                specs.Array((1,), np.float32, "reward"),
+                specs.Array((1,), np.float32, "discount"),
+            )
+            storage = SerialReplayBufferStorage(
+                data_specs,
+                (specs.Array((4,), np.float32, "proprio_state"),),
+                Path(tmp),
+            )
+            replay = SerialReplayBuffer(
+                storage,
+                max_size=100,
+                num_workers=1,
+                nstep=2,
+                discount=0.99,
+                fetch_every=1000,
+                save_snapshot=True,
+                transition_view=True,
+            )
+            states = [
+                np.asarray([1, 2, 3, 4], dtype=np.float32),
+                np.asarray([5, 6, 7, 8], dtype=np.float32),
+                np.asarray([9, 10, 11, 12], dtype=np.float32),
+            ]
+            storage.add(FakeTimeStep(0), {"proprio_state": states[0]})
+            storage.add(FakeTimeStep(1), {"proprio_state": states[1]})
+            storage.add(
+                FakeTimeStep(2, last=True), {"proprio_state": states[2]}
+            )
+
+            _, pending = replay.get_new_transitions_since()
+            np.testing.assert_array_equal(pending[5][0], states[0])
+            np.testing.assert_array_equal(pending[6][0], states[2])
+            replay._try_fetch()
+            sampled = replay._episode_to_transitions(replay._episode_fns[0])
+            np.testing.assert_array_equal(sampled[5][0], states[0])
+            np.testing.assert_array_equal(sampled[6][0], states[2])
+
     def test_end_episode_stores_partial_stream_without_fake_transition(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = make_storage(tmp)

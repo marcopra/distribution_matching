@@ -5,6 +5,7 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 import os
 import random
 import sys
+import json
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
@@ -139,6 +140,10 @@ class Workspace:
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
+        if gym_env.is_point_maze_env(self.cfg.task_name):
+            with open_dict(self.cfg):
+                self.cfg.env.continuing_task = True
+            print('PointMaze pretraining: continuing_task=true; goal rendering stays masked.')
         if not hasattr(self.cfg, 'grayscale'):
             with open_dict(self.cfg):
                 self.cfg.grayscale = False
@@ -202,6 +207,7 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=True,
+            pin_goal=True,
             **env_kwargs,
         )
         self.eval_env = gym_env.make(
@@ -213,6 +219,7 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=True,
+            pin_goal=True,
             **env_kwargs,
         )
        
@@ -242,6 +249,18 @@ class Workspace:
                 self.load_pretrained_representation(payload['agent'])
             else:
                 self.load_pretrained_encoder_checkpoint(payload)
+
+        # Coverage can use a separately pretrained single-frame encoder even
+        # when dynamics consume a stacked observation. Keep this warm-start
+        # independent from p_path, which initializes the dynamics encoder/T.
+        if getattr(cfg, 'p_path_coverage', None) not in (None, 'none'):
+            if getattr(self.agent, 'coverage_kernel_input', None) != 'pixels':
+                raise ValueError(
+                    "p_path_coverage is only valid when "
+                    "agent.coverage_kernel_input='pixels'"
+                )
+            payload = self.load_snapshot_from_path(cfg.p_path_coverage)
+            self.load_pretrained_coverage_encoder_checkpoint(payload)
 
         self.agent_requires_replay = bool(
             getattr(self.agent, 'requires_replay', True)
@@ -434,6 +453,11 @@ class Workspace:
                     trajectory.append(point)
                 self.video_recorder.init(self.eval_env, enabled=(episode == 0))
                 while not time_step.last():
+                    update_meta = getattr(self.agent, "update_meta", None)
+                    if callable(update_meta):
+                        meta = update_meta(
+                            meta, self.global_step, time_step, finetune=False
+                        )
                     with torch.no_grad(), utils.eval_mode(self.agent):
                         action = self.agent.act(
                             time_step.observation,
@@ -730,10 +754,82 @@ class Workspace:
 
     def load_snapshot(self):
         snapshot = self.work_dir / 'snapshot.pt'
+        signature_path = snapshot.with_suffix(snapshot.suffix + '.signature.json')
+        current_signature = self._resume_signature()
+        canonical_current = json.loads(
+            json.dumps(current_signature, sort_keys=True)
+        )
+        if not signature_path.exists():
+            print(
+                f"not resuming {snapshot}: no experiment signature; "
+                "keeping configured agent"
+            )
+            return False
+        with signature_path.open('r', encoding='utf-8') as stream:
+            sidecar_signature = json.load(stream)
+        if sidecar_signature != canonical_current:
+            print(
+                f"not resuming {snapshot}: snapshot experiment signature differs "
+                "from current config; keeping configured agent"
+            )
+            return False
         with snapshot.open('rb') as f:
             payload = torch.load(f, weights_only=False, map_location=self.device)
+        saved_signature = payload.get('_resume_signature')
+        if saved_signature != current_signature:
+            reason = (
+                "legacy snapshot has no experiment signature"
+                if saved_signature is None
+                else "snapshot experiment signature differs from current config"
+            )
+            print(f"not resuming {snapshot}: {reason}; keeping configured agent")
+            return False
+        print(f"resuming compatible snapshot: {snapshot}")
         for key, value in payload.items():
+            if key == '_resume_signature':
+                continue
             setattr(self, key, value)
+        return True
+
+    def _resume_signature(self):
+        """Fields that define replay and kernel compatibility for a resume."""
+        agent = self.agent
+        return {
+            'task_name': str(self.cfg.task_name),
+            'obs_type': str(self.cfg.obs_type),
+            'obs_shape': tuple(getattr(agent, 'obs_shape', ())),
+            'frame_stack': int(getattr(self.cfg, 'frame_stack', 1)),
+            'grayscale': bool(getattr(self.cfg, 'grayscale', False)),
+            'agent_class': f'{type(agent).__module__}.{type(agent).__name__}',
+            'dynamics_kernel_input': getattr(agent, 'dynamics_kernel_input', None),
+            'coverage_kernel_input': getattr(agent, 'coverage_kernel_input', None),
+            'dynamics_kernel_type': getattr(
+                agent, 'dynamics_kernel_type', getattr(agent, 'kernel_type', None)
+            ),
+            'coverage_kernel_type': getattr(
+                agent, 'coverage_kernel_type', getattr(agent, 'kernel_type', None)
+            ),
+            'coverage_state_indices': tuple(
+                getattr(agent, 'coverage_state_indices', ())
+            ),
+            'coverage_frame_index': getattr(agent, 'coverage_frame_index', None),
+            'proprio_state_dims': int(getattr(agent, 'proprio_state_dims', 0)),
+            'feature_dim': getattr(agent, 'feature_dim', None),
+            'kernel_type': getattr(agent, 'kernel_type', None),
+            'kernel_bandwidth_mult': getattr(agent, 'kernel_bandwidth_mult', None),
+            'coverage_kernel_bandwidth': getattr(
+                agent, 'coverage_kernel_bandwidth', None
+            ),
+            'coverage_kernel_bandwidth_mult': getattr(
+                agent, 'coverage_kernel_bandwidth_mult', None
+            ),
+            'discount': float(self.cfg.discount),
+            'nstep': int(self.cfg.nstep),
+            'p_path': str(getattr(self.cfg, 'p_path', 'none')),
+            'p_path_coverage': str(
+                getattr(self.cfg, 'p_path_coverage', 'none')
+            ),
+        }
 
     def load_snapshot_from_path(self, path):
         snapshot = Path(path).expanduser()
@@ -797,6 +893,70 @@ class Workspace:
             "fresh"
         )
 
+    def load_pretrained_coverage_encoder_checkpoint(self, payload):
+        """Load a single-frame CNN checkpoint into frozen coverage features."""
+        coverage_encoder = getattr(
+            getattr(self.agent, 'coverage_feature_encoder', None), 'encoder', None
+        )
+        if coverage_encoder is None:
+            raise ValueError(
+                "p_path_coverage requires an agent configured with "
+                "coverage_kernel_input='pixels'"
+            )
+
+        if 'agent' in payload:
+            pretrained_agent = payload['agent']
+            source_encoder = getattr(pretrained_agent, 'encoder', None)
+            if source_encoder is None:
+                raise ValueError(
+                    "Coverage checkpoint agent does not contain an encoder"
+                )
+            state_dict = source_encoder.state_dict()
+            actual = {
+                'feature_dim': int(getattr(pretrained_agent, 'feature_dim', -1)),
+                'obs_shape': tuple(getattr(pretrained_agent, 'obs_shape', ())),
+                'mode': str(getattr(pretrained_agent, 'mode', '')),
+                'grayscale': bool(getattr(pretrained_agent, 'grayscale', False)),
+            }
+        else:
+            state_dict = payload['encoder_state_dict']
+            actual = {
+                'feature_dim': int(payload.get('feature_dim', -1)),
+                'obs_shape': tuple(payload.get('obs_shape', ())),
+                'mode': str(payload.get('mode', '')),
+                'grayscale': bool(payload.get('grayscale', False)),
+            }
+
+        expected = {
+            'feature_dim': int(self.agent.coverage_feature_encoder.feature_dim),
+            'obs_shape': tuple(self.agent.coverage_feature_encoder.obs_shape),
+            'mode': str(coverage_encoder.mode),
+            'grayscale': bool(getattr(self.agent, 'grayscale', False)),
+        }
+        mismatches = [
+            f"{key}: checkpoint={actual[key]!r}, current={expected[key]!r}"
+            for key in expected
+            if actual[key] != expected[key]
+        ]
+        if mismatches:
+            raise ValueError(
+                "Coverage encoder checkpoint is incompatible: "
+                + "; ".join(mismatches)
+            )
+
+        try:
+            coverage_encoder.load_state_dict(state_dict, strict=True)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Coverage encoder checkpoint state_dict is incompatible: {exc}"
+            ) from exc
+
+        self.agent._freeze_module(self.agent.coverage_feature_encoder)
+        print(
+            "loaded pretrained coverage encoder; coverage features use the "
+            "checkpoint CNN while dynamics initialization remains independent"
+        )
+
     def load_pretrained_representation(self, pretrained_agent):
         """Warm-start encoder/T while retaining fresh PMD state and config."""
         loaded = []
@@ -852,6 +1012,7 @@ class Workspace:
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode', '_coverage_progress']
         payload = {k: self.__dict__[k] for k in keys_to_save}
+        payload['_resume_signature'] = self._resume_signature()
 
         agent = payload['agent']
         restored_refs = []
@@ -881,6 +1042,14 @@ class Workspace:
         try:
             with snapshot.open('wb') as f:
                 torch.save(payload, f)
+            signature_path = snapshot.with_suffix(
+                snapshot.suffix + '.signature.json'
+            )
+            canonical_signature = json.loads(
+                json.dumps(payload['_resume_signature'], sort_keys=True)
+            )
+            with signature_path.open('w', encoding='utf-8') as stream:
+                json.dump(canonical_signature, stream, sort_keys=True, indent=2)
         finally:
             for obj, attr, value in reversed(restored_refs):
                 setattr(obj, attr, value)
@@ -923,7 +1092,6 @@ def main(cfg):
         try:
             snapshot = root_dir / 'snapshot.pt'
             if snapshot.exists():
-                print(f'resuming: {snapshot}')
                 workspace.load_snapshot()
             workspace.train()
         finally:

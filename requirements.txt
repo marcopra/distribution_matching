@@ -316,3 +316,14 @@ wheel==0.40.0
     # via tensorboard
 zipp==3.15.0 ; python_full_version < '3.10'
     # via importlib-metadata
+
+
+Coud you write a prompt for a senior expert engineer of the two runs difference and what I am testing.
+Run 2: exp_local_parallel/2026.10.10/120453_295923_PointMaze_UMaze-v3_nenv4. It has not fully trained neither tuned. However, these preliminary results show that the agent is able to go consistently to the other corridor. The coverage pct arrives till 85% . A good sign is that locally we see the same action probabilities. Every region in the action probs plots seem to have the same intended behavior
+
+Run 1: exp_local_parallel/2026.10.10/155756_520641_PointMaze_UMaze-v3_nenv4. The best percentage arrives at 75% more or less. However, I am not sure to say that is not working. I want to investigate why it is not achieving the same results as result 1. I am expecting to have a consistent policy that goes on the further branch at some point.  The actions are not locally as consistent as before. 
+
+
+I want to investigate the reason why with images in the dynamic kernel we are not having the same results as before. I can understand that probably the linear approximation of the dynamic is harder with images, but I am not understanding if these results are: Implementation bug, Methodological bug, or bad hyperparameter tuning. You have to investigate the possible reasons as a senior research scientist.
+
+My idea is that 

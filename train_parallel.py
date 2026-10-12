@@ -114,6 +114,10 @@ class Workspace:
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
+        if gym_env.is_point_maze_env(self.cfg.task_name):
+            with open_dict(self.cfg):
+                self.cfg.env.continuing_task = False
+            print('PointMaze finetuning: continuing_task=false.')
         if not hasattr(self.cfg, 'grayscale'):
             with open_dict(self.cfg):
                 self.cfg.grayscale = False
@@ -159,6 +163,9 @@ class Workspace:
         env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
         env_kwargs.pop('name', None)
         env_kwargs.pop('synthetic_first_transition', None)
+        collection_env_kwargs = dict(env_kwargs)
+        if gym_env.is_point_maze_env(self.cfg.task_name):
+            collection_env_kwargs['continuing_task'] = True
 
         self.num_envs = int(getattr(self.cfg, "num_envs", 1))
         self.base_seed = int(getattr(self.cfg, "base_seed", self.cfg.seed))*self.num_envs
@@ -176,7 +183,8 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=True,
-            **env_kwargs,
+            pin_goal=True,
+            **collection_env_kwargs,
         )
         self.train_env = gym_env.make_async_vector_env(
             self.num_envs,
@@ -188,6 +196,7 @@ class Workspace:
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=False,
+            pin_goal=True,
             **env_kwargs,
         )
         self.eval_env = gym_env.make(
@@ -195,10 +204,13 @@ class Workspace:
             self.cfg.obs_type,
             frame_stack=self.cfg.frame_stack,
             action_repeat=self.cfg.action_repeat,
-            seed=self.cfg.seed,
+            # Match worker 0's seed so randomized navigation goals stay the
+            # same in collection, training, and evaluation environments.
+            seed=self.base_seed,
             resolution=self.cfg.resolution,
             grayscale=self.cfg.grayscale,
             url=False,
+            pin_goal=True,
             **env_kwargs,
         )
 
@@ -361,6 +373,10 @@ class Workspace:
             return
         self.replay_storage.set_synthetic_first_transition(time_step, meta=meta)
 
+    def _prepare_replay_meta(self, time_step, meta):
+        prepare = getattr(self.agent, "prepare_replay_meta", None)
+        return prepare(time_step, meta) if callable(prepare) else meta
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
@@ -371,6 +387,9 @@ class Workspace:
             time_step = self.eval_env.reset()
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
+                meta = self.agent.update_meta(
+                    meta, self.global_step, time_step
+                )
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
                                             meta,
@@ -589,7 +608,8 @@ class Workspace:
         episode_steps = np.zeros(self.num_envs, dtype=np.int64)
         episode_rewards = np.zeros(self.num_envs, dtype=np.float64)
         for env_id, time_step in enumerate(time_steps):
-            self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
+            replay_meta = self._prepare_replay_meta(time_step, metas[env_id])
+            self.replay_storage.add(time_step, replay_meta, env_id=env_id)
         self.train_video_recorder.init(first_time_step.image_observation)
         metrics = None
 
@@ -645,7 +665,8 @@ class Workspace:
             for env_id, time_step in enumerate(next_time_steps):
                 episode_rewards[env_id] += float(time_step.reward)
                 episode_steps[env_id] += 1
-                self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
+                replay_meta = self._prepare_replay_meta(time_step, metas[env_id])
+                self.replay_storage.add(time_step, replay_meta, env_id=env_id)
                 self._collect_seed_trajectory_point(
                     time_step, logical_steps[env_id], env_id
                 )
@@ -669,7 +690,8 @@ class Workspace:
                 time_steps = self._time_steps_from_infos(infos)
                 metas = [self.agent.init_meta() for _ in range(self.num_envs)]
                 for env_id, time_step in enumerate(time_steps):
-                    self.replay_storage.add(time_step, metas[env_id], env_id=env_id)
+                    replay_meta = self._prepare_replay_meta(time_step, metas[env_id])
+                    self.replay_storage.add(time_step, replay_meta, env_id=env_id)
                 episode_steps.fill(0)
                 episode_rewards.fill(0.0)
                 active_env = self.train_env
@@ -716,7 +738,12 @@ class Workspace:
                     if done[env_id]:
                         metas[env_id] = self.agent.init_meta()
                         time_steps[env_id] = reset_time_steps[env_id]
-                        self.replay_storage.add(time_steps[env_id], metas[env_id], env_id=env_id)
+                        replay_meta = self._prepare_replay_meta(
+                            time_steps[env_id], metas[env_id]
+                        )
+                        self.replay_storage.add(
+                            time_steps[env_id], replay_meta, env_id=env_id
+                        )
                         episode_steps[env_id] = 0
                         episode_rewards[env_id] = 0.0
                         if env_id == 0:

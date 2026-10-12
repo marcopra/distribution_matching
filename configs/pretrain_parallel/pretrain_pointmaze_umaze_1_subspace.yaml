@@ -24,6 +24,8 @@ agent:
   sink_schedule: linear(0.0, 1.0, 500_000)
   debug_fixed_dataset_updates: false
   kernel_type: gaussian
+  dynamics_kernel_type: gaussian
+  coverage_kernel_type: gaussian
   kernel_bandwidth: null
   kernel_bandwidth_mult: 1.0
   subsampling_strategy: pivoted_cholesky

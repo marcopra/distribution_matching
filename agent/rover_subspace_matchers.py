@@ -52,7 +52,7 @@ def normalize_coverage_state_filter(state_filter, state_dim: int) -> tuple[int, 
 
 
 class SubspaceCoverageMatcher:
-    """Evaluate occupancy in selected features while retaining full-state dynamics."""
+    """Evaluate occupancy in coverage features using separate dynamics coefficients."""
 
     def __init__(self, gamma: float, kernel_fn):
         self.gamma = float(gamma)
@@ -67,8 +67,8 @@ class SubspaceCoverageMatcher:
         B_nystrom: torch.Tensor,
         gamma: float,
     ) -> torch.Tensor:
-        # H and E use full-state transition features. Only the coverage Gram
-        # matrix below uses the selected state coordinates.
+        # H and E use the configured dynamics kernel. The coverage Gram matrix
+        # below may use an independent coordinate or learned feature space.
         return nystrom_resolvent_coefficients(
             H, pi, E, alpha, B_nystrom, gamma
         )

@@ -1511,7 +1511,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             save_dir=save_dir,
             rollout_steps=rollout_steps,
             bins=bins,
-            title_prefix="PointMaze XY",
+            title_prefix="PointMaze physical XY",
             policy_eval_points=policy_eval_points,
         )
 
@@ -1532,6 +1532,24 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             current = getattr(current, "env", None)
         raise RuntimeError("PointMaze environment does not expose max_episode_steps")
 
+    def _policy_query_meta(self, time_step) -> Optional[dict]:
+        """Attach full proprioception when policy dynamics use states with pixels."""
+        if (
+            getattr(self.agent, "obs_type", None) != "pixels"
+            or getattr(self.agent, "dynamics_kernel_input", None) != "states"
+        ):
+            return None
+        dimensions = int(getattr(self.agent, "dynamics_state_dim", 4))
+        proprio = np.asarray(
+            getattr(time_step, "proprio_observation", []), dtype=np.float32
+        ).reshape(-1)
+        if proprio.size < dimensions:
+            raise ValueError(
+                "PointMaze policy diagnostics need full state metadata: "
+                f"expected {dimensions} values, got {proprio.size}"
+            )
+        return {"proprio_state": proprio[:dimensions].copy()}
+
     def _sample_policy_rollout(self, step: int) -> np.ndarray:
         rng = np.random.default_rng(int(step))
         horizon = self._environment_horizon()
@@ -1546,7 +1564,10 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
                     trajectory.append(coord)
 
                 probs = np.asarray(
-                    self.agent.compute_action_probs(time_step.observation),
+                    self.agent.compute_action_probs(
+                        time_step.observation,
+                        meta=self._policy_query_meta(time_step),
+                    ),
                     dtype=np.float64,
                 )
                 probs = np.clip(probs, 0.0, None)
@@ -1585,7 +1606,18 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         probabilities = []
         for xy in points:
             obs = self._observation_for_policy_probe_point(xy)
-            probs = np.asarray(self.agent.compute_action_probs(obs), dtype=np.float64).reshape(-1)
+            meta = None
+            if (
+                getattr(self.agent, "obs_type", None) == "pixels"
+                and getattr(self.agent, "dynamics_kernel_input", None) == "states"
+            ):
+                dimensions = int(getattr(self.agent, "dynamics_state_dim", 4))
+                coordinates = np.zeros(dimensions, dtype=np.float32)
+                coordinates[:2] = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
+                meta = {"proprio_state": coordinates}
+            probs = np.asarray(
+                self.agent.compute_action_probs(obs, meta=meta), dtype=np.float64
+            ).reshape(-1)
             probs = np.clip(probs, 0.0, None)
             probs = probs / max(probs.sum(), 1e-12)
             probabilities.append(probs)

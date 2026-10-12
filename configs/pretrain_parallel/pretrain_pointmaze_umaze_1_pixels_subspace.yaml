@@ -16,9 +16,13 @@ agent:
   embeddings: true
   linear_projection: true
   coverage_embeddings: false
-  coverage_encoder_type: frozen_cnn
+  dynamics_kernel_input: pixels
+  dynamics_kernel_type: gaussian
+  coverage_kernel_input: pixels
+  coverage_kernel_type: gaussian
   coverage_frame_index: -1
   coverage_state_filter: null
+  proprio_state_dims: 4
   kernel_type: gaussian
   kernel_bandwidth: null
   kernel_bandwidth_mult: 1.0

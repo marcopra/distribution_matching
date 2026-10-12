@@ -272,6 +272,7 @@ class EncodedTransitionFIFO:
         kernel_bandwidth,
         kernel_bandwidth_mult,
         show_progress,
+        kernel_feature_key=None,
     ):
         if size <= 0:
             raise ValueError("sample size must be positive")
@@ -300,8 +301,17 @@ class EncodedTransitionFIFO:
 
         candidates = self._index(encoded, candidate_indices)
         kernel_type = str(kernel_type).lower()
+        kernel_features = (
+            candidates[kernel_feature_key]
+            if kernel_feature_key is not None else None
+        )
         if kernel_type == "inner_product":
-            if "psi" in candidates:
+            if kernel_features is not None:
+                features = kernel_features
+                actions = candidates.get("action")
+                if actions is not None:
+                    actions = actions.reshape(-1)
+            elif "psi" in candidates:
                 features = candidates["psi"]
                 actions = None
             elif "action" in candidates:
@@ -311,7 +321,10 @@ class EncodedTransitionFIFO:
                 raise KeyError("encoded FIFO requires either psi or compact action data")
             bandwidth = None
         elif kernel_type == "gaussian":
-            features = candidates["phi_obs"]
+            features = (
+                candidates["phi_obs"]
+                if kernel_features is None else kernel_features
+            )
             actions = (
                 candidates["action"].reshape(-1)
                 if "action" in candidates
@@ -360,6 +373,7 @@ class EncodedTransitionFIFO:
         kernel_bandwidth=None,
         kernel_bandwidth_mult=None,
         cholesky_progress=True,
+        kernel_feature_key=None,
     ):
         strategy = str(strategy).lower()
         self.last_pivoted_cholesky_residuals = None
@@ -384,6 +398,7 @@ class EncodedTransitionFIFO:
                 kernel_bandwidth,
                 kernel_bandwidth_mult,
                 cholesky_progress,
+                kernel_feature_key=kernel_feature_key,
             )
         if strategy not in ("gamma_h", "reverse_gamma_h"):
             raise ValueError(

@@ -11,12 +11,20 @@ from gymnasium import spaces
 from gymnasium.spaces import utils as spaces_utils
 from PIL import Image
 
+# MiniGrid registers its Gymnasium IDs on import. Keep it optional so projects
+# without the MiniGrid extra can still import the shared environment factory.
+try:
+    import minigrid as _minigrid  # noqa: F401
+except ImportError:
+    _minigrid = None
+
 import utils
 from env.atari_domain import is_atari_env, pop_atari_kwargs, wrap_atari_pixels
 from env.continuous_rooms import (
     ContinuousCorridorEnv,
     ContinuousFourRoomsEnv,
     ContinuousMultipleRoomsEnv,
+    ContinuousRoomEnv,
     ContinuousSingleRoomEnv,
     ContinuousTwoRoomsEnv,
 )
@@ -621,6 +629,7 @@ class EnvFactory:
     resolution: int = 224
     grayscale: bool = False
     url: bool = False
+    pin_goal: bool = False
     kwargs: dict[str, Any] | None = None
 
     def __call__(self):
@@ -633,6 +642,7 @@ class EnvFactory:
             resolution=self.resolution,
             grayscale=self.grayscale,
             url=self.url,
+            pin_goal=self.pin_goal,
             **(self.kwargs or {}),
         )
         return ExtendedTimeStepGymAdapter(env)
@@ -647,6 +657,7 @@ def make_env_factory(
     resolution=224,
     grayscale=False,
     url=False,
+    pin_goal=False,
     **kwargs,
 ):
     """Return a top-level, picklable factory for AsyncVectorEnv workers."""
@@ -659,6 +670,7 @@ def make_env_factory(
         resolution=resolution,
         grayscale=grayscale,
         url=url,
+        pin_goal=pin_goal,
         kwargs=dict(kwargs),
     )
 
@@ -674,6 +686,7 @@ def make_async_vector_env(
     grayscale=False,
     url=False,
     context="spawn",
+    pin_goal=False,
     **kwargs,
 ):
     """Create AsyncVectorEnv with one independently seeded wrapped env per worker."""
@@ -687,6 +700,7 @@ def make_async_vector_env(
             resolution=resolution,
             grayscale=grayscale,
             url=url,
+            pin_goal=pin_goal,
             **kwargs,
         )
         for env_id in range(int(num_envs))
@@ -835,7 +849,13 @@ def _maybe_wrap_discrete_observation(env, obs_type, is_classic_minigrid, initial
 
 def _apply_common_wrappers(env, name, obs_type, action_repeat, frame_stack, resolution, grayscale, url, is_atari, is_classic_minigrid):
     if url and not is_atari:
-        env = IgnoreSuccessTerminationWrapper(env)
+        # PointMaze's continuing_task flag controls success termination. Do not
+        # override an episodic PointMaze config with the generic URLB wrapper.
+        keep_running = not is_point_maze_env(name) or bool(
+            getattr(env.unwrapped, "continuing_task", False)
+        )
+        if keep_running:
+            env = IgnoreSuccessTerminationWrapper(env)
 
     if obs_type == 'pixels' and not is_atari and not is_classic_minigrid:
         env = ResizeRendering(env, resolution=resolution, grayscale=grayscale)
@@ -850,7 +870,31 @@ def _apply_common_wrappers(env, name, obs_type, action_repeat, frame_stack, reso
 
     return ExtendedTimeStepWrapper(env)
 
-def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=224, grayscale=False, url=False, **kwargs):
+def _pin_initial_navigation_goal(env):
+    """Keep a randomly selected room or maze goal fixed across episode resets."""
+    base_env = env.unwrapped
+    if isinstance(base_env, BaseRoomEnv):
+        goal = getattr(base_env, "goal_position", None)
+        if goal is not None:
+            base_env._goal_position_param = tuple(goal)
+    elif isinstance(base_env, ContinuousRoomEnv):
+        goal = getattr(base_env, "goal", None)
+        if goal is not None:
+            base_env._fixed_goal_position = np.asarray(goal, dtype=np.float32).copy()
+
+
+def make(
+    name,
+    obs_type,
+    frame_stack=1,
+    action_repeat=1,
+    seed=None,
+    resolution=224,
+    grayscale=False,
+    url=False,
+    pin_goal=False,
+    **kwargs,
+):
     """
     Create a Gymnasium environment with wrappers.
     
@@ -870,6 +914,13 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
     env_kwargs, atari_kwargs, fetch_kwargs, pointmaze_kwargs = _prepare_family_make_kwargs(name, env_kwargs, url)
 
     env = gym.make(name, **env_kwargs)
+    if is_point_maze_env(name) and "continuing_task" in env_kwargs:
+        expected_continuing_task = bool(env_kwargs["continuing_task"])
+        actual_continuing_task = bool(env.unwrapped.continuing_task)
+        assert actual_continuing_task == expected_continuing_task, (
+            "PointMaze continuing_task mismatch: config requested "
+            f"{expected_continuing_task}, environment reports {actual_continuing_task}"
+        )
     env, action_repeat, is_atari, is_classic_minigrid = _apply_family_wrappers(
         env,
         name,
@@ -888,6 +939,8 @@ def make(name, obs_type, frame_stack=1, action_repeat=1, seed=None, resolution=2
             f"render_mode must be 'rgb_array' for pixel observations, got {env.render_mode}"
 
     state, _ = _reset_for_observation_detection(env, seed)
+    if pin_goal:
+        _pin_initial_navigation_goal(env)
     env = _maybe_wrap_discrete_observation(env, obs_type, is_classic_minigrid, state)
 
     return _apply_common_wrappers(

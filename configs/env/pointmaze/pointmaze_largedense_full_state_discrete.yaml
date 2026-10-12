@@ -3,6 +3,7 @@
 env:
   name: "PointMaze_LargeDense-v3"
   render_mode: rgb_array
+  continuing_task: false
   pointmaze:
     top_down_camera: true
     discrete_actions: true
