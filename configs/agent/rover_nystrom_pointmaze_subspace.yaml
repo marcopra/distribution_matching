@@ -6,7 +6,7 @@ defaults:
 
 _target_: agent.rover_nystrom_subspace.RoverSubspaceCoverageAgent
 exploration_metrics_enabled: false  # disable random-hash metrics and exploration_metrics.png
-coverage_kernel_input: states  # states uses configured raw coordinates; pixels uses frozen CNN
+coverage_kernel_input: states  # pixels uses a frozen random CNN; no checkpoint is loaded
 coverage_frame_index: -1  # frame used by the frozen CNN when coverage_kernel_input=pixels
 coverage_state_indices: [0, 1]  # raw PointMaze x, y coordinates when coverage_kernel_input=states
 train_coverage_encoder: false  # true trains separate coverage features; false keeps coverage fixed

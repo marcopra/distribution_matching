@@ -87,7 +87,7 @@ class CNNEncoder(nn.Module):
 
 
 class FrozenCNNFeatureEncoder(nn.Module):
-    """Frozen, unit-mass embeddings from Rover's standard CNN encoder."""
+    """Frozen random CNN coverage features; no checkpoint is loaded."""
 
     def __init__(self, obs_shape, feature_dim=256):
         super().__init__()
@@ -107,7 +107,7 @@ class FrozenCNNFeatureEncoder(nn.Module):
 
     @property
     def feature_dim(self):
-        return self.encoder.projector[0].out_features
+        return self.encoder.repr_dim
 
     def forward(self, obs):
         if obs.ndim != 4 or tuple(obs.shape[1:]) != self.obs_shape:
@@ -115,11 +115,9 @@ class FrozenCNNFeatureEncoder(nn.Module):
                 "FrozenCNNFeatureEncoder expects a batch matching "
                 f"[B, {', '.join(map(str, self.obs_shape))}], got {tuple(obs.shape)}"
             )
-        # Keep coverage representation identical in structure and dimensionality
-        # to Rover's normal image embedding: conv trunk, spatial pooling,
-        # feature_dim projector, LayerNorm, and ReLU. The prior implementation
-        # stopped before the projector, so feature_dim had no effect on geometry.
-        features = self.encoder.encode_and_project(obs)
+        # Match the earlier PointMaze coverage experiment: flatten pooled
+        # convolutional maps directly; do not apply the random dense projector.
+        features = self.encoder.forward_spatial(obs).flatten(start_dim=1)
         mass = features.sum(dim=1, keepdim=True)
         normalized = features / mass.clamp_min(1e-12)
         fallback = torch.full_like(features, 1.0 / features.shape[1])

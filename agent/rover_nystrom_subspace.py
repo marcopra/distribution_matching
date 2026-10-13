@@ -179,25 +179,38 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         self.dynamics_state_encoder_optimizer = None
         self.dynamics_state_encoder_scheduler = None
         if self.uses_state_dynamics_encoder:
-            self.dynamics_state_encoder = Encoder(
-                (self.dynamics_state_dim,), hidden_dim, self.feature_dim
-            ).to(self.device)
-            self.policy_dynamics_state_encoder = copy.deepcopy(
-                self.dynamics_state_encoder
-            ).to(self.device)
-            self._freeze_module(self.policy_dynamics_state_encoder)
-            if self.dynamics_encoder_mode == "trainable":
-                self.dynamics_state_encoder_optimizer = torch.optim.AdamW(
-                    self.dynamics_state_encoder.parameters(),
-                    lr=lr_encoder,
-                    weight_decay=1e-5,
-                )
-                self.dynamics_state_encoder_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    self.dynamics_state_encoder_optimizer,
-                    T_max=max(int(total_train_steps), 1),
-                    eta_min=lr_encoder * 0.1,
-                )
+            # For state observations, reuse Rover's observation encoder. The
+            # legacy PointMaze run learned this encoder directly; keeping the
+            # same module also preserves its initialization and optimizer path.
+            reuse_observation_encoder = self.obs_type != "pixels"
+            if reuse_observation_encoder:
+                self.dynamics_state_encoder = self.encoder
+                self.policy_dynamics_state_encoder = self.policy_encoder
             else:
+                self.dynamics_state_encoder = Encoder(
+                    (self.dynamics_state_dim,), hidden_dim, self.feature_dim
+                ).to(self.device)
+                self.policy_dynamics_state_encoder = copy.deepcopy(
+                    self.dynamics_state_encoder
+                ).to(self.device)
+                self._freeze_module(self.policy_dynamics_state_encoder)
+            if self.dynamics_encoder_mode == "trainable":
+                if reuse_observation_encoder:
+                    self.dynamics_state_encoder_optimizer = self.encoder_optimizer
+                    self.dynamics_state_encoder_scheduler = self.encoder_scheduler
+                else:
+                    self.dynamics_state_encoder_optimizer = torch.optim.AdamW(
+                        self.dynamics_state_encoder.parameters(),
+                        lr=lr_encoder,
+                        weight_decay=1e-5,
+                    )
+                    self.dynamics_state_encoder_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                        self.dynamics_state_encoder_optimizer,
+                        T_max=max(int(total_train_steps), 1),
+                        eta_min=lr_encoder * 0.1,
+                    )
+            else:
+                self._freeze_module(self.policy_dynamics_state_encoder)
                 self._freeze_module(self.dynamics_state_encoder)
         self.train_coverage_encoder = bool(train_coverage_encoder)
         self.coverage_kernel_input = coverage_kernel_input
@@ -642,6 +655,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
     ):
         metrics = {}
         if self.uses_state_dynamics_encoder:
+            # Match legacy feature_learning_loss=infonce with diagonal positives.
             if self.obs_type == "pixels":
                 if proprio_state is None or proprio_next_state is None:
                     raise ValueError(

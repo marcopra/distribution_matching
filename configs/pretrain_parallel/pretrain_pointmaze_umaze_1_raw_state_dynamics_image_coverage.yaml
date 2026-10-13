@@ -1,0 +1,57 @@
+# @package _global_
+# Reproduce the 2026-10-10 PointMaze run with current explicit subspace options.
+# Dynamics kernel consumes raw (x, y, vx, vy); coverage uses a fixed random CNN.
+# No dynamics encoder or random projection is used for the state kernel.
+# The coverage CNN is randomly initialized and frozen; no checkpoint is loaded.
+defaults:
+  - pretrain_pointmaze_umaze_1_pixels
+  - override /agent: rover_nystrom_pointmaze_subspace
+  - override /env: pointmaze/pointmaze_umaze_full_state_discrete
+  - _self_
+
+obs_type: pixels
+frame_stack: 4
+num_train_frames: 1_000_000
+num_seed_frames: 10_000
+eval_every_frames: 100_000
+snapshots: [11_000, 50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000]
+p_path: none
+p_path_coverage: none
+
+agent:
+  # Match the saved 2026-10-10 run.
+  feature_dim: 2048
+  lr_actor: 25
+  lambda_reg: 0.001
+  batch_size_actor: 25_000
+  subsamples: 10_000
+  pca_truncation: 10_000
+  proprio_state_dims: 4
+  subsampling_strategy: pivoted_cholesky
+  nystrom_candidate_multiplier: 5.0
+  nystrom_cholesky_tolerance: 0
+  kernel_bandwidth: null
+  kernel_bandwidth_mult: 1.0
+  linear_projection: true
+  T_init_steps: 1_000
+  update_every_steps: 100
+  update_actor_every_steps: 10_000
+  pmd_steps: 10
+  pmd_eta_mode: backtracking
+  sink_schedule: "linear(0.0,1.0,300000,750000)"
+  epsilon_schedule: 0.15
+  compute_dtype: float64
+  embeddings: true
+
+  exploration_metrics_enabled: true
+  train_coverage_encoder: false
+  coverage_kernel_input: pixels
+  coverage_frame_index: -1
+  coverage_state_indices: null
+  coverage_kernel_type: gaussian
+  coverage_kernel_bandwidth: null
+  coverage_kernel_bandwidth_mult: 1.0
+
+  dynamics_kernel_input: states
+  dynamics_encoder_mode: raw
+  dynamics_kernel_type: inner_product

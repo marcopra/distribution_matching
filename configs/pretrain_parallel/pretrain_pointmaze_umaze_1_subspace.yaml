@@ -1,6 +1,6 @@
 # @package _global_
-# Baseline-aligned PointMaze subspace setup. Defaults to raw-state dynamics and
-# coverage; image-observation variants override modality and encoder/kernel fields.
+# Baseline-aligned PointMaze setup. Defaults to learned state dynamics and raw
+# XY coverage; comparison configs override modality and encoder/kernel fields.
 defaults:
   - pretrain_pointmaze_umaze_1
   - override /agent: rover_nystrom_pointmaze_subspace
@@ -25,7 +25,7 @@ agent:
   sink_schedule: linear(0.0, 0.8, 250000)
   debug_fixed_dataset_updates: false
   dynamics_kernel_input: states
-  dynamics_encoder_mode: raw
+  dynamics_encoder_mode: trainable  # legacy run learned this state encoder throughout training
   dynamics_kernel_type: gaussian
   coverage_kernel_input: states
   coverage_state_indices: [0, 1]
@@ -35,6 +35,7 @@ agent:
   coverage_kernel_bandwidth: null
   coverage_kernel_bandwidth_mult: 1.0
   subsampling_strategy: pivoted_cholesky
+  nystrom_cholesky_tolerance: 0
   nystrom_exact_grid: false
   subsamples: 4000
   lambda_reg: 1e-6
