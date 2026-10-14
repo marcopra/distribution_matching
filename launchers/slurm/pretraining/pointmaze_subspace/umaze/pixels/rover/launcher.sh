@@ -5,9 +5,9 @@ set -eo pipefail
 BASE="launchers/slurm/pretraining/pointmaze_subspace/umaze/pixels/rover/base.sh"
 seeds=(1)
 
-batch_sizes_actor=(25000 16000)
+batch_sizes_actor=(25000)
 feature_dims=(2048 1024)
-subsample_sizes=(10000 4000)
+subsample_sizes=(10000)
 sink_idxs=(0 1)
 
 # Full factorial sweep: 2^4 = 16 jobs per seed.
