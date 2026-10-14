@@ -19,6 +19,7 @@ class ParallelEvalBestSnapshotTest(unittest.TestCase):
         workspace.snapshot_steps = []
         workspace.save_snapshot_flag = False
         workspace.agent = SimpleNamespace()
+        workspace._resume_signature = lambda: {}
         workspace._global_step = 10
         workspace._global_episode = 1
         workspace._coverage_progress = CoverageProgress()

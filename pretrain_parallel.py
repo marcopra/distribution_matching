@@ -161,6 +161,7 @@ class Workspace:
         self._coverage_progress = CoverageProgress(
             tolerance=float(getattr(cfg, "coverage_expansion_tolerance", 0.25))
         )
+        self._best_snapshot_coverage = None
         self._validate_coverage_config()
 
         # create logger
@@ -490,12 +491,14 @@ class Workspace:
                 grid_size=int(getattr(self.cfg, "coverage_grid_size", 90)),
                 radius=float(getattr(self.cfg, "coverage_radius", 0.08)),
             )
-            is_best = (
-                self._coverage_progress.previous_coverage is None
-                or coverage_pct > self._coverage_progress.best_coverage
-            )
             coverage_metrics = self._coverage_progress.update(coverage_pct, self.global_frame)
-            if self.save_eval_best and is_best:
+            best_saved = getattr(self, "_best_snapshot_coverage", None)
+            if (
+                self.save_eval_best
+                and self.global_frame >= self.cfg.num_seed_frames
+                and (best_saved is None or coverage_pct > best_saved)
+            ):
+                self._best_snapshot_coverage = coverage_pct
                 self.save_snapshot(filename='best_snapshot.pt', force=True)
 
             if bool(getattr(self.cfg, "plot_eval_trajectories", False)):
@@ -749,6 +752,9 @@ class Workspace:
                 observations = next_observations
                 time_steps = next_time_steps
 
+        self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
+        self.eval()
+        self.save_snapshot(filename='final_snapshot.pt', force=True)
         if self.save_snapshot_flag:
             self.save_snapshot(filename='snapshot.pt', force=True)
 
@@ -998,7 +1004,7 @@ class Workspace:
                 print(
                     f'saving best coverage snapshot to {snapshot} at frame '
                     f'{self.global_frame} '
-                    f'(coverage={self._coverage_progress.best_coverage:.6f}%)'
+                    f'(coverage={self._coverage_progress.previous_coverage:.6f}%)'
                 )
             else:
                 print(f'saving latest snapshot to {snapshot} at frame {self.global_frame}')
@@ -1012,6 +1018,7 @@ class Workspace:
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode', '_coverage_progress']
         payload = {k: self.__dict__[k] for k in keys_to_save}
+        payload['_best_snapshot_coverage'] = getattr(self, '_best_snapshot_coverage', None)
         payload['_resume_signature'] = self._resume_signature()
 
         agent = payload['agent']
@@ -1042,6 +1049,13 @@ class Workspace:
         try:
             with snapshot.open('wb') as f:
                 torch.save(payload, f)
+            if filename == 'best_snapshot.pt':
+                (snapshot_dir / 'best_snapshot_step.txt').write_text(
+                    f'global_step={self.global_step}\n'
+                    f'global_frame={self.global_frame}\n'
+                    f'coverage_pct={self._coverage_progress.previous_coverage}\n',
+                    encoding='utf-8',
+                )
             signature_path = snapshot.with_suffix(
                 snapshot.suffix + '.signature.json'
             )

@@ -138,6 +138,7 @@ class Workspace:
         self._coverage_progress = CoverageProgress(
             tolerance=float(getattr(cfg, "coverage_expansion_tolerance", 0.25))
         )
+        self._best_snapshot_coverage = None
         self._validate_coverage_config()
 
         # create logger
@@ -423,12 +424,14 @@ class Workspace:
                 grid_size=int(getattr(self.cfg, "coverage_grid_size", 90)),
                 radius=float(getattr(self.cfg, "coverage_radius", 0.08)),
             )
-            is_best = (
-                self._coverage_progress.previous_coverage is None
-                or coverage_pct > self._coverage_progress.best_coverage
-            )
             coverage_metrics = self._coverage_progress.update(coverage_pct, self.global_frame)
-            if self.save_eval_best and is_best:
+            best_saved = getattr(self, "_best_snapshot_coverage", None)
+            if (
+                self.save_eval_best
+                and self.global_frame >= self.cfg.num_seed_frames
+                and (best_saved is None or coverage_pct > best_saved)
+            ):
+                self._best_snapshot_coverage = coverage_pct
                 self.save_snapshot(filename="best_snapshot.pt", force=True)
 
         self._save_eval_trajectory_plots(eval_trajectories)
@@ -547,9 +550,7 @@ class Workspace:
                 replay_meta = self._prepare_replay_meta(time_step, meta)
                 self.replay_storage.add(time_step, replay_meta)
                 self.train_video_recorder.init(time_step.image_observation)
-                # try to save snapshot
                 self.save_snapshot()
-
                 episode_step = 0
                 episode_reward = 0
 
@@ -589,6 +590,13 @@ class Workspace:
             episode_step += 1
             self._global_step += 1
 
+            # Save at configured frame boundaries, including the final frame,
+            # rather than waiting for an episode to end.
+            if self.snapshot_steps and self.global_frame >= self.snapshot_steps[0]:
+                self.save_snapshot()
+
+        self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
+        self.eval()
         self.save_snapshot(filename="final_snapshot.pt", force=True)
 
     def save_snapshot(self, filename=None, force=False):
@@ -607,6 +615,7 @@ class Workspace:
             snapshot = snapshot_dir / 'snapshot.pt'
         keys_to_save = ['agent', '_global_step', '_global_episode', '_coverage_progress']
         payload = {k: self.__dict__[k] for k in keys_to_save}
+        payload['_best_snapshot_coverage'] = getattr(self, '_best_snapshot_coverage', None)
 
         agent = payload['agent']
         restored_refs = []
@@ -636,6 +645,13 @@ class Workspace:
         try:
             with snapshot.open('wb') as f:
                 torch.save(payload, f)
+            if filename == 'best_snapshot.pt':
+                (snapshot_dir / 'best_snapshot_step.txt').write_text(
+                    f'global_step={self.global_step}\n'
+                    f'global_frame={self.global_frame}\n'
+                    f'coverage_pct={self._coverage_progress.previous_coverage}\n',
+                    encoding='utf-8',
+                )
         finally:
             for obj, attr, value in reversed(restored_refs):
                 setattr(obj, attr, value)

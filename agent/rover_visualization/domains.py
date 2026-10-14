@@ -313,7 +313,7 @@ def _draw_start_goal_markers(ax, env, trajectories: list[np.ndarray]) -> None:
             starts[:, 1],
             marker="o",
             s=22,
-            facecolors="white",
+            facecolors="red",
             edgecolors="black",
             linewidths=0.7,
             zorder=7,
@@ -762,6 +762,12 @@ def save_maze_trajectory_overlay_plot(
                     ),
                     zorder=6,
                 )
+
+        starts = np.asarray([trajectory[0] for trajectory in trajectories])
+        ax.scatter(
+            starts[:, 0], starts[:, 1], s=55, color="red",
+            edgecolors="white", linewidths=0.8, zorder=7, label="start",
+        )
 
         ax.set_xlim(float(lower[0] - pad), float(upper[0] + pad))
         ax.set_ylim(float(lower[1] - pad), float(upper[1] + pad))

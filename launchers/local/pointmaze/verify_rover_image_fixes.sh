@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Paired PointMaze kernel-input runs; both use images and retain state metadata.
-set -euo pipefail
+set -eo pipefail
 
 ROVER_VERIFY_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd -- "$ROVER_VERIFY_ROOT"

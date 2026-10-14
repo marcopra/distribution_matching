@@ -1,0 +1,18 @@
+# @package _global_
+defaults:
+  - pretrain_umaze_baselines
+  - /pretrain_parallel/pointmaze_subspace_common
+  - override /env: pointmaze/pointmaze_umaze_full_state_discrete
+  - _self_
+
+obs_type: states
+frame_stack: 1
+env:
+  continuing_task: true
+  pointmaze:
+    # Override the different start in the legacy baseline training config.
+    start_position: [-1.0, 1.0]
+
+eval_trajectory_plot_episodes: []
+use_wandb: false
+

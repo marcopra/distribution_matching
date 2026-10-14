@@ -1,0 +1,36 @@
+# @package _global_
+# good_pixels hyperparameters with trained image features for inner-product
+# dynamics and a separate frozen image CNN for Gaussian coverage.
+defaults:
+  - pretrain_pointmaze_umaze_1_image_dynamics_state_coverage_trainable
+  - pointmaze_subspace_common
+  - _self_
+
+obs_type: pixels
+frame_stack: 4
+env:
+  continuing_task: false
+
+agent:
+  dynamics_kernel_input: pixels
+  dynamics_encoder_mode: trainable
+  dynamics_kernel_type: inner_product
+  coverage_kernel_input: pixels
+  coverage_kernel_type: gaussian
+  coverage_state_indices: null
+  coverage_frame_index: -1
+  train_coverage_encoder: false
+  feature_dim: 2048
+  hidden_dim: 1024
+  lr_actor: 25
+  lambda_reg: 1e-3
+  update_every_steps: 50
+  T_init_steps: 1000
+  batch_size_actor: 25000
+  subsamples: 10000
+  pca_truncation: ${agent.subsamples}
+  total_train_steps: ${num_train_frames}
+  nystrom_cholesky_tolerance: 1e-6
+  sink_schedule: linear(0.0,1.0,300000,750000)
+  exploration_metrics_enabled: false
+

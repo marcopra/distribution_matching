@@ -1,0 +1,22 @@
+# @package _global_
+# Shared evaluation and checkpoint protocol for ROVER and all five baselines.
+num_train_frames: 1_000_000
+num_seed_frames: 10_000
+eval_every_frames: 20_000
+coverage_eval_enabled: true
+coverage_num_trajectories: 50
+coverage_grid_size: 90
+coverage_radius: 0.08
+coverage_expansion_tolerance: 0.25
+plot_eval_trajectories: true
+save_eval_best: true
+snapshots: [250000, 500000, 750000, 1000000]
+snapshot_dir: models
+# Numbered, best, and final snapshots are saved explicitly. Avoid repeatedly
+# writing a large latest checkpoint at every evaluation.
+save_snapshot: false
+save_video: false
+save_train_video: false
+save_log: true
+grayscale: true
+
