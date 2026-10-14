@@ -16,9 +16,11 @@ Run launchers from the repository root. Each launcher submits its own base
 script directly with `sbatch`. Edit `seeds=(1)` and sweep arrays in the launcher.
 There are no shared shell helpers or Python submission scripts.
 
-ROVER launchers use nested loops for a full factorial sweep: two values each
-for actor batch size, feature dimension, subsamples, and sink schedule. This
-submits 16 configurations per seed, including the reference combination.
+ROVER launchers use nested loops over values listed in each launcher. State
+ROVER also sweeps dynamic kernel type (`inner_product` and `gaussian`); coverage
+kernel remains Gaussian. This gives 8 UMaze state jobs and 32 LargeDense state
+jobs per seed with current arrays. Pixel job count is the product of its array
+lengths.
 
 | Parameter | States reference | States alternative | Pixels reference | Pixels alternative |
 |---|---:|---:|---:|---:|

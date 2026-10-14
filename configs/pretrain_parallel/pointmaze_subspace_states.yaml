@@ -20,6 +20,7 @@ agent:
   coverage_state_indices: [0, 1]
   train_coverage_encoder: false
   update_every_steps: 10
+  lr_actor: 25
   feature_dim: 256
   hidden_dim: 1024
   batch_size_actor: 16000
