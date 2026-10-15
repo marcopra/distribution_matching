@@ -354,10 +354,6 @@ class ReplayBuffer(IterableDataset):
         meta = []
         for spec in self._storage._meta_specs:
             meta.append(episode[spec.name][idx - 1])
-        next_meta = [
-            episode[spec.name][idx + self._nstep - 1]
-            for spec in self._storage._meta_specs
-        ]
         obs = episode['observation'][idx - 1]
         action = episode['action'][idx]
         next_obs = episode['observation'][idx + self._nstep - 1]
@@ -368,7 +364,7 @@ class ReplayBuffer(IterableDataset):
             reward += discount * step_reward
             discount *= episode['discount'][idx + i] * self._discount
         
-        return (obs, action, reward, discount, next_obs, *meta, *next_meta)
+        return (obs, action, reward, discount, next_obs, *meta)
 
     def _episode_to_transitions(self, eps_fn):
         if eps_fn in self._transition_cache:
@@ -390,11 +386,7 @@ class ReplayBuffer(IterableDataset):
             discount *= episode['discount'][1 + i:transition_count + 1 + i] * self._discount
 
         meta = [episode[spec.name][:transition_count] for spec in self._storage._meta_specs]
-        next_meta = [
-            episode[spec.name][self._nstep:self._nstep + transition_count]
-            for spec in self._storage._meta_specs
-        ]
-        transitions = (obs, action, reward, discount, next_obs, *meta, *next_meta)
+        transitions = (obs, action, reward, discount, next_obs, *meta)
         self._transition_cache[eps_fn] = transitions
         return transitions
 

@@ -2,7 +2,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --output=%j.out
@@ -30,7 +29,8 @@ sink_schedules=(
     "linear(0.0,0.8,250000)"
 )
 SINK_SCHEDULE="${sink_schedules[${SINK_IDX}]}"
-RUN_LABEL="batch${BATCH_SIZE_ACTOR}_dim${FEATURE_DIM}_nys${SUBSAMPLES}_sink${SINK_IDX}"
+DYNAMICS_KERNEL_TYPE="${DYNAMICS_KERNEL_TYPE:-inner_product}"
+RUN_LABEL="${DYNAMICS_KERNEL_TYPE}_batch${BATCH_SIZE_ACTOR}_dim${FEATURE_DIM}_nys${SUBSAMPLES}_sink${SINK_IDX}"
 
 python pretrain_parallel.py \
     --config-name=pretrain_parallel/pointmaze_subspace_pixels \
@@ -47,7 +47,7 @@ python pretrain_parallel.py \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     agent.dynamics_kernel_input=pixels \
     agent.dynamics_encoder_mode=trainable \
-    agent.dynamics_kernel_type=inner_product \
+    agent.dynamics_kernel_type="${DYNAMICS_KERNEL_TYPE}" \
     agent.coverage_kernel_input=pixels \
     agent.coverage_kernel_type=gaussian \
     agent.train_coverage_encoder=false \
