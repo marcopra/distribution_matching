@@ -5,11 +5,11 @@ set -eo pipefail
 BASE="launchers/slurm/pretraining/pointmaze_subspace/umaze/states/rover/base.sh"
 seeds=(1)
 
-batch_sizes_actor=(16000)
-feature_dims=(256)
-subsample_sizes=(4000)
+batch_sizes_actor=(30000)
+feature_dims=(64)
+subsample_sizes=(10000)
 sink_idxs=(0 1)
-kernel_types=(inner_product)
+kernel_types=(gaussian)
 
 # Full factorial sweep including dynamics kernel: 8 jobs per seed.
 for seed in "${seeds[@]}"; do

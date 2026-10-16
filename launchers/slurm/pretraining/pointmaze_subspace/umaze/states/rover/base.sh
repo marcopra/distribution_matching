@@ -38,12 +38,12 @@ python pretrain_parallel.py \
     'env.pointmaze.start_position=[-1.0,1.0]' \
     seed="${SEED}" \
     device="${DEVICE}" \
-    num_train_frames=1000000 \
+    num_train_frames=500000 \
     eval_every_frames=20000 \
     plot_eval_trajectories=true \
     save_eval_best=true \
     save_snapshot=false \
-    'snapshots=[250000,500000,750000,1000000]' \
+    'snapshots=[250000,500000]' \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     agent.dynamics_kernel_input=states \
     agent.dynamics_encoder_mode=trainable \
@@ -59,4 +59,5 @@ python pretrain_parallel.py \
     use_wandb=true \
     wandb_project=pointmaze_subspace \
     wandb_tag=rover_umaze_states \
+    agent.pca_truncation=5000 \
     wandb_run_name="umaze_states_rover_${RUN_LABEL}_seed${SEED}"

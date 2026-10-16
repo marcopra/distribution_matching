@@ -1,0 +1,34 @@
+# @package _global_
+# Large-dense state-space variant of the PointMaze subspace config.
+defaults:
+  - pointmaze_subspace_states
+  - override /env: pointmaze/pointmaze_largedense_full_state_discrete
+  - _self_
+
+env:
+  pointmaze:
+    start_position: [-4.0, 3.0]
+
+seed: 1
+device: cuda
+num_train_frames: 1_000_000
+eval_every_frames: 20_000
+plot_eval_trajectories: true
+save_eval_best: true
+save_snapshot: false
+snapshots: [250_000, 500_000, 750_000, 1_000_000]
+
+agent:
+  batch_size_actor: 30_000
+  subsamples: 10_000
+  dynamics_kernel_input: states
+  dynamics_encoder_mode: trainable
+  dynamics_kernel_type: gaussian
+  coverage_kernel_input: states
+  coverage_kernel_type: gaussian
+  train_coverage_encoder: false
+  feature_dim: 64
+  pca_truncation: ${agent.subsamples}
+  update_actor_every_steps: 15000
+
+use_wandb: false
