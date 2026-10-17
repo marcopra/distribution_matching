@@ -40,8 +40,8 @@ agent:
   subsamples: 4000
   lambda_reg: 1e-6
   batch_size_actor: 16000
-  update_actor_every_steps: ${agent.batch_size_actor}
-  encoded_fifo_capacity: ${agent.batch_size_actor}
+  update_actor_every_steps: 20000
+  encoded_fifo_capacity: 1000000
   T_init_steps: 5000
   epsilon_schedule: 0.15
 

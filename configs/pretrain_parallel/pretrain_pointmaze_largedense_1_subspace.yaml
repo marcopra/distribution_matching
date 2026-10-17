@@ -19,6 +19,18 @@ save_snapshot: false
 snapshots: [250_000, 500_000, 750_000, 1_000_000]
 
 agent:
+  feature_dim: 256
+  embeddings: true
+  train_coverage_encoder: false
+  linear_projection: true
+  lr_actor: 25
+  pmd_steps: 5
+  update_every_steps: 100
+  pmd_eta_mode: backtracking
+  pca_truncation: ${agent.subsamples}
+  compute_dtype: float64
+  sink_schedule: linear(0.0, 0.8, 250000)
+  debug_fixed_dataset_updates: false
   batch_size_actor: 30_000
   subsamples: 10_000
   dynamics_kernel_input: states
@@ -30,5 +42,6 @@ agent:
   feature_dim: 256
   pca_truncation: ${agent.subsamples}
   update_actor_every_steps: 30000
+  encoded_fifo_capacity: 1_000_000
 
 use_wandb: false
