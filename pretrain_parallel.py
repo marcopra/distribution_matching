@@ -795,6 +795,38 @@ class Workspace:
             if key == '_resume_signature':
                 continue
             setattr(self, key, value)
+        # Transition stream IDs restart at zero when ReplayBufferStorage is
+        # recreated, but the restored actor FIFO marker is from the previous
+        # process. Continue the new stream after that marker or its early rows
+        # will be filtered out as already encoded.
+        marker = getattr(self.agent, '_encoded_fifo_replay_marker', None)
+        if marker is not None and self.replay_loader is not None:
+            dataset = self.replay_loader.dataset
+            storage = getattr(dataset, '_storage', None)
+            view_key = getattr(dataset, '_transition_view_key', None)
+            views = getattr(storage, '_transition_views', {})
+            view = views.get(view_key) if view_key is not None else None
+            if view is not None:
+                if view.get('pending'):
+                    raise RuntimeError(
+                        'Cannot resume actor transition IDs after transitions '
+                        'were already queued.'
+                    )
+                view['next_id'] = max(
+                    int(view.get('next_id', 0)), int(marker) + 1
+                )
+                print(
+                    'resumed actor transition stream at '
+                    f'id {view["next_id"]} (saved FIFO marker={marker})'
+                )
+        # The checkpoint intentionally omits live environment references.
+        # Reattach after replacing the freshly constructed agent so resumed
+        # runs retain domain debug plots, including PointMaze action probs.
+        if (
+            self.parallel_attach_eval_env_for_debug
+            and hasattr(self.agent, 'insert_env')
+        ):
+            self.agent.insert_env(self.eval_env)
         return True
 
     def _resume_signature(self):

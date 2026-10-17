@@ -23,10 +23,12 @@ FEATURE_DIM="${FEATURE_DIM:-256}"
 SUBSAMPLES="${SUBSAMPLES:-4000}"
 SINK_IDX="${SINK_IDX:-0}"
 
-# Index 0 = reference schedule; index 1 = alternative schedule.
+# Schedules seen in local UMaze runs.
 sink_schedules=(
-    "linear(0.0,0.8,250000)"
-    "linear(0.0,1.0,300000,750000)"
+    "linear(0.0,10.0,50000,100000)"
+    "linear(0.0,5.0,50000,250000)"
+    "linear(0.0,2.0,50000,250000)"
+    "linear(0.0,1.0,50000,250000)"
 )
 SINK_SCHEDULE="${sink_schedules[${SINK_IDX}]}"
 DYNAMICS_KERNEL_TYPE="${DYNAMICS_KERNEL_TYPE:-inner_product}"
@@ -38,12 +40,12 @@ python pretrain_parallel.py \
     'env.pointmaze.start_position=[-1.0,1.0]' \
     seed="${SEED}" \
     device="${DEVICE}" \
-    num_train_frames=500000 \
+    num_train_frames=250000 \
     eval_every_frames=20000 \
     plot_eval_trajectories=true \
     save_eval_best=true \
-    save_snapshot=false \
-    'snapshots=[250000,500000]' \
+    save_snapshot=true \
+    'snapshots=[100000,250000]' \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     agent.dynamics_kernel_input=states \
     agent.dynamics_encoder_mode=trainable \
@@ -59,5 +61,4 @@ python pretrain_parallel.py \
     use_wandb=true \
     wandb_project=pointmaze_subspace \
     wandb_tag=rover_umaze_states \
-    agent.pca_truncation=5000 \
     wandb_run_name="umaze_states_rover_${RUN_LABEL}_seed${SEED}"

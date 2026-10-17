@@ -12,7 +12,7 @@ env:
 seed: 1
 device: cuda
 num_train_frames: 1_000_000
-eval_every_frames: 20_000
+eval_every_frames: 30_000
 plot_eval_trajectories: true
 save_eval_best: true
 save_snapshot: false
@@ -27,8 +27,8 @@ agent:
   coverage_kernel_input: states
   coverage_kernel_type: gaussian
   train_coverage_encoder: false
-  feature_dim: 64
+  feature_dim: 256
   pca_truncation: ${agent.subsamples}
-  update_actor_every_steps: 15000
+  update_actor_every_steps: 30000
 
 use_wandb: false

@@ -59,6 +59,19 @@ class EncodedTransitionFIFO:
             for key in keys
         }
 
+    def _move_storage_to_cpu(self):
+        """Keep FIFO storage on CPU, including tensors restored via CUDA map_location."""
+        if self._ids is not None:
+            self._ids = self._ids.cpu()
+        if self._trajectory_ids is not None:
+            self._trajectory_ids = self._trajectory_ids.cpu()
+        if self._trajectory_steps is not None:
+            self._trajectory_steps = self._trajectory_steps.cpu()
+        if self._data is not None:
+            self._data = {key: value.cpu() for key, value in self._data.items()}
+        if self._first is not None:
+            self._first = {key: value.cpu() for key, value in self._first.items()}
+
     def _trajectory_metadata(self, size, terminal_mask=None):
         terminal = np.zeros(size, dtype=bool) if terminal_mask is None else np.asarray(
             terminal_mask, dtype=bool
@@ -80,6 +93,10 @@ class EncodedTransitionFIFO:
         return torch.from_numpy(trajectory_ids), torch.from_numpy(trajectory_steps)
 
     def add(self, transition_ids, encoded, terminal_mask=None):
+        # Checkpoints load through map_location=self.device, which can place
+        # these FIFO tensors on CUDA. New transition IDs and encoded rows are
+        # deliberately CPU-backed, so restore the FIFO's storage invariant.
+        self._move_storage_to_cpu()
         transition_ids = torch.as_tensor(transition_ids, dtype=torch.long, device='cpu')
         trajectory_ids, trajectory_steps = self._trajectory_metadata(
             int(transition_ids.numel()), terminal_mask
