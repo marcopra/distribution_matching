@@ -25,8 +25,10 @@ SINK_IDX="${SINK_IDX:-0}"
 
 # Schedules seen in local LargeDense runs.
 sink_schedules=(
+    "linear(0.0,10.0,50000,100000)"
+    "linear(0.0,5.0,50000,250000)"
     "linear(0.0,2.0,50000,250000)"
-    "linear(0.0,2.0,100000,250000)"
+    "linear(0.0,1.0,50000,250000)"
 )
 SINK_SCHEDULE="${sink_schedules[${SINK_IDX}]}"
 DYNAMICS_KERNEL_TYPE="${DYNAMICS_KERNEL_TYPE:-inner_product}"

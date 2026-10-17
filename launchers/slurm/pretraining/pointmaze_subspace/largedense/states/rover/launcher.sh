@@ -7,8 +7,12 @@ seeds=(1)
 
 batch_sizes_actor=(20000 32000)
 feature_dims=(64 256)
-subsample_sizes=(5000 10000)
-sink_idxs=(0 1)
+subsample_sizes=(5000 10000 15000)
+sink_idxs=(0 1 2 3)
+#  "linear(0.0,10.0,50000,100000)"
+#     "linear(0.0,5.0,50000,250000)"
+#     "linear(0.0,2.0,50000,250000)"
+#     "linear(0.0,1.0,50000,250000)"
 kernel_types=(gaussian)
 
 # 16 configurations per seed: schedule x batch x feature dim x subsample size.
