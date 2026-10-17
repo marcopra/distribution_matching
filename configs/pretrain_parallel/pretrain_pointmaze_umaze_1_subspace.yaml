@@ -43,7 +43,7 @@ agent:
   update_actor_every_steps: ${agent.batch_size_actor}
   encoded_fifo_capacity: ${agent.batch_size_actor}
   T_init_steps: 5000
-  epsilon_schedule: 0.05
+  epsilon_schedule: 0.15
 
 use_wandb: false
 wandb_project: pointmaze_hp

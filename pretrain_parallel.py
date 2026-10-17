@@ -645,13 +645,7 @@ class Workspace:
 
         while train_until_step(self.global_step):
             logical_steps = self.global_step + np.arange(self.num_envs, dtype=np.int64)
-
-            if any(eval_every_step(int(step)) for step in logical_steps):
-                self.logger.log('eval_total_time', self.timer.total_time(),
-                                self.global_frame)
-                self.eval()
-                if self.save_snapshot_flag:
-                    self.save_snapshot(filename='snapshot.pt', force=True)
+            eval_due = any(eval_every_step(int(step)) for step in logical_steps)
 
             for env_id, step in enumerate(logical_steps):
                 metas[env_id] = self.agent.update_meta(
@@ -695,6 +689,15 @@ class Workspace:
             self._global_step += self.num_envs
             for logical_step in update_steps:
                 metrics = self._update_agent_once(logical_step)
+
+            # Run evaluation after updates due on this vector step. eval() calls
+            # agent.act with eval_mode=False so Rover applies its epsilon schedule.
+            if eval_due:
+                self.logger.log('eval_total_time', self.timer.total_time(),
+                                self.global_frame)
+                self.eval()
+                if self.save_snapshot_flag:
+                    self.save_snapshot(filename='snapshot.pt', force=True)
 
             # Vectorized stepping advances global_frame by
             # num_envs * action_repeat, so a configured snapshot frame may be
