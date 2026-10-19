@@ -43,5 +43,8 @@ agent:
   pca_truncation: ${agent.subsamples}
   update_actor_every_steps: 30000
   encoded_fifo_capacity: 1_000_000
+  pmd_warm_start: true
+  T_init_steps: 5000
+  epsilon_schedule: 0.3
 
 use_wandb: false

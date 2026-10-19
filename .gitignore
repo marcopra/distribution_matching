@@ -228,6 +228,7 @@ exp_config.yaml
 runs/*
 exp_*
 exploration_video
+rover_diagnostics
 diagnostics
 
 # Keep the reproducible ROVER checks; generated diagnostics remain ignored.

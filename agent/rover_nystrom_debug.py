@@ -114,6 +114,7 @@ class RoverAgent:
                  linear_projection = False,
                  pmd_eta_mode: str = "none",
                  pmd_best_iterate: bool = True,
+                 pmd_warm_start: bool = False,
                  pmd_grad_clip_norm: float = 0.0,
                  pmd_adagrad_eps: float = 1e-8,
                  pmd_eta_min: float = 1e-8,
@@ -187,6 +188,11 @@ class RoverAgent:
         self.pmd_eta_mode = pmd_eta_mode.lower()
         assert self.pmd_eta_mode in ["none", "adagrad", "backtracking", "adadiff"], "pmd_eta_mode must be one of ['none', 'adagrad', 'backtracking', 'adadiff']"
         self.pmd_best_iterate = pmd_best_iterate
+        self.pmd_warm_start = pmd_warm_start
+        self._pmd_previous_support = None
+        self._pmd_previous_policy = None
+        self._pmd_action_support = None
+        self._pmd_action_logits_offset = None
         self.pmd_grad_clip_norm = pmd_grad_clip_norm
         self.pmd_adagrad_eps = pmd_adagrad_eps
         self.pmd_eta_min = pmd_eta_min
@@ -602,10 +608,44 @@ class RoverAgent:
         sink_bias = torch.ones(H.shape[0], self.E.shape[1], device=H.device, dtype=H.dtype) * coeff[-1]
         return H @ (coeff[:-1] * self.E) + sink_bias
 
-    def _policy_from_H(self, H: torch.Tensor, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _policy_from_H(
+        self,
+        H: torch.Tensor,
+        coeff: Optional[torch.Tensor] = None,
+        logits_offset: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Closed-form PMD policy from logits."""
         logits = self._policy_logits_from_H(H, coeff=coeff)
+        if logits_offset is not None:
+            assert logits_offset.shape == logits.shape
+            logits = logits + logits_offset
         return torch.softmax(-logits, dim=1, dtype=logits.dtype)
+
+    def _pmd_warm_start_support(self) -> torch.Tensor:
+        return self._phi_sub_next
+
+    def _pmd_warm_start_query_support(self, observations, metas=None) -> torch.Tensor:
+        return self._append_zero_feature_column(
+            self._policy_query_features(observations, metas=metas)
+        )
+
+    @staticmethod
+    def _pmd_nearest_rows(query_support, reference_support):
+        assert query_support.ndim == reference_support.ndim == 2
+        assert query_support.shape[1] == reference_support.shape[1]
+        assert query_support.device == reference_support.device
+        return torch.cat([
+            torch.cdist(chunk, reference_support).argmin(dim=1)
+            for chunk in query_support.split(512)
+        ])
+
+    def _pmd_action_logits_for(self, observations, metas=None):
+        if not self.pmd_warm_start or self._pmd_action_logits_offset is None:
+            return None
+        assert self._pmd_action_support is not None
+        query_support = self._pmd_warm_start_query_support(observations, metas)
+        nearest = self._pmd_nearest_rows(query_support, self._pmd_action_support)
+        return self._pmd_action_logits_offset[nearest]
 
     def _kernel(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return self.kernel_fn(X, Y)
@@ -791,7 +831,9 @@ class RoverAgent:
             # Add a zero to enc_obs to account for the extra row in H
             enc_obs_augmented = torch.cat([enc_obs, torch.zeros((1, 1), device=enc_obs.device, dtype=enc_obs.dtype)], dim=1)  # [1, feature_dim + 1]
             H = self._kernel(enc_obs_augmented, self._phi_all_obs)  # [1, num_unique]
-            probs = self._policy_from_H(H)
+            probs = self._policy_from_H(
+                H, logits_offset=self._pmd_action_logits_for(obs_tensor, metas=[meta])
+            )
 
             
             if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
@@ -826,7 +868,10 @@ class RoverAgent:
             )
             enc_obs_augmented = torch.cat([enc_obs, zeros], dim=1)
             H = self._kernel(enc_obs_augmented, self._phi_all_obs)
-            probs = self._policy_from_H(H)
+            probs = self._policy_from_H(
+                H,
+                logits_offset=self._pmd_action_logits_for(obs_tensor, metas=metas),
+            )
             bad_rows = (torch.sum(probs, dim=1) == 0.0) | torch.isnan(torch.sum(probs, dim=1))
             if torch.any(bad_rows):
                 utils.ColorPrint.red(
@@ -1032,6 +1077,15 @@ class RoverAgent:
             )
 
         utils.ColorPrint.blue(f"Starting Nyström PMD actor update with {self._phi_all_obs.shape[0]} total samples and {self._phi_sub_next.shape[0]} subsampled points.")
+        logits_offset = None
+        if self.pmd_warm_start and self._pmd_previous_policy is not None:
+            assert self._pmd_previous_support is not None
+            assert self._pmd_previous_support.shape[0] == self._pmd_previous_policy.shape[0]
+            support = self._pmd_warm_start_support()
+            nearest = self._pmd_nearest_rows(support, self._pmd_previous_support)
+            logits_offset = -self._pmd_previous_policy[nearest].clamp_min(
+                torch.finfo(self.compute_dtype).tiny
+            ).log()
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
         self._fit_state_kernel_bandwidth(self._phi_all_obs, self._phi_sub_next)
@@ -1052,7 +1106,9 @@ class RoverAgent:
         self.current_eta = 0.0
 
         sink_norm = utils.schedule(self.sink_schedule, step)
-        self.pi = self._policy_from_H(sub_H.T, coeff=self.gradient_coeff)  # [z_x+1, n_actions]
+        self.pi = self._policy_from_H(
+            sub_H.T, coeff=self.gradient_coeff, logits_offset=logits_offset
+        )  # [z_x+1, n_actions]
 
         K_sub_sub = self.distribution_matcher.state_action_kernel(
             self._phi_sub_obs,
@@ -1142,7 +1198,9 @@ class RoverAgent:
                 eta_t = base_eta
 
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
-            candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
+            candidate_pi = self._policy_from_H(
+                sub_H.T, coeff=candidate_coeff, logits_offset=logits_offset
+            )
             # candidate_M = sub_H * (self.E @ candidate_pi.T)
             candidate_loss = self._compute_actor_occupancy_loss(
                     phi_all_obs=self._phi_all_obs,
@@ -1169,7 +1227,9 @@ class RoverAgent:
                     trial_eta *= self.pmd_backtrack_factor
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
-                    candidate_pi = self._policy_from_H(sub_H.T, coeff=candidate_coeff)
+                    candidate_pi = self._policy_from_H(
+                        sub_H.T, coeff=candidate_coeff, logits_offset=logits_offset
+                    )
 
                     candidate_loss = self._compute_actor_occupancy_loss(
                             phi_all_obs=self._phi_all_obs,
@@ -1219,6 +1279,14 @@ class RoverAgent:
             self.gradient_coeff = best_coeff
             actor_loss = best_loss
             self.current_eta = best_eta
+
+        if self.pmd_warm_start:
+            support = self._pmd_warm_start_support().detach()
+            assert support.shape[0] == self.pi.shape[0]
+            self._pmd_previous_support = support.clone()
+            self._pmd_previous_policy = self.pi.detach().clone()
+            self._pmd_action_support = self._pmd_previous_support
+            self._pmd_action_logits_offset = logits_offset
             
 
         if self.use_tb or self.use_wandb:

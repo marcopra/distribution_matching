@@ -323,6 +323,7 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         )
         self._raw_coverage_sub_next: Optional[torch.Tensor] = None
         self._coverage_sub_next_features: Optional[torch.Tensor] = None
+        self._pmd_warm_start_raw_support: Optional[torch.Tensor] = None
 
         if self.train_coverage_encoder:
             selected_dim = len(self.coverage_state_indices)
@@ -538,6 +539,10 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             sub_obs=sub_obs, sub_action=sub_action, sub_next_obs=sub_next_obs,
         )
         raw_sub_next = next_obs if sub_next_obs is None else sub_next_obs
+        if self.pmd_warm_start:
+            self._pmd_warm_start_raw_support = raw_sub_next.reshape(
+                raw_sub_next.shape[0], -1
+            ).to(device=self.device, dtype=self.compute_dtype)
         self._raw_coverage_sub_next = self._selected_coverage_observations(raw_sub_next)
         self._coverage_sub_next_features = None
 
@@ -606,6 +611,11 @@ class RoverSubspaceCoverageAgent(RoverAgent):
     def _cache_encoded_features(self, encoded_full, encoded_sub=None):
         super()._cache_encoded_features(encoded_full, encoded_sub=encoded_sub)
         coverage_sub = encoded_sub if encoded_sub is not None else encoded_full
+        if self.pmd_warm_start:
+            assert "proprio_next_state" in coverage_sub
+            self._pmd_warm_start_raw_support = coverage_sub[
+                "proprio_next_state"
+            ].to(device=self.device, dtype=self.compute_dtype)
         if self.coverage_kernel_input == "pixels":
             if "coverage_next_features" not in coverage_sub:
                 raise ValueError(
@@ -625,6 +635,23 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             device=self.device, dtype=self.compute_dtype
         )
         self._coverage_sub_next_features = None
+
+    def _pmd_warm_start_support(self) -> torch.Tensor:
+        assert self._pmd_warm_start_raw_support is not None
+        return self._pmd_warm_start_raw_support
+
+    def _pmd_warm_start_query_support(self, observations, metas=None) -> torch.Tensor:
+        if self.obs_type == "pixels":
+            assert metas is not None and len(metas) == observations.shape[0]
+            states = torch.as_tensor(
+                np.stack([meta["proprio_state"] for meta in metas]),
+                device=observations.device,
+                dtype=self.compute_dtype,
+            )
+        else:
+            states = observations.reshape(observations.shape[0], -1)
+        assert states.shape[1] >= self.dynamics_state_dim
+        return states[:, :self.dynamics_state_dim]
 
     def _prepare_coverage_features(self) -> None:
         if self._raw_coverage_sub_next is None:

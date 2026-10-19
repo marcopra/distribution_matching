@@ -3,12 +3,12 @@ set -eo pipefail
 
 # Run from repository root. This script only submits base.sh jobs.
 BASE="launchers/slurm/pretraining/pointmaze_subspace/largedense/states/rover/base.sh"
-seeds=(1)
+seeds=(1 2 3)
 
 batch_sizes_actor=(20000 32000)
-feature_dims=(64 256)
-subsample_sizes=(5000 10000 15000)
-sink_idxs=(0 1 2 3)
+feature_dims=(512 1024)
+subsample_sizes=(5000)
+sink_idxs=(1 2)
 #  "linear(0.0,10.0,50000,100000)"
 #     "linear(0.0,5.0,50000,250000)"
 #     "linear(0.0,2.0,50000,250000)"
