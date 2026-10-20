@@ -32,6 +32,7 @@ def make_actor(losses, best_iterate):
     agent.pmd_backtrack_factor = .25
     agent.pmd_backtrack_max_trials = 2
     agent.pmd_best_iterate = best_iterate
+    agent.pmd_warm_start = False
     agent.use_tb = True
     agent.use_wandb = False
     agent._fit_state_kernel_bandwidth = lambda *args: None

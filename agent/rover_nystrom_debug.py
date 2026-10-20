@@ -55,6 +55,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 from agent.rover_buffers import EncodedTransitionFIFO
 from agent.rover_matchers import DistributionMatcher
+from agent.rover_sink import nystrom_resolvent_diagnostics
 from agent.rover_networks import CNNEncoder, Encoder, ProjectSA
 from agent.rover_visualization.exploration import ExplorationVisualizer
 from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
@@ -1110,32 +1111,10 @@ class RoverAgent:
             sub_H.T, coeff=self.gradient_coeff, logits_offset=logits_offset
         )  # [z_x+1, n_actions]
 
-        K_sub_sub = self.distribution_matcher.state_action_kernel(
-            self._phi_sub_obs,
-            self._phi_sub_obs,
-            self._sub_actions,
-            self._sub_actions,
-        )  # [m, m]
-        K_all_sub = self.distribution_matcher.state_action_kernel(
-            self._phi_all_obs,
-            self._phi_sub_obs,
-            self._all_actions,
-            self._sub_actions,
-        )  # [n, m]
-
-
-        B_nystrom, U_r = self.distribution_matcher.compute_B_and_projections(
-            K_nm=K_all_sub,
-            K_mm=K_sub_sub,
-            components=self.pca_truncation
-        )
-    
-        U_r = U_r.to(self.compute_dtype)
-        del K_sub_sub, K_all_sub
-        
+        B_nystrom, U_r = self._prepare_actor_model(sub_H, sink_norm)
 
         utils.ColorPrint.yellow(
-            f"Nyström state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
+            f"Actor state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
         )
 
         actor_loss = self._compute_actor_occupancy_loss(
@@ -1295,8 +1274,29 @@ class RoverAgent:
             metrics['actor_best_loss'] = float(best_loss)
             metrics['actor_backtracking_rejections'] = backtracking_rejections
             metrics['sink_norm'] = float(sink_norm)
+            diagnostics = self._actor_update_diagnostics(
+                H=sub_H,
+                pi=self.pi,
+                B_nystrom=B_nystrom,
+            )
+            metrics.update({f"actor_{name}": value for name, value in diagnostics.items()})
    
         return metrics
+
+    def _prepare_actor_model(self, H, sink_norm):
+        """Build the regression model for this actor update."""
+        K_sub_sub = self.distribution_matcher.state_action_kernel(
+            self._phi_sub_obs, self._phi_sub_obs,
+            self._sub_actions, self._sub_actions,
+        )
+        K_all_sub = self.distribution_matcher.state_action_kernel(
+            self._phi_all_obs, self._phi_sub_obs,
+            self._all_actions, self._sub_actions,
+        )
+        B, U = self.distribution_matcher.compute_B_and_projections(
+            K_nm=K_all_sub, K_mm=K_sub_sub, components=self.pca_truncation,
+        )
+        return B, U.to(self.compute_dtype)
 
     def _compute_actor_occupancy_loss(self, **kwargs):
         """Return squared occupancy norm for the standard state coverage objective."""
@@ -1309,6 +1309,12 @@ class RoverAgent:
             alpha=kwargs["alpha"],
             sink_norm=kwargs["sink_norm"],
             B_nystrom=kwargs["B_nystrom"],
+        )
+
+    def _actor_update_diagnostics(self, *, H, pi, B_nystrom):
+        """Compute actor-update diagnostics once for the selected policy."""
+        return nystrom_resolvent_diagnostics(
+            H, pi, self.E, B_nystrom, self.discount
         )
 
     def _compute_actor_occupancy_gradient(self, **kwargs):

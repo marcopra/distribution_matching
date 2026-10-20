@@ -1,0 +1,10 @@
+# @package _global_
+# Probability-preserving state dynamics with policy transfer between supports.
+defaults:
+  - pointmaze_subspace_states
+  - override /agent: rover_positive_kernel_pointmaze_subspace
+  - _self_
+
+agent:
+  dynamics_kernel_type: gaussian
+  pmd_warm_start: true

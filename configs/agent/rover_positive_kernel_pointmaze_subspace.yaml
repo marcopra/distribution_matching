@@ -1,0 +1,8 @@
+# @package agent
+defaults:
+  - rover_nystrom_pointmaze_subspace
+  - _self_
+
+_target_: agent.rover_positive_kernel.RoverPositiveKernelAgent
+dynamics_kernel_type: gaussian
+transition_prior_mass: 1.0  # Kernel pseudo-count assigned to the absorbing sink.

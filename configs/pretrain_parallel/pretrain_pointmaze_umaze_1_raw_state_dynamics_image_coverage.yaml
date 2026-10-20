@@ -43,7 +43,7 @@ agent:
   compute_dtype: float64
   embeddings: true
 
-  exploration_metrics_enabled: true
+  exploration_metrics_enabled: false
   train_coverage_encoder: false
   coverage_kernel_input: pixels
   coverage_frame_index: -1

@@ -70,7 +70,7 @@ class SubspaceCoverageMatcher:
         # H and E use the configured dynamics kernel. The coverage Gram matrix
         # below may use an independent coordinate or learned feature space.
         return nystrom_resolvent_coefficients(
-            H, pi, E, alpha, B_nystrom, gamma
+            H, pi, E, alpha, B_nystrom, gamma,
         )
 
     @staticmethod
@@ -138,7 +138,7 @@ class SubspaceCoverageMatcher:
     ) -> torch.Tensor:
         """Return squared RKHS norm of discounted projected occupancy."""
         coefficients = self._resolvent_coefficients(
-            H, pi, E, alpha, B_nystrom, self.gamma
+            H, pi, E, alpha, B_nystrom, self.gamma,
         )
         coverage_gram = self._coverage_gram(
             phi_sub_next_obs=phi_sub_next_obs,
