@@ -19,7 +19,7 @@ from PIL import Image
 import torch
 
 import utils
-from agent.rover_nystrom_pointmaze_debug import RoverAgent as PointMazeRoverAgent
+from agent.rover_nystrom_debug import RoverAgent as PointMazeRoverAgent
 from agent.utils import EncodedActorUpdateData, RawActorUpdateData
 
 
@@ -259,16 +259,35 @@ class RoverAgent(PointMazeRoverAgent):
         if not self._update_encoded_actor_fifo(replay_buffer):
             return None
         if self.subsamples is None:
+            if self.use_recent_actor_support:
+                full = self._sample_actor_support(self.batch_size_actor, self.device)
+                return EncodedActorUpdateData(
+                    full=full,
+                    rewards=full.get("reward"),
+                    source="encoded FIFO recent actor support",
+                )
             full, rewards = self._sample_encoded_actor_data(self.batch_size_actor, include_first=True)
             return EncodedActorUpdateData(
                 full=full,
                 rewards=rewards,
                 source=f"encoded FIFO {self.subsampling_strategy} sample",
             )
-        full, rewards = self._all_encoded_actor_data(include_first=True)
+        if self.use_recent_actor_support:
+            full = self._sample_actor_support(self.batch_size_actor, self.device)
+            rewards = full.get("reward")
+        else:
+            full, rewards = self._all_encoded_actor_data(include_first=True)
         if self.nystrom_synthetic_subsamples:
             subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
             source = "synthetic GridWorld landmarks"
+        elif self.use_recent_actor_support:
+            actor_fifo = self._actor_support_fifo(full)
+            subsample, subsample_rewards = self._sample_encoded_actor_data(
+                self._nystrom_subsample_count(),
+                include_first=True,
+                actor_fifo=actor_fifo,
+            )
+            source = f"recent support {self.subsampling_strategy} landmarks"
         else:
             subsample, subsample_rewards = self._sample_encoded_actor_data(
                 self._nystrom_subsample_count(), include_first=True
@@ -279,7 +298,11 @@ class RoverAgent(PointMazeRoverAgent):
             rewards=rewards,
             subsample=subsample,
             subsample_rewards=subsample_rewards,
-            source=f"encoded FIFO full support + {source}",
+            source=(
+                f"encoded FIFO recent support + {source}"
+                if self.use_recent_actor_support
+                else f"encoded FIFO full support + {source}"
+            ),
         )
 
     # PointMaze scatter plots are intentionally replaced by GridWorld plots.

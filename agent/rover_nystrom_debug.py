@@ -125,6 +125,7 @@ class RoverAgent:
                  compute_dtype: str = "float32",
                  nystrom_synthetic_subsamples: bool = False,
                  debug_fixed_dataset_updates: bool = False,
+                 use_recent_actor_support: bool = False,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
                  encoded_fifo_cuda_oom_splits: int = 4,
@@ -163,6 +164,9 @@ class RoverAgent:
         self.T_init_steps = T_init_steps
         self.batch_size = batch_size
         self.batch_size_actor = batch_size_actor
+        if not isinstance(use_recent_actor_support, bool):
+            raise TypeError("use_recent_actor_support must be a bool")
+        self.use_recent_actor_support = use_recent_actor_support
         # assert batch_size_actor >= batch_size, "Actor update batch size must be greater than or equal to encoder update batch size"
         self.update_every_steps = update_every_steps
         self.update_actor_every_steps = update_actor_every_steps
@@ -1706,10 +1710,26 @@ class RoverAgent:
         """Encode pending replay transitions without running actor/encoder update."""
         return self._update_encoded_actor_fifo(replay_buffer)
 
-    def _sample_encoded_actor_data(self, size, include_first):
-        encoded = self._encoded_actor_fifo.sample_by_strategy(
+    def _sample_actor_support(self, size, device):
+        if self.use_recent_actor_support:
+            return self._encoded_actor_fifo.sample_recent(size, device)
+        return self._encoded_actor_fifo.sample(size, device, include_first=True)
+
+    def _actor_support_fifo(self, actor_support):
+        size = self._encoded_batch_size(actor_support)
+        assert size > 0, "actor support must contain the pinned first transition"
+        fifo = EncodedTransitionFIFO(size)
+        fifo.add(np.arange(size, dtype=np.int64), actor_support)
+        return fifo
+
+    def _sample_encoded_actor_data(
+        self, size, include_first, actor_fifo=None, device=None
+    ):
+        fifo = self._encoded_actor_fifo if actor_fifo is None else actor_fifo
+        device = self.device if device is None else device
+        encoded = fifo.sample_by_strategy(
             int(size),
-            self.device,
+            device,
             strategy=self.subsampling_strategy,
             gamma=self.discount,
             include_first=include_first,
@@ -1721,10 +1741,20 @@ class RoverAgent:
             cholesky_progress=self.nystrom_cholesky_progress,
             kernel_feature_key=getattr(self, "nystrom_kernel_feature_key", None),
         )
-        if self.subsampling_strategy == "pivoted_cholesky" and self.kernel_type == "gaussian":
-            bandwidth = self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth
-            self.kernel_fn.bandwidth = bandwidth
-            self.distribution_matcher.kernel_fn.bandwidth = bandwidth
+        if self.subsampling_strategy == "pivoted_cholesky":
+            self._encoded_actor_fifo.last_pivoted_cholesky_residuals = (
+                fifo.last_pivoted_cholesky_residuals
+            )
+            self._encoded_actor_fifo.last_pivoted_cholesky_candidate_count = (
+                fifo.last_pivoted_cholesky_candidate_count
+            )
+            self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth = (
+                fifo.last_pivoted_cholesky_bandwidth
+            )
+            if self.kernel_type == "gaussian":
+                bandwidth = fifo.last_pivoted_cholesky_bandwidth
+                self.kernel_fn.bandwidth = bandwidth
+                self.distribution_matcher.kernel_fn.bandwidth = bandwidth
         return encoded, encoded.get("reward")
 
     def _all_encoded_actor_data(self, include_first=True):
@@ -1953,12 +1983,7 @@ class RoverAgent:
         if not self._update_encoded_actor_fifo(replay_buffer):
             return None
 
-        # Actor support is always a bounded random sample from CPU FIFO.
-        full = self._encoded_actor_fifo.sample(
-            int(self.batch_size_actor),
-            "cpu",
-            include_first=True,
-        )
+        full = self._sample_actor_support(int(self.batch_size_actor), "cpu")
         # Publish a new encoder only when rebuilding its actor basis. Every
         # sampled row, including the pinned reset, is refreshed before landmarks.
         self._sync_policy_encoder()
@@ -1970,7 +1995,10 @@ class RoverAgent:
                 full=full,
                 rewards=rewards,
                 source=(
-                    f"random encoded FIFO sample of "
+                    f"recent encoded FIFO support: latest {self.batch_size_actor} "
+                    "plus pinned first"
+                    if self.use_recent_actor_support
+                    else "random encoded FIFO sample of "
                     f"batch_size_actor={self.batch_size_actor}"
                 ),
             )
@@ -1981,40 +2009,13 @@ class RoverAgent:
             subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
             subsample_source = "fixed PointMaze Nyström landmarks"
         else:
-            actor_fifo = EncodedTransitionFIFO(max(1, self._encoded_batch_size(full)))
-            actor_fifo.add(
-                np.arange(self._encoded_batch_size(full), dtype=np.int64),
-                full,
-            )
-            subsample = actor_fifo.sample_by_strategy(
+            actor_fifo = self._actor_support_fifo(full)
+            subsample, subsample_rewards = self._sample_encoded_actor_data(
                 count,
-                "cpu",
-                strategy=self.subsampling_strategy,
-                gamma=self.discount,
                 include_first=True,
-                candidate_multiplier=self.nystrom_candidate_multiplier,
-                cholesky_tolerance=self.nystrom_cholesky_tolerance,
-                kernel_type=self.kernel_type,
-                kernel_bandwidth=getattr(self, "_active_kernel_bandwidth", None),
-                kernel_bandwidth_mult=self.kernel_bandwidth_mult,
-                cholesky_progress=self.nystrom_cholesky_progress,
-                kernel_feature_key=getattr(self, "nystrom_kernel_feature_key", None),
+                actor_fifo=actor_fifo,
+                device="cpu",
             )
-            subsample_rewards = subsample.get("reward")
-            if self.subsampling_strategy == "pivoted_cholesky":
-                self._encoded_actor_fifo.last_pivoted_cholesky_residuals = (
-                    actor_fifo.last_pivoted_cholesky_residuals
-                )
-                self._encoded_actor_fifo.last_pivoted_cholesky_candidate_count = (
-                    actor_fifo.last_pivoted_cholesky_candidate_count
-                )
-                self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth = (
-                    actor_fifo.last_pivoted_cholesky_bandwidth
-                )
-                if self.kernel_type == "gaussian":
-                    bandwidth = actor_fifo.last_pivoted_cholesky_bandwidth
-                    self.kernel_fn.bandwidth = bandwidth
-                    self.distribution_matcher.kernel_fn.bandwidth = bandwidth
             subsample_source = (
                 f"actor batch {self.subsampling_strategy} Nyström sample "
                 f"of subsamples={count}"
@@ -2025,7 +2026,10 @@ class RoverAgent:
             subsample=subsample,
             subsample_rewards=subsample_rewards,
             source=(
-                f"random encoded FIFO actor sample of batch_size_actor="
+                f"recent encoded FIFO support: latest {self.batch_size_actor} "
+                f"plus pinned first + {subsample_source}"
+                if self.use_recent_actor_support
+                else f"random encoded FIFO actor sample of batch_size_actor="
                 f"{self.batch_size_actor} + {subsample_source}"
             ),
         )

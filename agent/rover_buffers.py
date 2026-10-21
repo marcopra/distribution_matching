@@ -11,7 +11,7 @@ class EncodedTransitionFIFO:
     """FIFO storage for actor-ready encoded transitions.
 
     The first transition is pinned separately so actor batches can always place
-    it at index 0 without duplicating it in the random sample.
+    it at index 0 without duplicating it in a sample.
     """
 
     def __init__(self, capacity: int):
@@ -493,6 +493,21 @@ class EncodedTransitionFIFO:
             key: value.to(device)
             for key, value in sampled.items()
         }
+
+    def sample_recent(self, size, device):
+        """Return the pinned first transition plus newest ``size`` transitions."""
+        if size <= 0:
+            raise ValueError("recent sample size must be positive")
+        if self._first is None:
+            raise RuntimeError("Encoded actor FIFO has no pinned first transition")
+
+        batches = [self._first]
+        if self.data_count:
+            start = max(0, self.data_count - int(size))
+            batches.append(self._index(self._data, slice(start, None)))
+
+        sampled = batches[0] if len(batches) == 1 else self._cat(batches)
+        return {key: value.to(device) for key, value in sampled.items()}
 
     def all(self, device, include_first=True):
         if len(self) == 0:

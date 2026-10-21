@@ -12,7 +12,8 @@ import numpy as np
 import torch
 from dm_env import specs
 
-from agent.rover_nystrom import EncodedTransitionFIFO, EmbeddingDistributionVisualizerV2, RoverAgent
+from agent.rover_buffers import EncodedTransitionFIFO
+from agent.rover_nystrom_debug import EmbeddingDistributionVisualizerV2, RoverAgent
 from replay_buffer import ReplayBuffer, ReplayBufferStorage
 
 
@@ -75,6 +76,44 @@ class EncodedActorFIFOTest(unittest.TestCase):
         self.assertEqual(float(sample["phi_obs"][0, 0]), 0.0)
         self.assertEqual((sample["phi_obs"] == 0).sum().item(), 1)
 
+    def test_recent_sample_pins_first_then_returns_latest_transitions(self):
+        fifo = EncodedTransitionFIFO(capacity=10)
+        fifo.add(np.arange(8), encoded(np.arange(8)))
+
+        sample = fifo.sample_recent(3, "cpu")
+
+        self.assertEqual(sample["phi_obs"].flatten().tolist(), [0.0, 5.0, 6.0, 7.0])
+
+    def test_recent_sample_respects_fifo_overflow(self):
+        fifo = EncodedTransitionFIFO(capacity=5)
+        fifo.add(np.arange(8), encoded(np.arange(8)))
+
+        sample = fifo.sample_recent(2, "cpu")
+
+        self.assertEqual(sample["phi_obs"].flatten().tolist(), [0.0, 6.0, 7.0])
+
+    def test_recent_sample_uses_all_available_transitions(self):
+        fifo = EncodedTransitionFIFO(capacity=5)
+        fifo.add(np.arange(3), encoded(np.arange(3)))
+
+        sample = fifo.sample_recent(5, "cpu")
+
+        self.assertEqual(sample["phi_obs"].flatten().tolist(), [0.0, 1.0, 2.0])
+
+    def test_recent_sample_rejects_nonpositive_size(self):
+        fifo = EncodedTransitionFIFO(capacity=5)
+        fifo.add(np.arange(1), encoded(np.arange(1)))
+
+        with self.assertRaisesRegex(ValueError, "recent sample size must be positive"):
+            fifo.sample_recent(0, "cpu")
+
+    def test_recent_sample_requires_pinned_first_transition(self):
+        fifo = EncodedTransitionFIFO(capacity=5)
+        fifo.add(np.arange(1, 3), encoded(np.arange(1, 3)))
+
+        with self.assertRaisesRegex(RuntimeError, "no pinned first transition"):
+            fifo.sample_recent(2, "cpu")
+
     def test_replay_stream_inserts_only_new_mid_episode_without_npz(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage, replay = make_replay(tmp, save_snapshot=False)
@@ -117,40 +156,90 @@ class EncodedActorFIFOTest(unittest.TestCase):
         agent.subsamples = None
         agent.batch_size_actor = 5
         agent.device = "cpu"
+        agent.use_recent_actor_support = False
+        agent.debug_fixed_dataset_updates = False
+        agent._sync_policy_encoder = lambda: None
+        agent._anchor_pointmaze_actor_batch = lambda batch: batch
+        agent._refresh_encoded_state_features = lambda batch: batch
         agent._encoded_actor_fifo = EncodedTransitionFIFO(capacity=10)
         agent._encoded_actor_fifo.add(np.arange(10), encoded(np.arange(10)))
         agent._update_encoded_actor_fifo = lambda replay_buffer: True
 
-        encoded_full, rewards, encoded_sub, sub_rewards = agent._get_actor_update_data(
+        actor_data = agent._get_actor_update_data(
             None, None, None, None, None, replay_buffer=object()
         )
 
-        self.assertIsNone(encoded_sub)
-        self.assertIsNone(sub_rewards)
-        self.assertEqual(float(encoded_full["phi_obs"][0, 0]), 0.0)
-        self.assertEqual(float(rewards[0, 0]), 300.0)
-        self.assertEqual((encoded_full["phi_obs"] == 0).sum().item(), 1)
+        self.assertIsNone(actor_data.subsample)
+        self.assertIsNone(actor_data.subsample_rewards)
+        self.assertEqual(float(actor_data.full["phi_obs"][0, 0]), 0.0)
+        self.assertEqual(float(actor_data.rewards[0, 0]), 300.0)
+        self.assertEqual((actor_data.full["phi_obs"] == 0).sum().item(), 1)
 
-    def test_nystrom_actor_data_uses_all_fifo_and_subsamples_first_at_index_zero(self):
+    def test_nystrom_actor_data_uses_bounded_support_and_pins_first(self):
         agent = RoverAgent.__new__(RoverAgent)
         agent.subsamples = 4
         agent.batch_size_actor = 6
         agent.device = "cpu"
+        agent.use_recent_actor_support = False
+        agent.debug_fixed_dataset_updates = False
+        agent._sync_policy_encoder = lambda: None
+        agent._anchor_pointmaze_actor_batch = lambda batch: batch
+        agent._refresh_encoded_state_features = lambda batch: batch
+        agent.subsampling_strategy = "random"
+        agent.discount = 0.99
+        agent.nystrom_candidate_multiplier = 1.0
+        agent.nystrom_cholesky_tolerance = 1e-6
+        agent.nystrom_cholesky_progress = False
+        agent.kernel_type = "inner_product"
+        agent.kernel_bandwidth_mult = None
+        agent.nystrom_synthetic_subsamples = False
         agent._encoded_actor_fifo = EncodedTransitionFIFO(capacity=10)
         agent._encoded_actor_fifo.add(np.arange(10), encoded(np.arange(10)))
         agent._update_encoded_actor_fifo = lambda replay_buffer: True
 
-        encoded_full, rewards, encoded_sub, sub_rewards = agent._get_actor_update_data(
+        actor_data = agent._get_actor_update_data(
             None, None, None, None, None, replay_buffer=object()
         )
 
-        self.assertEqual(encoded_full["phi_obs"].shape[0], 10)
-        self.assertEqual(float(encoded_full["phi_obs"][0, 0]), 0.0)
-        self.assertEqual((encoded_full["phi_obs"] == 0).sum().item(), 1)
-        self.assertEqual(encoded_sub["phi_obs"].shape[0], 4)
-        self.assertEqual(float(encoded_sub["phi_obs"][0, 0]), 0.0)
-        self.assertEqual(float(sub_rewards[0, 0]), 300.0)
-        self.assertEqual((encoded_sub["phi_obs"] == 0).sum().item(), 1)
+        self.assertEqual(actor_data.full["phi_obs"].shape[0], 6)
+        self.assertEqual(float(actor_data.full["phi_obs"][0, 0]), 0.0)
+        self.assertEqual((actor_data.full["phi_obs"] == 0).sum().item(), 1)
+        self.assertEqual(actor_data.subsample["phi_obs"].shape[0], 4)
+        self.assertEqual(float(actor_data.subsample["phi_obs"][0, 0]), 0.0)
+        self.assertEqual(float(actor_data.subsample_rewards[0, 0]), 300.0)
+        self.assertEqual((actor_data.subsample["phi_obs"] == 0).sum().item(), 1)
+
+    def test_recent_actor_support_and_landmarks_share_bounded_support(self):
+        agent = RoverAgent.__new__(RoverAgent)
+        agent.subsamples = 3
+        agent.batch_size_actor = 3
+        agent.device = "cpu"
+        agent.use_recent_actor_support = True
+        agent.subsampling_strategy = "random"
+        agent.nystrom_synthetic_subsamples = False
+        agent.discount = 0.99
+        agent.nystrom_candidate_multiplier = 1.0
+        agent.nystrom_cholesky_tolerance = 1e-6
+        agent.nystrom_cholesky_progress = False
+        agent.kernel_type = "inner_product"
+        agent.kernel_bandwidth_mult = None
+        agent._encoded_actor_fifo = EncodedTransitionFIFO(capacity=10)
+        agent._encoded_actor_fifo.add(np.arange(8), encoded(np.arange(8)))
+        agent._update_encoded_actor_fifo = lambda replay_buffer: True
+        agent._sync_policy_encoder = lambda: None
+        agent._anchor_pointmaze_actor_batch = lambda batch: batch
+        agent._refresh_encoded_state_features = lambda batch: batch
+
+        actor_data = agent._encoded_fifo_actor_update_data(object())
+
+        self.assertEqual(
+            actor_data.full["phi_obs"].flatten().tolist(),
+            [0.0, 5.0, 6.0, 7.0],
+        )
+        full_states = set(actor_data.full["phi_obs"].flatten().tolist())
+        subsample_states = actor_data.subsample["phi_obs"].flatten().tolist()
+        self.assertTrue(set(subsample_states).issubset(full_states))
+        self.assertEqual(subsample_states[0], 0.0)
 
     def test_visualizer_initial_distribution_uses_subsample_alpha(self):
         agent = type("Agent", (), {})()

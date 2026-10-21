@@ -9,7 +9,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from agent.rover_buffers import EncodedTransitionFIFO
-from agent.rover_nystrom_pointmaze_debug import RoverAgent as PointMazeRoverAgent
+from agent.rover_nystrom_debug import RoverAgent as PointMazeRoverAgent
 from agent.rover_nystrom_gridworld_debug import GridWorldSyntheticData, RoverAgent
 from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
 from sampling import sample_time_steps
@@ -204,6 +204,7 @@ class PointMazeSamplingStrategyTest(unittest.TestCase):
         agent.nystrom_cholesky_tolerance = 1e-6
         agent.nystrom_cholesky_progress = False
         agent.kernel_type = "inner_product"
+        agent.use_recent_actor_support = False
         agent.kernel_bandwidth = None
         agent.kernel_bandwidth_mult = None
         agent._encoded_actor_fifo = EncodedTransitionFIFO(8)
@@ -235,8 +236,39 @@ class PointMazeSamplingStrategyTest(unittest.TestCase):
         self.assertLessEqual(sampled["phi_obs"].shape[0], 4)
         self.assertEqual(float(sampled["phi_obs"][0]), 0.0)
 
+    def test_gridworld_recent_support_bounds_full_and_nystrom_data(self):
+        agent = RoverAgent.__new__(RoverAgent)
+        agent.device = "cpu"
+        agent.discount = 0.9
+        agent.nystrom_candidate_multiplier = 1.0
+        agent.nystrom_cholesky_tolerance = 1e-6
+        agent.nystrom_cholesky_progress = False
+        agent.kernel_type = "inner_product"
+        agent.kernel_bandwidth = None
+        agent.kernel_bandwidth_mult = None
+        agent.subsampling_strategy = "random"
+        agent.use_recent_actor_support = True
+        agent.subsamples = 2
+        agent.batch_size_actor = 3
+        agent.nystrom_synthetic_subsamples = False
+        agent._encoded_actor_fifo = EncodedTransitionFIFO(10)
+        agent._encoded_actor_fifo.add(np.arange(8), encoded(np.arange(8)))
+        agent._update_encoded_actor_fifo = lambda replay_buffer: True
+
+        actor_data = agent._encoded_fifo_actor_update_data(object())
+
+        self.assertEqual(
+            actor_data.full["phi_obs"].flatten().tolist(),
+            [0.0, 5.0, 6.0, 7.0],
+        )
+        full_states = set(actor_data.full["phi_obs"].flatten().tolist())
+        subsample_states = actor_data.subsample["phi_obs"].flatten().tolist()
+        self.assertTrue(set(subsample_states).issubset(full_states))
+        self.assertEqual(subsample_states[0], 0.0)
+
     def test_pointmaze_fifo_update_records_episode_boundaries(self):
         agent = PointMazeRoverAgent.__new__(PointMazeRoverAgent)
+        agent.embeddings = False
         agent._encoded_actor_fifo = EncodedTransitionFIFO(8)
         agent._encoded_fifo_replay_marker = None
         agent.encoded_fifo_encode_batch_size = 8

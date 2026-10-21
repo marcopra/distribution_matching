@@ -29,6 +29,7 @@ def make_agent():
     agent.encoded_fifo_encode_batch_size = 2
     agent.encoded_fifo_cuda_oom_splits = 2
     agent.batch_size_actor = 3
+    agent.use_recent_actor_support = False
     agent.subsamples = 2
     agent.nystrom_synthetic_subsamples = False
     agent.subsampling_strategy = "random"

@@ -1,0 +1,16 @@
+# @package _global_
+
+env:
+  name: "PointMaze_Medium-v3"
+  render_mode: rgb_array
+  continuing_task: false
+  pointmaze:
+    top_down_camera: true
+    discrete_actions: true
+    direct_velocity_actions: false
+    only_xy_position: false
+    only_agent_state: true
+    start_position: [-2.0, 2.0]
+    start_position_variance: 0.0
+    reward_type: sparse
+    goal_position: [0.0, 0.0]

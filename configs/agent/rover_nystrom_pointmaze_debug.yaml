@@ -11,6 +11,7 @@ lambda_reg: 1e-6
 lr_T: 1e-4
 batch_size: 1024
 batch_size_actor: 10000
+use_recent_actor_support: false # Pin first transition, then use latest batch_size_actor transitions.
 subsamples: 4000
 pca_truncation: 500
 nystrom_synthetic_subsamples: false # true bypasses FIFO strategy and uses fixed landmarks

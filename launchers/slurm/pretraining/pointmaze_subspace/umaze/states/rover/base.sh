@@ -61,4 +61,4 @@ python pretrain_parallel.py \
     use_wandb=true \
     wandb_project=pointmaze_subspace \
     wandb_tag=rover_umaze_states \
-    wandb_run_name="umaze_states_rover_${RUN_LABEL}_seed${SEED}" agent.pca_truncation=1000 agent.lambda_reg=1e-3 agent.nystrom_cholesky_tolerance=1e-6
+    wandb_run_name="umaze_states_rover_${RUN_LABEL}_seed${SEED}" agent.pca_truncation=1000 agent.lambda_reg=1e-3 agent.nystrom_cholesky_tolerance=1e-6 agent.use_recent_actor_support=true
