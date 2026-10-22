@@ -172,6 +172,7 @@ class EncodedTransitionFIFO:
         return max(median * float(multiplier), 1e-12)
 
     @staticmethod
+    @torch.no_grad()
     def _pivoted_cholesky_indices(
         features,
         size,
@@ -180,19 +181,25 @@ class EncodedTransitionFIFO:
         kernel_type="inner_product",
         actions=None,
         bandwidth=None,
-        show_progress=True,
+        show_progress=False,
+        device=None,
     ):
-        """Select diverse rows for an inner-product or Gaussian Nyström approximation."""
-        features = features.detach().to(device="cpu", dtype=torch.float32).reshape(features.shape[0], -1)
+        """Greedy global pivots with contiguous, action-local Cholesky factors."""
+        assert features.ndim >= 2 and features.is_floating_point()
+        assert int(size) >= 0 and np.isfinite(tolerance) and tolerance >= 0
+        features = features.detach().to(device=device, dtype=torch.float32).reshape(features.shape[0], -1)
+        assert torch.isfinite(features).all(), "Non-finite Cholesky features"
         kernel_type = str(kernel_type).lower()
         if kernel_type not in ("inner_product", "gaussian"):
             raise ValueError("pivoted Cholesky supports inner_product and gaussian kernels")
         if actions is not None:
-            actions = torch.as_tensor(actions, dtype=torch.long, device="cpu").reshape(-1)
+            actions = torch.as_tensor(actions, device="cpu").reshape(-1)
+            assert not actions.is_floating_point() and not actions.is_complex()
+            assert (actions >= 0).all(), "Negative Cholesky action index"
             if actions.shape[0] != features.shape[0]:
                 raise ValueError("actions must align with pivoted Cholesky features")
         if kernel_type == "gaussian":
-            if bandwidth is None or bandwidth <= 0.0:
+            if bandwidth is None or not np.isfinite(bandwidth) or bandwidth <= 0.0:
                 raise ValueError("Gaussian pivoted Cholesky requires a positive bandwidth")
             if actions is None:
                 raise ValueError("Gaussian pivoted Cholesky requires action indices")
@@ -204,12 +211,25 @@ class EncodedTransitionFIFO:
         residual = (
             torch.sum(features * features, dim=1)
             if kernel_type == "inner_product"
-            else torch.ones(count, dtype=features.dtype)
+            else features.new_ones(count)
         )
         scale = max(float(residual.max().item()), torch.finfo(residual.dtype).eps)
         stop_threshold = float(tolerance) * scale
-        factor = torch.zeros((count, target), dtype=features.dtype)
-        available = torch.ones(count, dtype=torch.bool)
+        assert torch.isfinite(residual).all(), "Non-finite Cholesky diagonal"
+        # Preserve original candidate order inside each action, including ties.
+        rows = ([torch.arange(count)] if actions is None else
+                [torch.nonzero(actions == action, as_tuple=True)[0] for action in torch.unique(actions)])
+        routing = torch.empty((count, 2), dtype=torch.long)
+        for group, indices in enumerate(rows):
+            routing[indices, 0] = group
+            routing[indices, 1] = torch.arange(len(indices))
+        rows = [indices.to(features.device) for indices in rows]
+        blocks = [features.index_select(0, indices) for indices in rows]
+        # Grow only the selected action's factor. Unwritten directions are never read.
+        factors = [features.new_empty((0, len(indices))) for indices in rows]
+        ranks = [0] * len(rows)
+        available = torch.ones(count, dtype=torch.bool, device=features.device)
+        del features
         selected = []
         pivot_residuals = []
 
@@ -220,59 +240,67 @@ class EncodedTransitionFIFO:
             leave=False,
             disable=not bool(show_progress),
         ) as progress:
-            progress.set_postfix(candidates=count, threshold=f"{stop_threshold:.2e}")
+            progress.set_postfix(candidates=count, threshold=f"{stop_threshold:.2e}", refresh=False)
             for column_index in range(target):
                 if column_index == 0 and force_first:
                     pivot = 0
+                    pivot_residual = float(residual[pivot].item())
                 else:
-                    scores = residual.masked_fill(~available, -torch.inf)
-                    pivot = int(torch.argmax(scores).item())
-                    if tolerance > 0.0 and float(scores[pivot].item()) <= stop_threshold:
+                    value, index = residual.masked_fill(~available, -torch.inf).max(dim=0)
+                    # One device-to-host synchronization for both value and index.
+                    pivot_residual, pivot = torch.stack((value.double(), index.double())).tolist()
+                    pivot = int(pivot)
+                    if tolerance > 0.0 and pivot_residual <= stop_threshold:
                         progress.set_postfix(
                             candidates=count,
-                            residual=f"{float(scores[pivot].item()):.2e}",
+                            residual=f"{pivot_residual:.2e}",
                             stopped="tolerance",
+                            refresh=False,
                         )
                         break
 
-                pivot_residual = max(float(residual[pivot].item()), 0.0)
+                assert np.isfinite(pivot_residual), "Non-finite Cholesky residual"
+                pivot_residual = max(pivot_residual, 0.0)
                 selected.append(pivot)
                 pivot_residuals.append(pivot_residual)
                 available[pivot] = False
-                progress.update(1)
-                progress.set_postfix(
-                    candidates=count,
-                    residual=f"{pivot_residual:.2e}",
-                    threshold=f"{stop_threshold:.2e}",
-                )
+                if progress.update(1):
+                    progress.set_postfix(
+                        candidates=count,
+                        residual=f"{pivot_residual:.2e}",
+                        threshold=f"{stop_threshold:.2e}",
+                        refresh=False,
+                    )
 
                 # A forced initial point can have zero kernel norm. Keep it in row
                 # zero for alpha support, but do not use it as a Cholesky direction.
-                if pivot_residual <= torch.finfo(features.dtype).eps:
+                if pivot_residual <= torch.finfo(residual.dtype).eps:
                     residual[pivot] = 0.0
                     continue
 
+                group, local_pivot = routing[pivot].tolist()
+                block, rank, factor = blocks[group], ranks[group], factors[group]
+                if rank == len(factor):
+                    capacity = min(target, len(block), max(32, 2 * rank))
+                    grown = block.new_empty((capacity, len(block)))
+                    grown[:rank].copy_(factor)
+                    factors[group] = factor = grown
                 if kernel_type == "inner_product":
-                    kernel_column = features @ features[pivot]
-                    # For compact state-action data, ψ(s,a) is represented by
-                    # φ(s) plus an action id. Its inner product is zero across
-                    # different actions.
-                    if actions is not None:
-                        kernel_column *= actions == actions[pivot]
+                    kernel_column = block @ block[local_pivot]
                 else:
-                    squared_distance = torch.sum(
-                        (features - features[pivot]).square(), dim=1
-                    )
-                    kernel_column = torch.exp(
-                        -squared_distance / (2.0 * float(bandwidth) ** 2)
-                    )
-                    kernel_column *= actions == actions[pivot]
-                if column_index:
-                    kernel_column -= factor[:, :column_index] @ factor[pivot, :column_index]
-                factor[:, column_index] = kernel_column / np.sqrt(pivot_residual)
-                residual.sub_(factor[:, column_index].square()).clamp_(min=0.0)
+                    kernel_column = (block - block[local_pivot]).square_().sum(dim=1)
+                    kernel_column.neg_().div_(2.0 * float(bandwidth) ** 2).exp_()
+                if rank:
+                    kernel_column -= factor[:rank].T @ factor[:rank, local_pivot]
+                factor[rank].copy_(kernel_column).div_(np.sqrt(pivot_residual))
+                indices = rows[group]
+                updated = residual.index_select(0, indices)
+                updated.sub_(factor[rank].square()).clamp_(min=0.0)
+                residual.index_copy_(0, indices, updated)
+                ranks[group] += 1
                 residual[pivot] = 0.0
 
+        assert torch.isfinite(residual).all(), "Non-finite Cholesky residual"
         return (
             torch.as_tensor(selected, dtype=torch.long),
             np.asarray(pivot_residuals, dtype=np.float32),
@@ -290,6 +318,7 @@ class EncodedTransitionFIFO:
         kernel_bandwidth_mult,
         show_progress,
         kernel_feature_key=None,
+        device=None,
     ):
         if size <= 0:
             raise ValueError("sample size must be positive")
@@ -368,6 +397,7 @@ class EncodedTransitionFIFO:
             actions=actions,
             bandwidth=bandwidth,
             show_progress=show_progress,
+            device=device,
         )
         selected = candidate_indices[local_indices]
         self.last_pivoted_cholesky_residuals = residuals
@@ -401,9 +431,10 @@ class EncodedTransitionFIFO:
         kernel_type="inner_product",
         kernel_bandwidth=None,
         kernel_bandwidth_mult=None,
-        cholesky_progress=True,
+        cholesky_progress=False,
         kernel_feature_key=None,
         support=None,
+        cholesky_device=None,
     ):
         strategy = str(strategy).lower()
         self.last_pivoted_cholesky_residuals = None
@@ -439,6 +470,7 @@ class EncodedTransitionFIFO:
                     encoded, size, pin_first, candidate_multiplier, cholesky_tolerance,
                     kernel_type, kernel_bandwidth, kernel_bandwidth_mult,
                     cholesky_progress, kernel_feature_key,
+                    device=device if cholesky_device is None else cholesky_device,
                 )
             return ({key: value[selected].to(device) for key, value in support.items()}
                     if support is not None else self._gather(selected, device))

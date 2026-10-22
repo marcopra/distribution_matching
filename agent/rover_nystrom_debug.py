@@ -136,7 +136,7 @@ class RoverAgent:
                  subsampling_strategy: str = "random",
                  nystrom_candidate_multiplier: float = 5.0,
                  nystrom_cholesky_tolerance: float = 1e-6,
-                 nystrom_cholesky_progress: bool = True,
+                 nystrom_cholesky_progress: bool = False,
                  nystrom_grid_border_margin: float = 0.05,
                  nystrom_grid_oversample: float = 2.0,
                  nystrom_exact_grid: bool = False,
@@ -1519,6 +1519,8 @@ class RoverAgent:
             kernel_bandwidth=getattr(self, "_active_kernel_bandwidth", None),
             kernel_bandwidth_mult=self.kernel_bandwidth_mult,
             cholesky_progress=self.nystrom_cholesky_progress,
+            # CPU sidecar gathering must not move pivot computation off the GPU.
+            cholesky_device=self.device,
             kernel_feature_key=getattr(self, "nystrom_kernel_feature_key", None),
             support=support,
         )

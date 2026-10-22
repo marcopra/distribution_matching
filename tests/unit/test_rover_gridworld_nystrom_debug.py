@@ -236,6 +236,18 @@ class PointMazeSamplingStrategyTest(unittest.TestCase):
         self.assertLessEqual(sampled["phi_obs"].shape[0], 4)
         self.assertEqual(float(sampled["phi_obs"][0]), 0.0)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_pointmaze_cuda_sampling_keeps_requested_cpu_output(self):
+        from unittest.mock import patch
+        agent = self.make_agent()
+        agent.device = "cuda"
+        agent.subsampling_strategy = "pivoted_cholesky"
+        sampler = EncodedTransitionFIFO._pivoted_cholesky_indices
+        with patch.object(EncodedTransitionFIFO, "_pivoted_cholesky_indices", wraps=sampler) as sampled:
+            batch, _ = agent._sample_encoded_actor_data(4, include_first=True, device="cpu")
+        self.assertEqual(sampled.call_args.kwargs["device"], "cuda")
+        self.assertTrue(all(value.device.type == "cpu" for value in batch.values()))
+
     def test_gridworld_recent_support_bounds_full_and_nystrom_data(self):
         agent = RoverAgent.__new__(RoverAgent)
         agent.device = "cpu"
