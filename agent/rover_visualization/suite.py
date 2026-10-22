@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import traceback
 from typing import Callable, Optional
 
 from .domains import (
@@ -81,6 +82,7 @@ class RoverDebugVisualizerSuite:
                 self.domain_visualizer.save(step)
             except Exception as exc:
                 print(f"⚠ Could not generate domain debug plot at step {step}: {exc}")
+                traceback.print_exc()
 
         return metrics
 

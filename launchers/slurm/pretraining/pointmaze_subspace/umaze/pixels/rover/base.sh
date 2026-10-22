@@ -18,19 +18,21 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 SEED="${SEED:-1}"
 DEVICE="${DEVICE:-cuda}"
-BATCH_SIZE_ACTOR="${BATCH_SIZE_ACTOR:-25000}"
-FEATURE_DIM="${FEATURE_DIM:-2048}"
+BATCH_SIZE_ACTOR="${BATCH_SIZE_ACTOR:-80000}"
+FEATURE_DIM="${FEATURE_DIM:-1024}"
 SUBSAMPLES="${SUBSAMPLES:-10000}"
+LAMBDA_REG="${LAMBDA_REG:-1e-3}"
+CHOLESKY_TOLERANCE="${CHOLESKY_TOLERANCE:-1e-6}"
 SINK_IDX="${SINK_IDX:-0}"
 
-# Index 0 = reference schedule; index 1 = alternative schedule.
+# Index 0 matches the saved run; index 1 is a lower-sink comparison.
 sink_schedules=(
-    "linear(0.0,1.0,300000,750000)"
-    "linear(0.0,0.8,250000)"
+    "linear(0.0,5.0,50000,250000)"
+    "linear(0.0,1.0,50000,250000)"
 )
 SINK_SCHEDULE="${sink_schedules[${SINK_IDX}]}"
 DYNAMICS_KERNEL_TYPE="${DYNAMICS_KERNEL_TYPE:-inner_product}"
-RUN_LABEL="${DYNAMICS_KERNEL_TYPE}_batch${BATCH_SIZE_ACTOR}_dim${FEATURE_DIM}_nys${SUBSAMPLES}_sink${SINK_IDX}"
+RUN_LABEL="${DYNAMICS_KERNEL_TYPE}_batch${BATCH_SIZE_ACTOR}_dim${FEATURE_DIM}_nys${SUBSAMPLES}_lambda${LAMBDA_REG}_chol${CHOLESKY_TOLERANCE}_sink${SINK_IDX}"
 
 python pretrain_parallel.py \
     --config-name=pretrain_parallel/pointmaze_subspace_pixels \
@@ -38,12 +40,12 @@ python pretrain_parallel.py \
     'env.pointmaze.start_position=[-1.0,1.0]' \
     seed="${SEED}" \
     device="${DEVICE}" \
-    num_train_frames=1000000 \
+    num_train_frames=250000 \
     eval_every_frames=20000 \
     plot_eval_trajectories=true \
     save_eval_best=true \
-    save_snapshot=false \
-    'snapshots=[250000,500000,750000,1000000]' \
+    save_snapshot=true \
+    'snapshots=[100000,250000]' \
     agent.batch_size_actor="${BATCH_SIZE_ACTOR}" \
     agent.dynamics_kernel_input=pixels \
     agent.dynamics_encoder_mode=trainable \
@@ -53,7 +55,10 @@ python pretrain_parallel.py \
     agent.train_coverage_encoder=false \
     agent.feature_dim="${FEATURE_DIM}" \
     agent.subsamples="${SUBSAMPLES}" \
-    agent.pca_truncation="${SUBSAMPLES}" \
+    agent.pca_truncation=1000 \
+    agent.lambda_reg="${LAMBDA_REG}" \
+    agent.nystrom_cholesky_tolerance="${CHOLESKY_TOLERANCE}" \
+    agent.use_recent_actor_support=true \
     "agent.sink_schedule='${SINK_SCHEDULE}'" \
     snapshot_dir="models/pointmaze_subspace/umaze/pixels/rover/${RUN_LABEL}/seed_${SEED}" \
     use_wandb=true \

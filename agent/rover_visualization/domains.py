@@ -1538,12 +1538,18 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             current = getattr(current, "env", None)
         raise RuntimeError("PointMaze environment does not expose max_episode_steps")
 
+    def _policy_query_uses_proprio(self) -> bool:
+        return (
+            getattr(self.agent, "obs_type", None) == "pixels"
+            and (
+                getattr(self.agent, "dynamics_kernel_input", None) == "states"
+                or getattr(self.agent, "pmd_warm_start", False)
+            )
+        )
+
     def _policy_query_meta(self, time_step) -> Optional[dict]:
-        """Attach full proprioception when policy dynamics use states with pixels."""
-        if (
-            getattr(self.agent, "obs_type", None) != "pixels"
-            or getattr(self.agent, "dynamics_kernel_input", None) != "states"
-        ):
+        """Attach state needed by state dynamics and PMD warm-start queries."""
+        if not self._policy_query_uses_proprio():
             return None
         dimensions = int(getattr(self.agent, "dynamics_state_dim", 4))
         proprio = np.asarray(
@@ -1613,10 +1619,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         for xy in points:
             obs = self._observation_for_policy_probe_point(xy)
             meta = None
-            if (
-                getattr(self.agent, "obs_type", None) == "pixels"
-                and getattr(self.agent, "dynamics_kernel_input", None) == "states"
-            ):
+            if self._policy_query_uses_proprio():
                 dimensions = int(getattr(self.agent, "dynamics_state_dim", 4))
                 coordinates = np.zeros(dimensions, dtype=np.float32)
                 coordinates[:2] = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
