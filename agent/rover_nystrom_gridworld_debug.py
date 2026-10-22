@@ -205,7 +205,7 @@ class GridWorldSyntheticData:
         agent._sync_policy_encoder()
         batch = self.subsample_actor_batch()
         transitions = (batch[0], batch[1], batch[3], torch.ones_like(batch[3]), batch[2])
-        encoded = agent._encode_actor_transition_batch_with_retries(transitions)
+        encoded = agent._encode_actor_transitions(transitions)
         return encoded, encoded.get("reward")
 
 
@@ -281,11 +281,10 @@ class RoverAgent(PointMazeRoverAgent):
             subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
             source = "synthetic GridWorld landmarks"
         elif self.use_recent_actor_support:
-            actor_fifo = self._actor_support_fifo(full)
             subsample, subsample_rewards = self._sample_encoded_actor_data(
                 self._nystrom_subsample_count(),
                 include_first=True,
-                actor_fifo=actor_fifo,
+                support=full,
             )
             source = f"recent support {self.subsampling_strategy} landmarks"
         else:

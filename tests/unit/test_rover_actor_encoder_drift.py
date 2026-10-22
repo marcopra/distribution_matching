@@ -27,7 +27,6 @@ def make_agent():
     agent.encoder = ChangingEncoder()
     agent.policy_encoder = ChangingEncoder()
     agent.encoded_fifo_encode_batch_size = 2
-    agent.encoded_fifo_cuda_oom_splits = 2
     agent.batch_size_actor = 3
     agent.use_recent_actor_support = False
     agent.subsamples = 2
@@ -69,10 +68,11 @@ def test_actor_support_and_landmarks_use_current_encoder_including_pinned_reset(
     torch.testing.assert_close(agent._encoded_actor_fifo._first["phi_obs"], original_pinned)
 
 
-def test_old_encoded_batches_without_raw_states_remain_loadable():
+def test_learned_support_refresh_requires_raw_states():
     agent = make_agent()
     legacy = {"phi_obs": torch.ones(2,2), "phi_next": torch.ones(2,2)}
-    assert agent._refresh_encoded_state_features(legacy) is legacy
+    with pytest.raises(AssertionError, match="raw observations"):
+        agent._refresh_encoded_state_features(legacy)
 
 
 def test_subspace_refresh_keeps_state_dynamics_independent_of_image_encoder():
@@ -81,6 +81,7 @@ def test_subspace_refresh_keeps_state_dynamics_independent_of_image_encoder():
     agent.obs_shape = (4,)
     agent.dynamics_kernel_input = "states"
     agent.dynamics_state_dim = 4
+    agent.uses_state_dynamics_encoder = False
     agent.compute_dtype = torch.float32
     agent.coverage_kernel_input = "states"
     agent.coverage_state_indices = (0, 1)
@@ -177,14 +178,14 @@ def test_pixel_support_refresh_is_chunked_and_preserves_cached_coverage():
                    torch.ones(3, 1), observations + 1)
     encoded = agent._encode_actor_transition_batch(transitions)
     encoded["coverage_next_features"] = torch.randn(3, 4)
-    original_encode = agent._encode_actor_transition_batch
+    original_encode = agent._encode_actor_dynamics_features
     sizes = []
 
     def bounded_encode(batch):
         sizes.append(len(batch[0]))
         return original_encode(batch)
 
-    agent._encode_actor_transition_batch = bounded_encode
+    agent._encode_actor_dynamics_features = bounded_encode
     agent.policy_encoder.offset.fill_(10.)
     refreshed = agent._refresh_encoded_state_features(encoded)
     assert sizes == [2, 1]
@@ -192,3 +193,33 @@ def test_pixel_support_refresh_is_chunked_and_preserves_cached_coverage():
     assert refreshed["coverage_next_features"] is encoded["coverage_next_features"]
     torch.testing.assert_close(refreshed["phi_obs"],
         agent.policy_encoder.encode_and_project(observations))
+
+
+def test_encoding_uses_fixed_chunks_and_propagates_oom():
+    agent = make_agent()
+    obs = torch.ones(5, 2)
+    batch = (obs, torch.zeros(5, 1, dtype=torch.long), torch.zeros(5, 1),
+             torch.ones(5, 1), obs + 1)
+    sizes = []
+    original = agent._encode_actor_transition_batch
+    def encode(chunk):
+        sizes.append(len(chunk[0]))
+        return original(chunk)
+    agent._encode_actor_transition_batch = encode
+    result = agent._encode_actor_transitions(batch)
+    assert sizes == [2, 2, 1] and len(result["phi_obs"]) == 5
+    def fail(chunk):
+        raise torch.OutOfMemoryError("deliberate CUDA out of memory")
+    agent._encode_actor_transition_batch = fail
+    with pytest.raises(torch.OutOfMemoryError, match="deliberate"):
+        agent._encode_actor_transitions(batch)
+
+
+def test_parallel_act_propagates_invalid_policy():
+    agent = RoverAgent.__new__(RoverAgent)
+    agent.num_expl_steps, agent.epsilon_schedule, agent.n_actions = 0, 0., 2
+    def fail(*args, **kwargs):
+        raise AssertionError("invalid policy")
+    agent._compute_action_probs_batch = fail
+    with pytest.raises(AssertionError, match="invalid policy"):
+        agent.act_parallel(np.ones((2, 2)), None, [1, 1], False)

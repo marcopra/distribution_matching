@@ -1,4 +1,4 @@
-"""Nyström occupancy and gradient calculations for projected state coverage."""
+"""Coverage feature selection and Gram construction for streamed ROVER."""
 
 from __future__ import annotations
 
@@ -6,10 +6,7 @@ from numbers import Integral
 
 import torch
 
-from agent.rover_sink import (
-    nystrom_resolvent_coefficients,
-    orthogonal_sink_residual_gram,
-)
+from agent.rover_sink import kernel_sink_gram
 
 
 def normalize_coverage_state_indices(state_indices, state_dim: int) -> tuple[int, ...]:
@@ -52,26 +49,11 @@ def normalize_coverage_state_indices(state_indices, state_dim: int) -> tuple[int
 
 
 class SubspaceCoverageMatcher:
-    """Evaluate occupancy in coverage features using separate dynamics coefficients."""
+    """Build coverage Gram matrices in the selected state or image features."""
 
     def __init__(self, gamma: float, kernel_fn):
         self.gamma = float(gamma)
         self.kernel_fn = kernel_fn
-
-    @staticmethod
-    def _resolvent_coefficients(
-        H: torch.Tensor,
-        pi: torch.Tensor,
-        E: torch.Tensor,
-        alpha: torch.Tensor,
-        B_nystrom: torch.Tensor,
-        gamma: float,
-    ) -> torch.Tensor:
-        # H and E use the configured dynamics kernel. The coverage Gram matrix
-        # below may use an independent coordinate or learned feature space.
-        return nystrom_resolvent_coefficients(
-            H, pi, E, alpha, B_nystrom, gamma,
-        )
 
     @staticmethod
     def _coverage_state_features(
@@ -94,135 +76,11 @@ class SubspaceCoverageMatcher:
             )
         return projected
 
-    def _coverage_gram(
-        self,
-        *,
-        phi_sub_next_obs: torch.Tensor,
-        psi_sub_obs_action: torch.Tensor,
-        sink_norm: float,
-        state_indices: tuple[int, ...],
-        coverage_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def coverage_gram(self, *, phi_sub_next_obs, sink_coefficients, sink_norm,
+                      state_indices, coverage_features=None):
         state_features = self._coverage_state_features(
-            phi_sub_next_obs, state_indices, coverage_features
+            phi_sub_next_obs, state_indices, coverage_features,
         )
-        state_gram = self.kernel_fn(state_features, state_features)
-        sink_coefficients = psi_sub_obs_action.sum(dim=1)
-        if not torch.allclose(
-            sink_coefficients,
-            torch.ones_like(sink_coefficients),
-            atol=1e-5,
-            rtol=1e-5,
-        ):
-            raise ValueError(
-                "ROVER sink augmentation requires unit-mass dynamics state-action "
-                "features: every row of psi(s, a) must sum to 1"
-            )
-        return orthogonal_sink_residual_gram(
-            state_gram, sink_coefficients, sink_norm
-        )
-
-    def compute_nystrom_subspace_occupancy_loss(
-        self,
-        *,
-        phi_sub_next_obs: torch.Tensor,
-        psi_sub_obs_action: torch.Tensor,
-        H: torch.Tensor,
-        pi: torch.Tensor,
-        E: torch.Tensor,
-        alpha: torch.Tensor,
-        sink_norm: float,
-        B_nystrom: torch.Tensor,
-        state_indices: tuple[int, ...],
-        coverage_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return squared RKHS norm of discounted projected occupancy."""
-        coefficients = self._resolvent_coefficients(
-            H, pi, E, alpha, B_nystrom, self.gamma,
-        )
-        coverage_gram = self._coverage_gram(
-            phi_sub_next_obs=phi_sub_next_obs,
-            psi_sub_obs_action=psi_sub_obs_action,
-            sink_norm=sink_norm,
-            state_indices=state_indices,
-            coverage_features=coverage_features,
-        )
-        occupancy_coefficients = (1.0 - self.gamma) * coefficients
-        return (occupancy_coefficients.T @ coverage_gram @ occupancy_coefficients).squeeze()
-
-    def compute_gradient_coefficient_nystrom_subspace(
-        self,
-        *,
-        phi_sub_next_obs: torch.Tensor,
-        psi_sub_obs_action: torch.Tensor,
-        H: torch.Tensor,
-        pi: torch.Tensor,
-        E: torch.Tensor,
-        alpha: torch.Tensor,
-        sink_norm: float,
-        B_nystrom: torch.Tensor,
-        eig_vecs_r: torch.Tensor,
-        state_indices: tuple[int, ...],
-        coverage_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return Nyström PMD gradient for occupancy in selected state features."""
-        m = phi_sub_next_obs.shape[0]
-        r = eig_vecs_r.shape[1]
-        eps = 1e-6
-        beta = 2.0 * self.gamma * ((1.0 - self.gamma) ** 2)
-
-        M = H * (E @ pi.T)
-        BM = B_nystrom @ M
-        del M
-        BM.mul_(-self.gamma)
-        diagonal = torch.arange(m, device=BM.device)
-        BM[diagonal, diagonal] += 1.0
-        S_r = eig_vecs_r.T @ BM @ eig_vecs_r
-        del BM
-
-        S_r_reg = S_r.clone()
-        diagonal_r = torch.arange(r, device=S_r_reg.device)
-        S_r_reg[diagonal_r, diagonal_r] += eps
-
-        coverage_gram = self._coverage_gram(
-            phi_sub_next_obs=phi_sub_next_obs,
-            psi_sub_obs_action=psi_sub_obs_action,
-            sink_norm=sink_norm,
-            state_indices=state_indices,
-            coverage_features=coverage_features,
-        )
-        K_rr = eig_vecs_r.T @ coverage_gram[:-1, :-1] @ eig_vecs_r
-        k_re = eig_vecs_r.T @ coverage_gram[:-1, -1:]
-        k_er_T = coverage_gram[-1:, :-1] @ eig_vecs_r
-        k_ee = coverage_gram[-1:, -1:]
-        del coverage_gram
-
-        alpha_r = eig_vecs_r.T @ alpha
-        alpha_e = torch.ones((1, 1), device=alpha.device, dtype=alpha.dtype)
-        z_r = torch.linalg.solve(S_r, alpha_r)
-        del S_r, alpha_r
-        z_e = alpha_e / (1.0 - self.gamma)
-
-        h_r = K_rr @ z_r
-        del K_rr
-        h_r.add_(k_re * z_e)
-        del k_re
-        h_e = k_er_T @ z_r
-        del k_er_T, z_r
-        h_e.add_(k_ee * z_e)
-        del k_ee, z_e
-
-        tmp_main = torch.linalg.solve(S_r_reg.T, h_r)
-        del S_r_reg, h_r
-        tmp_sink = h_e / (1.0 - self.gamma + eps)
-        del h_e
-
-        gradient = torch.empty(
-            (B_nystrom.shape[1] + 1, 1),
-            device=B_nystrom.device,
-            dtype=B_nystrom.dtype,
-        )
-        gradient[:-1] = B_nystrom.T @ (eig_vecs_r @ tmp_main)
-        gradient[-1:] = tmp_sink
-        gradient.mul_(beta)
-        return gradient
+        assert torch.allclose(sink_coefficients, torch.ones_like(sink_coefficients),
+                              atol=1e-5, rtol=1e-5), "ROVER sink augmentation requires unit-mass dynamics features"
+        return kernel_sink_gram(self.kernel_fn, state_features, sink_coefficients, sink_norm)

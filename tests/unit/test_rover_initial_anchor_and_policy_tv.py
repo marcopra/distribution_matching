@@ -26,6 +26,7 @@ def test_pointmaze_actor_anchor_keeps_replay_real_and_coverage_aligned():
     agent.__dict__.update(make_agent().__dict__)
     agent.obs_shape = (4,)
     agent.dynamics_kernel_input = "states"
+    agent.uses_state_dynamics_encoder = False
     agent.dynamics_state_dim = 4
     agent.compute_dtype = torch.float32
     agent.coverage_kernel_input = "states"

@@ -4,7 +4,7 @@ import torch
 import utils
 from agent.rover_matchers import DistributionMatcher
 from agent.rover_networks import FrozenCNNFeatureEncoder
-from agent.rover_sink import orthogonal_sink_residual_gram
+from agent.rover_sink import orthogonal_sink_residual_gram, nystrom_resolvent_coefficients, kernel_sink_gram
 from agent.rover_subspace_matchers import SubspaceCoverageMatcher
 
 
@@ -26,10 +26,10 @@ def test_subspace_sink_requires_unit_mass_dynamics_features():
         gamma=0.6,
         kernel_fn=utils.build_kernel_fn("gaussian", bandwidth=0.8),
     )
-    with pytest.raises(ValueError, match="unit-mass dynamics state-action"):
-        matcher._coverage_gram(
+    with pytest.raises(AssertionError, match="unit-mass dynamics"):
+        matcher.coverage_gram(
             phi_sub_next_obs=torch.tensor([[0.2, 0.3, 0.0]]),
-            psi_sub_obs_action=torch.tensor([[0.2, 0.3]]),
+            sink_coefficients=torch.tensor([0.5]),
             sink_norm=0.1,
             state_indices=(0, 1),
         )
@@ -106,16 +106,9 @@ def test_gaussian_nystrom_loss_matches_state_plus_sink_decomposition():
     B_nystrom = torch.eye(3, dtype=dtype, device=device)
     sink_norm = 0.2
 
-    actual = matcher.compute_nu_pi_nystrom_kernel_loss(
-        phi_sub_next_obs=phi_sub_next_obs,
-        psi_sub_obs_action=psi_sub_obs_action,
-        H=H,
-        pi=pi,
-        E=E,
-        alpha=alpha,
-        sink_norm=sink_norm,
-        B_nystrom=B_nystrom,
-    )
+    z = nystrom_resolvent_coefficients(B_nystrom @ (H * (E @ pi.T)), alpha, matcher.gamma)
+    gram = kernel_sink_gram(matcher.state_kernel, xy, psi_sub_obs_action.sum(1), sink_norm)
+    actual = ((1 - matcher.gamma) ** 2 * (z.T @ gram @ z)).squeeze()
 
     M = H * (E @ pi.T)
     weights = (1.0 - matcher.gamma) * torch.linalg.solve(
@@ -150,22 +143,10 @@ def test_subspace_matcher_gaussian_loss_uses_orthogonal_sink_decomposition():
     B_nystrom = torch.eye(3, dtype=dtype)
     sink_norm = 0.2
 
-    actual = matcher.compute_nystrom_subspace_occupancy_loss(
-        phi_sub_next_obs=phi_sub_next_obs,
-        psi_sub_obs_action=psi,
-        H=H,
-        pi=pi,
-        E=E,
-        alpha=alpha,
-        sink_norm=sink_norm,
-        B_nystrom=B_nystrom,
-        state_indices=(0, 1),
-        coverage_features=xy,
-    )
-
-    coefficients = matcher._resolvent_coefficients(
-        H, pi, E, alpha, B_nystrom, matcher.gamma
-    )
+    coefficients = nystrom_resolvent_coefficients(B_nystrom @ (H * (E @ pi.T)), alpha, matcher.gamma)
+    gram = matcher.coverage_gram(phi_sub_next_obs=phi_sub_next_obs, sink_coefficients=psi.sum(1),
+                                sink_norm=sink_norm, state_indices=(0, 1), coverage_features=xy)
+    actual = ((1 - matcher.gamma) ** 2 * (coefficients.T @ gram @ coefficients)).squeeze()
     weights = (1.0 - matcher.gamma) * coefficients
     state_gram = matcher.kernel_fn(xy, xy)
     sink_mass = 1.0 - (psi.sum(dim=1, keepdim=True).T @ weights[:-1]).squeeze()
@@ -198,27 +179,9 @@ def test_inner_product_nystrom_loss_preserves_explicit_occupancy_norm():
     B_nystrom = torch.eye(3, dtype=dtype)
     sink_norm = 0.2
 
-    old_occupancy = matcher.compute_nu_pi_nystrom_memory_efficient(
-        phi_all_obs=phi_sub_next_obs,
-        phi_sub_next_obs=phi_sub_next_obs,
-        psi_sub_obs_action=psi,
-        psi_all_obs_action=psi,
-        H=H,
-        pi=pi,
-        E=E,
-        alpha=alpha,
-        sink_norm=sink_norm,
-        B_nystrom=B_nystrom,
-    )
-    old_loss = torch.linalg.norm(old_occupancy).square()
-    new_loss = matcher.compute_nu_pi_nystrom_kernel_loss(
-        phi_sub_next_obs=phi_sub_next_obs,
-        psi_sub_obs_action=psi,
-        H=H,
-        pi=pi,
-        E=E,
-        alpha=alpha,
-        sink_norm=sink_norm,
-        B_nystrom=B_nystrom,
-    )
-    torch.testing.assert_close(new_loss, old_loss)
+    z = nystrom_resolvent_coefficients(B_nystrom @ (H * (E @ pi.T)), alpha, matcher.gamma)
+    weights = (1 - matcher.gamma) * z
+    occupancy = torch.cat((xy.T @ weights[:-1], sink_norm * (weights[-1:] - psi.sum(1) @ weights[:-1])))
+    gram = kernel_sink_gram(matcher.state_kernel, xy, psi.sum(1), sink_norm)
+    new_loss = (weights.T @ gram @ weights).squeeze()
+    torch.testing.assert_close(new_loss, occupancy.square().sum())

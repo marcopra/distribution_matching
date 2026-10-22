@@ -5,16 +5,8 @@ from __future__ import annotations
 import torch
 
 
-def nystrom_resolvent_coefficients(
-    H: torch.Tensor,
-    pi: torch.Tensor,
-    E: torch.Tensor,
-    alpha: torch.Tensor,
-    B_nystrom: torch.Tensor,
-    gamma: float,
-) -> torch.Tensor:
+def nystrom_resolvent_coefficients(BM, alpha, gamma):
     """Solve the Nyström resolvent, including its absorbing sink coefficient."""
-    BM = B_nystrom @ (H * (E @ pi.T))
     augmented = _augmented_resolvent(BM, gamma)
     alpha_augmented = torch.ones(
         (alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype
@@ -24,29 +16,24 @@ def nystrom_resolvent_coefficients(
 
 
 @torch.no_grad()
-def nystrom_resolvent_diagnostics(
-    H: torch.Tensor,
-    pi: torch.Tensor,
-    E: torch.Tensor,
-    B_nystrom: torch.Tensor,
-    gamma: float,
-) -> dict[str, float]:
+def nystrom_resolvent_diagnostics(BM, gamma):
     """Estimate resolvent conditioning and summarize real-state transition entries."""
-    BM = B_nystrom @ (H * (E @ pi.T))
     assert BM.ndim == 2 and BM.shape[0] == BM.shape[1]
     assert torch.isfinite(BM).all()
     augmented = _augmented_resolvent(BM, gamma)
-    lu, pivots = torch.linalg.lu_factor(augmented)
-    inverse_norm_estimate = _estimate_inverse_one_norm(lu, pivots)
     matrix_norm = torch.linalg.matrix_norm(augmented, ord=1)
-    negative = BM < 0
+    lu, pivots = torch.linalg.lu_factor(augmented)
+    del augmented
+    inverse_norm_estimate = _estimate_inverse_one_norm(lu, pivots)
+    del lu, pivots
+    column_mass = BM.sum(0)
     stats = torch.stack((
         matrix_norm * inverse_norm_estimate,
-        negative.to(BM.dtype).mean(),
+        (BM < 0).sum(dtype=BM.dtype) / BM.numel(),
         BM.min(),
         -BM.clamp_max(0).sum(),
-        BM.sum(0).min(),
-        BM.sum(0).max(),
+        column_mass.min(),
+        column_mass.max(),
     )).detach().cpu().tolist()
     diagnostics = dict(zip((
         "resolvent_condition_1_estimate",
@@ -60,14 +47,9 @@ def nystrom_resolvent_diagnostics(
 
 
 def _augmented_resolvent(BM: torch.Tensor, gamma: float) -> torch.Tensor:
-    system = torch.eye(BM.shape[0], device=BM.device, dtype=BM.dtype)
-    system = system - float(gamma) * BM
-    augmented = torch.zeros(
-        (system.shape[0] + 1, system.shape[1] + 1),
-        device=system.device,
-        dtype=system.dtype,
-    )
-    augmented[:-1, :-1] = system
+    augmented = BM.new_zeros(BM.shape[0] + 1, BM.shape[1] + 1)
+    augmented[:-1, :-1].copy_(BM).mul_(-float(gamma))
+    augmented[:-1, :-1].diagonal().add_(1)
     augmented[-1, -1] = 1.0 - float(gamma)
     return augmented
 
@@ -124,4 +106,23 @@ def orthogonal_sink_residual_gram(
     gram[:-1, -1:] = -eps_sq * coefficients
     gram[-1:, :-1] = -eps_sq * coefficients.T
     gram[-1, -1] = eps_sq
+    return gram
+
+
+@torch.no_grad()
+def kernel_sink_gram(kernel, features, coefficients, sink_norm, block_size=1024):
+    """Construct residual Gram without a second full Gram or outer product."""
+    n = len(features)
+    assert n > 0 and block_size > 0 and features.ndim == 2
+    assert coefficients.shape == (n,)
+    assert torch.isfinite(features.new_tensor(sink_norm)) and sink_norm >= 0
+    gram = features.new_empty(n + 1, n + 1)
+    for start in range(0, n, block_size):
+        rows = slice(start, min(n, start + block_size))
+        gram[rows, :n] = kernel(features[rows], features)
+    c = coefficients.reshape(n, 1)
+    gram[:n, :n].addmm_(c, c.T, alpha=float(sink_norm) ** 2)
+    gram[:n, -1:] = -float(sink_norm) ** 2 * c
+    gram[-1:, :n] = -float(sink_norm) ** 2 * c.T
+    gram[-1, -1] = float(sink_norm) ** 2
     return gram

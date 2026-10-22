@@ -260,3 +260,4 @@ tests/diagnostics/pointmaze/*
 !tests/diagnostics/pointmaze/reproduce_image_rover_audit.py
 !tests/diagnostics/pointmaze/smoke_image_rover_fixes.py
 !tests/diagnostics/pointmaze/audit_rover_subspace.py
+!tests/diagnostics/pointmaze/benchmark_nystrom_memory.py

@@ -105,6 +105,7 @@ def checkpoint_stats(run, filename, out):
 
 @torch.no_grad()
 def reconstruct(a, expected_loss):
+    assert hasattr(a, "_phi_all_next"), "This legacy audit requires full next-state caches absent from streamed snapshots"
     print("Reconstructing full regression transition", flush=True)
     gamma, m = float(a.discount), len(a.pi)
     H = a.kernel_fn(a._phi_all_obs, a._phi_sub_next)

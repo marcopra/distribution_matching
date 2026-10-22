@@ -39,6 +39,13 @@ class PositiveKernelTransition:
         self.alpha = torch.cat([alpha, alpha.new_zeros(1, 1)])
         self.tolerance = max(1e-10, 100 * torch.finfo(H.dtype).eps)
 
+    def policy(self, coeff, logits_offset=None):
+        logits = positive_kernel_logits(self.H.T, self.E, coeff, self.prior_mass)
+        if logits_offset is not None:
+            assert logits_offset.shape == logits.shape
+            logits = logits + logits_offset
+        return torch.softmax(-logits, dim=1)
+
     def transition_matrix(self, pi):
         m = self.H.shape[1]
         assert pi.shape == (m, self.E.shape[1])
@@ -112,7 +119,6 @@ class RoverPositiveKernelAgent(RoverSubspaceCoverageAgent):
         assert self.kernel_type == "gaussian", "Positive transitions require a Gaussian dynamics kernel"
         assert math.isfinite(transition_prior_mass) and transition_prior_mass > 0
         self.transition_prior_mass = float(transition_prior_mass)
-        self._positive_transition = None
 
     def _policy_logits_from_H(self, H, coeff=None):
         coeff = self.gradient_coeff if coeff is None else coeff
@@ -120,12 +126,14 @@ class RoverPositiveKernelAgent(RoverSubspaceCoverageAgent):
             return super()._policy_logits_from_H(H, coeff=None)
         return positive_kernel_logits(H, self.E, coeff, self.transition_prior_mass)
 
-    def _prepare_actor_model(self, H, sink_norm):
+    def _prepare_actor_model(self, sink_norm):
+        H = self._kernel(self._phi_all_obs, self._phi_sub_next)
         next_states, landmarks = self._phi_all_next, self._phi_sub_next
         if self.dynamics_kernel_input == "states" and not self.uses_state_dynamics_encoder:
             next_states = self.kernel_fn._decode(next_states)
             landmarks = self.kernel_fn._decode(landmarks)
         nearest = self._pmd_nearest_rows(next_states, landmarks)
+        del self._phi_all_next
         m = H.shape[1]
         gram = H.new_zeros(m + 1, m + 1)
         features = self._coverage_sub_next_features
@@ -133,29 +141,24 @@ class RoverPositiveKernelAgent(RoverSubspaceCoverageAgent):
         assert math.isfinite(float(sink_norm)) and sink_norm >= 0
         gram[:-1, :-1] = self.coverage_kernel_fn(features, features)
         gram[-1, -1] = float(sink_norm) ** 2
-        self._positive_transition = PositiveKernelTransition(
+        return PositiveKernelTransition(
             H, self.E, nearest, gram, self._sub_alpha, self.discount, self.transition_prior_mass,
         )
-        return None, None  # This estimator has no regression inverse or eigenspace.
 
-    def _compute_actor_occupancy_loss(self, **kwargs):
-        assert self._positive_transition is not None
-        return self._positive_transition.loss(kwargs["pi"])
+    @torch.no_grad()
+    def _cache_encoded_features(self, encoded_full, encoded_sub=None):
+        super()._cache_encoded_features(encoded_full, encoded_sub)
+        self._phi_all_next = self._append_zero_feature_column(
+            encoded_full["phi_next"].to(device=self.device, dtype=self.compute_dtype)
+        )
 
-    def _compute_actor_occupancy_gradient(self, **kwargs):
-        assert self._positive_transition is not None
-        return self._positive_transition.gradient_coefficients(kwargs["pi"])
-
-    def _actor_update_diagnostics(self, *, H, pi, B_nystrom):
-        assert self._positive_transition is not None
-        return self._positive_transition.diagnostics(pi)
-
-    def update_actor_nystrom(self, *args, **kwargs):
-        try:
-            return super().update_actor_nystrom(*args, **kwargs)
-        finally:
-            # H is update-local; action queries need only the saved basis/coefficients.
-            self._positive_transition = None
+    @torch.no_grad()
+    def _cache_features(self, obs, action, next_obs, encoder=None, **kwargs):
+        super()._cache_features(obs, action, next_obs, encoder=encoder, **kwargs)
+        encoder = self.encoder if encoder is None else encoder
+        self._phi_all_next = self._append_zero_feature_column(
+            self._encode_with_module(encoder, next_obs, project=True).to(dtype=self.compute_dtype)
+        )
 
     def _debug_visualizer_text(self, step):
         return (super()._debug_visualizer_text(step)

@@ -98,6 +98,7 @@ class RoverPixelProprioStateTest(unittest.TestCase):
         agent.device = "cpu"
         agent.compute_dtype = torch.float64
         agent.dynamics_state_dim = 4
+        agent.uses_state_dynamics_encoder = False
         states = torch.tensor(
             [[-1.0, 1.0, 0.75, -0.5], [0.25, -0.75, -0.2, 1.1]],
             dtype=torch.float32,
@@ -113,7 +114,9 @@ class RoverPixelProprioStateTest(unittest.TestCase):
     def test_state_dynamics_bandwidth_fits_decoded_state_and_pixel_coverage(self):
         agent = RoverSubspaceCoverageAgent.__new__(RoverSubspaceCoverageAgent)
         agent.dynamics_kernel_input = "states"
+        agent.uses_state_dynamics_encoder = False
         agent.coverage_kernel_input = "pixels"
+        agent.coverage_kernel_type = "gaussian"
         agent.kernel_type = "gaussian"
         agent.subsampling_strategy = "random"
         agent.kernel_bandwidth_mult = 1.0
@@ -160,6 +163,7 @@ class RoverPixelProprioStateTest(unittest.TestCase):
         agent.policy_encoder = _PixelsToTwoFeatures()
         agent.proprio_state_dims = 4
         agent.dynamics_state_dim = 4
+        agent.uses_state_dynamics_encoder = False
         agent.dynamics_kernel_input = "states"
         agent.coverage_kernel_input = "states"
         agent.coverage_state_indices = (0, 1)

@@ -827,7 +827,7 @@ class PointMazeNystromDebugHelper:
 
     def encode_subsamples(self, agent):
         agent._sync_policy_encoder()
-        encoded = agent._encode_actor_transition_batch_with_retries(self.build_subsample_batch(agent))
+        encoded = agent._encode_actor_transitions(self.build_subsample_batch(agent))
         return encoded, encoded.get("reward")
 
     def save_fixed_points_plot(self, n_actions: int):

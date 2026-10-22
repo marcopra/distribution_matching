@@ -5,9 +5,9 @@ from typing import Optional
 import torch
 
 import utils
-import matplotlib.pyplot as plt
 from agent.rover_sink import (
     nystrom_resolvent_coefficients,
+    nystrom_resolvent_diagnostics,
     orthogonal_sink_residual_gram,
 )
 
@@ -176,448 +176,139 @@ class DistributionMatcher:
       
         return gradient
     
-    #******* NYSTROM********
-    def _regularized_solve_memory_efficient(
-            self,
-            A: torch.Tensor,
-            B: torch.Tensor,
-            jitter_scale: float = 1e-10,
-        ) -> torch.Tensor:
-        """Solve AX=B robustly when A is singular/ill-conditioned."""
-        
-
-        idx = torch.arange(A.shape[0], device=A.device)
-        A[idx, idx] += jitter_scale
-
-        X = torch.linalg.solve(A, B)
-        
-        return X 
-    
-    def compute_B_nystrom(
-            self,
-            psi_all_obs_action: torch.Tensor,
-            psi_sub_obs_action: torch.Tensor,
-            svd_truncation: Optional[int] = None,
-            phi_all_obs: Optional[torch.Tensor] = None,
-            phi_sub_obs: Optional[torch.Tensor] = None,
-            all_actions: Optional[torch.Tensor] = None,
-            sub_actions: Optional[torch.Tensor] = None
-        ) -> torch.Tensor:
-        N = psi_all_obs_action.shape[0]
-        if phi_all_obs is not None and phi_sub_obs is not None and all_actions is not None and sub_actions is not None:
-            K_nm = self.state_action_kernel(phi_all_obs, phi_sub_obs, all_actions, sub_actions)
-            K_mm = self.state_action_kernel(phi_sub_obs, phi_sub_obs, sub_actions, sub_actions)
-        else:
-            K_nm = self.kernel(psi_all_obs_action, psi_sub_obs_action) # [n, m]
-            K_mm = self.kernel(psi_sub_obs_action, psi_sub_obs_action) # [m, m]
-        A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm # [m, m] # TODO add N
-        inv_A_nystrom = self.pseudo_inverse_low_rank_svd(A_nystrom, svd_rank=svd_truncation)
-        return inv_A_nystrom@K_nm.T
-    
-    def compute_B_and_projections(
-            self,
-            K_nm: torch.Tensor,
-            K_mm: torch.Tensor,
-            components: Optional[int] = 10000,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-      
-        m = K_nm.shape[1]
-
-        A_nystrom = K_nm.T @ K_nm
-        A_nystrom.add_(self.lambda_reg * K_mm)
-        A_nystrom.diagonal().add_(1e-6)
-
-        # A_nystrom = K_nm.T@K_nm + self.lambda_reg * K_mm + 1e-6 * torch.eye(m, dtype=torch.float64, device=self.device)# [m, m] # TODO add N
-        B = torch.linalg.solve(A_nystrom, K_nm.T) # [m, n]
-        effective_components = m if components is None else min(m, int(components))
-        
-        K = K_mm.clone()
-        K.diagonal().add_(1e-8)
-        
-        # eig_vals_r, eig_vecs_r = torch.linalg.eigh(
-        #     K_mm + 1e-8 * torch.eye(m, dtype=K_mm.dtype, device=K_mm.device)
-        # )
-
-        # eig_vals_r, eig_vecs_r = torch.linalg.eigh(K)
-        # U_r = eig_vecs_r[:, -effective_components:]
-        
-        with torch.no_grad():
-            # Move to CPU for the full eigendecomposition
-            K_cpu = K.detach().cpu()
-
-            # Optional: use float32 to reduce RAM, if precision is acceptable
-            K_cpu = K_cpu.float()
-
-            eig_vals_r, eig_vecs_r = torch.linalg.eigh(K_cpu)
-
-            # Keep only the top effective_components eigenvectors
-            U_r = eig_vecs_r[:, -effective_components:]
 
 
-            # Move back to GPU only if needed
-            U_r = U_r.to(K.device)
-            eig_vals_r = eig_vals_r.to(K.device)
+class NystromActorModel:
+    """Update-local regression with O(m² + n*d + block_size*m) device storage."""
 
-            # Free full eigenvector matrix
-            del eig_vecs_r, K_cpu
+    @torch.no_grad()
+    def __init__(self, matcher, states, landmarks, next_landmarks, actions,
+                 landmark_actions, E, alpha, coverage_gram, components, block_size=1024):
+        n, d = states.shape
+        m = len(landmarks)
+        assert n > 0 and m > 0
+        assert isinstance(block_size, int) and block_size > 0
+        assert landmarks.shape == next_landmarks.shape == (m, d)
+        assert E.ndim == 2 and E.shape[0] == n and E.shape[1] > 0
+        assert alpha.shape == (m, 1) and coverage_gram.shape == (m + 1, m + 1)
+        for tensor in (landmarks, next_landmarks, E, alpha, coverage_gram):
+            assert tensor.dtype == states.dtype and tensor.device == states.device
+            assert torch.isfinite(tensor).all()
+        assert torch.isfinite(states).all()
+        assert torch.isfinite(states.new_tensor(matcher.lambda_reg)) and matcher.lambda_reg > 0
+        assert 0 < matcher.gamma < 1
+        assert components is None or (isinstance(components, int) and components > 0)
+        assert actions.dtype == landmark_actions.dtype == torch.long
+        assert (alpha >= 0).all() and torch.allclose(alpha.sum(), alpha.new_tensor(1.))
+        self.actions = actions.to(device=states.device, dtype=torch.long).reshape(-1)
+        self.landmark_actions = landmark_actions.to(device=states.device, dtype=torch.long).reshape(-1)
+        assert self.actions.shape == (n,) and self.landmark_actions.shape == (m,)
+        for ids in (self.actions, self.landmark_actions):
+            assert ids.min() >= 0 and ids.max() < E.shape[1]
+        assert torch.equal(E.argmax(1), self.actions)
+        assert ((E == 0) | (E == 1)).all() and (E.sum(1) == 1).all()
+        self.matcher, self.states, self.landmarks = matcher, states, landmarks
+        self.next_landmarks, self.E, self.alpha = next_landmarks, E, alpha
+        self.gram, self.block_size = coverage_gram, int(block_size)
 
-        return B, U_r
-
-    def pseudo_inverse_low_rank_svd(self, A, tol=1e-12, svd_rank=None):
-        assert svd_rank is not None, "svd_rank must be specified for low-rank pseudo-inverse"
-        if svd_rank is None:
-            U, S, Vh = torch.linalg.svd(A, full_matrices=False)
-            # Inverti solo i valori singolari non nulli
-            V= Vh.transpose(-2, -1) 
-
-        else:
-            U, S, V = torch.svd_lowrank(A, q=svd_rank)
-        S_inv = torch.where(S > tol, 1.0 / S, torch.zeros_like(S))
-    
-        S_inv_mat = torch.diag(S_inv)
-        
-        A_pinv = V @ S_inv_mat @ U.transpose(-2, -1)
-
-        #save plot of singular values
-        plt.figure()
-        plt.plot(S.cpu().numpy(), marker='o')
-        plt.yscale('log')
-        plt.title('Singular Values of A')
-        plt.xlabel('Index')
-        plt.ylabel('Singular Value (log scale)')
-        plt.grid()
-        plt.savefig('singular_values.png')
-        
-        
-        return A_pinv
-
-    def compute_nu_pi_nystrom_memory_efficient(
-            self,
-            phi_all_obs: torch.Tensor,
-            phi_sub_next_obs: torch.Tensor,
-            psi_sub_obs_action: torch.Tensor,
-            psi_all_obs_action: torch.Tensor,
-            H: torch.Tensor,
-            pi: torch.Tensor,
-            E: torch.Tensor,
-            alpha: torch.Tensor,
-            sink_norm: float,
-            B_nystrom: Optional[torch.Tensor] = None,
-            phi_sub_obs: Optional[torch.Tensor] = None,
-            all_actions: Optional[torch.Tensor] = None,
-            sub_actions: Optional[torch.Tensor] = None
-        ) -> torch.Tensor:
-        """Compute discounted occupancy: ν = (1-γ)Φᵀ(I - γBM)⁻¹α."""
-        N = psi_all_obs_action.shape[0]
-
-        m = psi_sub_obs_action.shape[0]
-
-        d = phi_sub_next_obs.shape[1]
-
-        # α̃ = [α; 1], but avoid torch.ones
-        alpha_tilde = torch.empty(
-            (alpha.shape[0] + 1, 1),
-            device=alpha.device,
-            dtype=alpha.dtype,
-        )
-        alpha_tilde[:-1] = alpha
-        alpha_tilde[-1] = 1.0
-
-        # H = phi_all_obs @ phi_sub_next_obs.T # [n, m] 
-        M = H*(E@pi.T) # [n, m]
-
-        if B_nystrom is not None:
-            BM = B_nystrom @ M
-        else:
-            # Nyström matrices
-            B = self.compute_B_nystrom(
-                psi_all_obs_action,
-                psi_sub_obs_action,
-                svd_truncation=self.pca_truncation,
-                phi_all_obs=phi_all_obs,
-                phi_sub_obs=phi_sub_next_obs if phi_sub_obs is None else phi_sub_obs,
-                all_actions=all_actions,
-                sub_actions=sub_actions,
+        A = states.new_empty(m, m)
+        for start in range(0, m, self.block_size):
+            stop = start + self.block_size
+            A[start:stop] = matcher.state_action_kernel(
+                landmarks[start:stop], landmarks,
+                self.landmark_actions[start:stop], self.landmark_actions,
             )
-            BM = B @ M
+        # Preserve the existing float32 CPU eigenspace, including its jitter.
+        K_cpu = A.to(device="cpu", copy=True)
+        K_cpu.diagonal().add_(1e-8)
+        K_cpu = K_cpu.float()
+        _, vectors = torch.linalg.eigh(K_cpu)
+        rank = m if components is None else min(m, int(components))
+        self.U = vectors[:, -rank:].to(device=states.device, dtype=states.dtype, copy=True)
+        del K_cpu, vectors
+        A.mul_(matcher.lambda_reg)
+        for rows in self._rows():
+            K = self._kernel(rows)
+            A.addmm_(K.T, K)
+        A.diagonal().add_(1e-6)
+        self.lu, self.pivots = torch.linalg.lu_factor(A)
+        del A, K
+        self.K_rr = self.U.T @ self.gram[:-1, :-1] @ self.U
+        self.k_re = self.U.T @ self.gram[:-1, -1:]
+        self.k_er = self.gram[-1:, :-1] @ self.U
+        self.alpha_r = self.U.T @ alpha
 
+    def _rows(self):
+        for start in range(0, len(self.states), self.block_size):
+            yield slice(start, start + self.block_size)
 
-        # Build S = I - gamma * tilde_BM directly
-        # tilde_BM = [BM 0]
-        #            [0  1]
-
-        S = torch.empty(
-            (BM.shape[0] + 1, BM.shape[1] + 1),
-            device=BM.device,
-            dtype=BM.dtype,
-
+    def _kernel(self, rows):
+        return self.matcher.state_action_kernel(
+            self.states[rows], self.landmarks, self.actions[rows], self.landmark_actions,
         )
 
-        S[:-1, :-1] = BM
-        S[:-1, :-1].mul_(-self.gamma)
-        idx = torch.arange(BM.shape[0], device=BM.device)
-        S[idx, idx] += 1.0
-        S[:-1, -1] = 0.0
-        S[-1, :-1] = 0.0
-        S[-1, -1] = 1.0 - self.gamma
+    @torch.no_grad()
+    def policy(self, coeff, logits_offset=None):
+        assert coeff.shape == (len(self.states) + 1, 1)
+        logits = self.states.new_zeros(len(self.landmarks), self.E.shape[1])
+        for rows in self._rows():
+            H = self.matcher.state_kernel(self.states[rows], self.next_landmarks)
+            logits.addmm_(H.T, coeff[:-1][rows] * self.E[rows])
+        logits.add_(coeff[-1])
+        if logits_offset is not None:
+            assert logits_offset.shape == logits.shape
+            logits.add_(logits_offset)
+        assert torch.isfinite(logits).all(), "Nonfinite Nyström policy logits"
+        return torch.softmax(-logits, dim=1)
 
-        inv_term = torch.linalg.solve(S,alpha_tilde)
+    @torch.no_grad()
+    def transition_matrix(self, pi):
+        assert pi.shape == (len(self.landmarks), self.E.shape[1])
+        assert torch.isfinite(pi).all() and (pi >= 0).all()
+        assert torch.allclose(pi.sum(1), torch.ones_like(pi[:, 0]))
+        C = self.states.new_zeros(len(self.landmarks), len(self.landmarks))
+        for rows in self._rows():
+            K = self._kernel(rows)
+            M = self.matcher.state_kernel(self.states[rows], self.next_landmarks)
+            M.mul_(self.E[rows] @ pi.T)
+            C.addmm_(K.T, M)
+        return torch.linalg.lu_solve(self.lu, self.pivots, C)
 
-        del S, alpha_tilde, BM
+    @torch.no_grad()
+    def adjoint(self, q):
+        assert q.ndim == 2 and q.shape[0] == len(self.landmarks)
+        solved = torch.linalg.lu_solve(self.lu, self.pivots, q, adjoint=True)
+        result = self.states.new_empty(len(self.states), q.shape[1])
+        for rows in self._rows():
+            result[rows] = self._kernel(rows) @ solved
+        return result
 
-        # Build Φ̃ᵀ directly
-        tilde_phi_T = torch.zeros(
-            (d + 1, m + 1),
-            device=phi_sub_next_obs.device,
-            dtype=phi_sub_next_obs.dtype,
-        )
+    @torch.no_grad()
+    def loss(self, pi):
+        z = nystrom_resolvent_coefficients(self.transition_matrix(pi), self.alpha, self.matcher.gamma)
+        return ((1 - self.matcher.gamma) ** 2 * (z.T @ self.gram @ z)).squeeze()
 
-        tilde_phi_T[:d, :m] = phi_sub_next_obs.T
-        # sink_state is zero except at index d-1, so only this row changes
-        tilde_phi_T[d - 1, :m] -= sink_norm * psi_sub_obs_action.sum(dim=1)
-        tilde_phi_T[d - 1, m] = sink_norm
-        occupancy = tilde_phi_T @ inv_term
-        occupancy.mul_(1 - self.gamma)
-
-        return occupancy
-
-    def compute_nu_pi_nystrom_kernel_loss(
-        self,
-        *,
-        phi_sub_next_obs: torch.Tensor,
-        psi_sub_obs_action: torch.Tensor,
-        H: torch.Tensor,
-        pi: torch.Tensor,
-        E: torch.Tensor,
-        alpha: torch.Tensor,
-        sink_norm: float,
-        B_nystrom: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute kernel occupancy loss with an orthogonal sink feature."""
-        coefficients = nystrom_resolvent_coefficients(
-            H, pi, E, alpha, B_nystrom, self.gamma
-        )
-        occupancy_coefficients = (1.0 - self.gamma) * coefficients
-        state_features = phi_sub_next_obs[:, :-1]
-        state_gram = self.state_kernel(state_features, state_features)
-        residual_gram = orthogonal_sink_residual_gram(
-            state_gram,
-            psi_sub_obs_action.sum(dim=1),
-            sink_norm,
-        )
-        return (
-            occupancy_coefficients.T @ residual_gram @ occupancy_coefficients
-        ).squeeze()
-
-
-    
-    def compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
-            self, 
-            phi_sub_next_obs:torch.Tensor,
-            psi_sub_obs_action:torch.Tensor,
-            H: torch.Tensor,
-            pi: torch.Tensor,
-            E: torch.Tensor,
-            alpha:torch.Tensor,
-            sink_norm: float,
-            B_nystrom: Optional[torch.Tensor],
-            eig_vecs_r: Optional[torch.Tensor],
-            
-        ) -> torch.Tensor:
-        """Compute gradient coefficient for policy update."""
-        # Identity matrix
-        # I_n_plus1 = torch.eye(psi_all_obs_action.shape[0], device=self.device)
-        N = H.shape[0]
-        m = phi_sub_next_obs.shape[0]
-        M = H*(E@pi.T) # [n, m]
-
-        
-        BM = B_nystrom @ M
-        del M
-
-        tilde_eig_vecs_r = torch.zeros((m + 1, eig_vecs_r.shape[1]+1), device=eig_vecs_r.device, dtype=eig_vecs_r.dtype)
-        tilde_eig_vecs_r[:-1, :-1] = eig_vecs_r
-        tilde_eig_vecs_r[-1, -1] = 1.0
-
-
-        # Build S = I - gamma * tilde_B * tilde_M directly
-        S = torch.empty(
-            (BM.shape[0] + 1, BM.shape[1] + 1),
-            device=BM.device,
-            dtype=BM.dtype,
-        )
-
-        # 2γ(1 − γ)² B̃ₙᵧᵀ(I − B̃ₙᵧM̃)⁻ᵀΦ̃ₘΦ̃ₘᵀ(I − B̃ₙᵧM̃)⁻¹α̃ₘ
-
-        S[:-1, :-1] = BM
-        S[:-1, :-1].mul_(-self.gamma)
-        idx = torch.arange(BM.shape[0], device=BM.device)
-        S[idx, idx] += 1.0
-        S[:-1, -1] = 0.0
-        S[-1, :-1] = 0.0
-        S[-1, -1] = 1.0 - self.gamma
-
-        tilde_S_r = tilde_eig_vecs_r.T @ S @ tilde_eig_vecs_r
-        del S, BM
-        tilde_S_r_reg = tilde_S_r + 1e-6 * torch.eye(tilde_S_r.shape[0], device=tilde_S_r.device, dtype=tilde_S_r.dtype)
-        del tilde_S_r
-
-        state_features = phi_sub_next_obs[:, :-1]
-        state_gram = self.state_kernel(state_features, state_features)
-        tilde_phi_kernel = orthogonal_sink_residual_gram(
-            state_gram, psi_sub_obs_action.sum(dim=1), sink_norm
-        )
-        tilde_phi_kernel_r = tilde_eig_vecs_r.T @ tilde_phi_kernel @ tilde_eig_vecs_r
-        del tilde_phi_kernel
-        
-        tilde_B = torch.zeros(B_nystrom.shape[0] + 1, B_nystrom.shape[1] + 1, device=B_nystrom.device, dtype=B_nystrom.dtype)
-        tilde_B[:-1, :-1] = B_nystrom
-        tilde_B[-1, -1] = 1.0
-        tilde_B_r = tilde_eig_vecs_r.T @  tilde_B #@ tilde_eig_vecs_r
-        inv_tilde_S_r_reg = torch.linalg.solve(tilde_S_r_reg.T, tilde_phi_kernel_r) 
-        del tilde_phi_kernel_r
-        # left_term_r = tilde_B_r.T @ inv_tilde_S_r_reg
-       
-        # right_term = symmetric_term.T @ tilde_alpha, without tilde_alpha
-        tilde_alpha = torch.ones((alpha.shape[0] + 1, 1), device=alpha.device, dtype=alpha.dtype)
-        tilde_alpha[:-1] = alpha
-        tilde_alpha_r = tilde_eig_vecs_r.T @ tilde_alpha
-        right_term_r = torch.linalg.solve(tilde_S_r_reg, tilde_alpha_r)
-
-        tmp = inv_tilde_S_r_reg @ right_term_r
-        del right_term_r
-        gradient = tilde_B_r.T @ tmp
-
-        gradient.mul_(2 * self.gamma * ((1 - self.gamma) ** 2))
-
+    @torch.no_grad()
+    def gradient_coefficients(self, pi):
+        gamma, eps = self.matcher.gamma, 1e-6
+        S = self.transition_matrix(pi)
+        S.mul_(-gamma)
+        S.diagonal().add_(1)
+        S_r = self.U.T @ S @ self.U
+        del S
+        z_r = torch.linalg.solve(S_r, self.alpha_r)
+        S_r.diagonal().add_(eps)
+        z_e = 1 / (1 - gamma)
+        h_r = self.K_rr @ z_r + self.k_re * z_e
+        h_e = self.k_er @ z_r + self.gram[-1:, -1:] * z_e
+        q = self.U @ torch.linalg.solve(S_r.T, h_r)
+        gradient = self.states.new_empty(len(self.states) + 1, 1)
+        gradient[:-1] = self.adjoint(q)
+        gradient[-1:] = h_e / (1 - gamma + eps)
+        gradient.mul_(2 * gamma * (1 - gamma) ** 2)
+        assert torch.isfinite(gradient).all(), "Nonfinite Nyström gradient"
         return gradient
-    
-    def compute_gradient_coefficient_nystrom_blockwise_and_proj(
-            self, 
-            phi_sub_next_obs:torch.Tensor,
-            psi_sub_obs_action:torch.Tensor,
-            H: torch.Tensor,
-            pi: torch.Tensor,
-            E: torch.Tensor,
-            alpha:torch.Tensor,
-            sink_norm: float,
-            B_nystrom: Optional[torch.Tensor],
-            eig_vecs_r: Optional[torch.Tensor],
-            
-        ) -> torch.Tensor:
-        """Compute projected Nyström gradient using block augmented algebra."""
-        m = phi_sub_next_obs.shape[0]
-        r = eig_vecs_r.shape[1]
-        eps = 1e-6
-        beta = 2 * self.gamma * ((1 - self.gamma) ** 2)
 
-        # s = 1 − γ
-        s = 1.0 - self.gamma
-
-        gradient = torch.empty(
-            (B_nystrom.shape[1] + 1, 1),
-            device=B_nystrom.device,
-            dtype=B_nystrom.dtype,
-        )
-
-        # M = H ⊙ (Eπᵀ)
-        M = H * (E @ pi.T)
-
-        # S = Iₘ − γBM
-        BM = B_nystrom @ M
-        del M
-        BM.mul_(-self.gamma)
-        idx = torch.arange(m, device=BM.device)
-        BM[idx, idx] += 1.0
-
-        # Sᵣ = Uᵣᵀ S Uᵣ
-        S_r = eig_vecs_r.T @ BM @ eig_vecs_r
-        del BM
-
-        # Sᵣε = Sᵣ + εIᵣ
-        S_r_reg = S_r.clone()
-        idx_r = torch.arange(r, device=S_r_reg.device)
-        S_r_reg[idx_r, idx_r] += eps
-
-        # K̃_{φ,r} combines the state kernel with an orthogonal sink block.
-        state_features = phi_sub_next_obs[:, :-1]
-        state_gram = self.state_kernel(state_features, state_features)
-        tilde_K_phi = orthogonal_sink_residual_gram(
-            state_gram, psi_sub_obs_action.sum(dim=1), sink_norm
-        )
-
-        # K_rr = Uᵣᵀ K̃_φ[1:m,1:m] Uᵣ
-        K_rr = eig_vecs_r.T @ tilde_K_phi[:-1, :-1] @ eig_vecs_r
-
-        # k_re = Uᵣᵀ K̃_φ[1:m,e]
-        k_re = eig_vecs_r.T @ tilde_K_phi[:-1, -1:]
-
-        # k_erᵀ = K̃_φ[e,1:m] Uᵣ
-        k_er_T = tilde_K_phi[-1:, :-1] @ eig_vecs_r
-
-        # k_ee = K̃_φ[e,e]
-        k_ee = tilde_K_phi[-1:, -1:]
-        del tilde_K_phi
-
-        # αᵣ = Uᵣᵀ α, αₑ = 1
-        alpha_r = eig_vecs_r.T @ alpha
-        alpha_e = torch.ones((1, 1), device=alpha.device, dtype=alpha.dtype)
-
-        # zᵣ = Sᵣ⁻¹αᵣ
-        z_r = torch.linalg.solve(S_r, alpha_r)
-        del S_r, alpha_r
-
-        # zₑ = s⁻¹αₑ
-        z_e = alpha_e / s
-
-        # hᵣ = K_rr zᵣ + k_re zₑ
-        h_r = K_rr @ z_r
-        del K_rr
-        h_r.add_(k_re * z_e)
-        del k_re
-
-        # hₑ = k_erᵀ zᵣ + k_ee zₑ
-        h_e = k_er_T @ z_r
-        del k_er_T, z_r
-        h_e.add_(k_ee * z_e)
-        del k_ee, z_e
-
-        # tmp_main = (Sᵣ + εIᵣ)⁻ᵀ hᵣ
-        tmp_main = torch.linalg.solve(S_r_reg.T, h_r)
-        del S_r_reg, h_r
-
-        # tmp_sink = (s + ε)⁻¹ hₑ
-        tmp_sink = h_e / (s + eps)
-        del h_e
-
-        # Current code has B_nystrom ∈ R^{m×n}; previous projected code uses B̃ᵀŨᵣ.
-        # Thus g₁:ₙ = BᵀUᵣ tmp_main, equivalent to Bᵣᵀ tmp_main when Bᵣ is available.
-        gradient[:-1] = B_nystrom.T @ (eig_vecs_r @ tmp_main)
-        del tmp_main
-
-        # gₑ = tmp_sink
-        gradient[-1:] = tmp_sink
-
-        gradient.mul_(beta)
-
-        # ref_gradient = self.compute_gradient_coefficient_nystrom_memory_efficient_and_projection(
-        #     phi_sub_next_obs=phi_sub_next_obs,
-        #     psi_sub_obs_action=psi_sub_obs_action,
-        #     H=H,
-        #     pi=pi,
-        #     E=E,
-        #     alpha=alpha,
-        #     sink_norm=sink_norm,
-        #     B_nystrom=B_nystrom,
-        #     eig_vecs_r=eig_vecs_r,
-        # )
-        # if gradient.shape == ref_gradient.shape:
-        #     print(f"Gradient difference norm: {(gradient - ref_gradient).norm().item()}")
-        #     print(f"Gradient cosine similarity: {torch.nn.functional.cosine_similarity(gradient.flatten(), ref_gradient.flatten(), dim=0).item()}")
-        # else:
-        #     print(
-        #         "Gradient comparison skipped: "
-        #         f"blockwise shape={tuple(gradient.shape)}, ref shape={tuple(ref_gradient.shape)}"
-        #     )
-        
-        return gradient
+    @torch.no_grad()
+    def diagnostics(self, pi):
+        return nystrom_resolvent_diagnostics(self.transition_matrix(pi), self.matcher.gamma)

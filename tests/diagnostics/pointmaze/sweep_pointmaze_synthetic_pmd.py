@@ -293,7 +293,7 @@ def encode_synthetic_transitions_in_batches(agent, arrays, batch_size: int):
             torch.as_tensor(arrays["discount"][start:end], dtype=agent.compute_dtype),
             torch.as_tensor(arrays["next_obs"][start:end]),
         )
-        encoded_chunks.append(agent._encode_actor_transition_batch_with_retries(transitions))
+        encoded_chunks.append(agent._encode_actor_transitions(transitions))
     return agent._concat_encoded_batches(encoded_chunks)
 
 

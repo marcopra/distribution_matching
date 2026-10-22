@@ -1,5 +1,7 @@
 """Exercise PMD acceptance through the real actor loop with controlled losses."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -44,14 +46,18 @@ def make_actor(losses, best_iterate):
     sequence = iter(losses)
     evaluated = []
 
-    def objective(**kwargs):
-        evaluated.append(kwargs["pi"].clone())
+    def objective(pi):
+        evaluated.append(pi.clone())
         return torch.tensor(next(sequence), dtype=torch.float64)
 
-    agent._compute_actor_occupancy_loss = objective
-    agent._compute_actor_occupancy_gradient = lambda **kwargs: torch.tensor(
-        [[1.], [-1.], [1.], [-1.], [0.]], dtype=torch.float64,
-    )
+    prepare = agent._prepare_actor_model
+    def controlled(sink_norm):
+        model = prepare(sink_norm)
+        return SimpleNamespace(
+            policy=model.policy, loss=objective, diagnostics=lambda pi: {},
+            gradient_coefficients=lambda pi: torch.tensor([[1.], [-1.], [1.], [-1.], [0.]], dtype=torch.float64),
+        )
+    agent._prepare_actor_model = controlled
     encoded = {
         "phi_obs": torch.tensor([[.2, .8], [.3, .7], [.6, .4], [.8, .2]]),
         "phi_next": torch.tensor([[.3, .7], [.6, .4], [.8, .2], [.2, .8]]),

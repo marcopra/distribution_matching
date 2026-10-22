@@ -546,41 +546,25 @@ class RoverSubspaceCoverageAgent(RoverAgent):
         self._raw_coverage_sub_next = self._selected_coverage_observations(raw_sub_next)
         self._coverage_sub_next_features = None
 
+    @torch.no_grad()
+    def _encode_actor_dynamics_features(self, transitions):
+        if self.dynamics_kernel_input == "pixels":
+            return super()._encode_actor_dynamics_features(transitions)
+        assert self.dynamics_kernel_input == "states"
+        if self.obs_type == "pixels":
+            assert len(transitions) >= 7, "State dynamics requires source and target replay metadata"
+            source, target = transitions[5:7]
+        else:
+            source, target = transitions[0], transitions[4]
+        source, target = utils.to_torch((source, target), self.device)
+        return {
+            "phi_obs": self._policy_state_dynamics_features(source).to(device="cpu", dtype=self.compute_dtype),
+            "phi_next": self._policy_state_dynamics_features(target).to(device="cpu", dtype=self.compute_dtype),
+            "dynamics_state": source.to(device="cpu", dtype=self.compute_dtype),
+        }
+
     def _encode_actor_transition_batch(self, transitions):
         encoded = super()._encode_actor_transition_batch(transitions)
-        if self.dynamics_kernel_input == "states":
-            if self.obs_type == "pixels":
-                source_states = encoded.get("proprio_state")
-                next_states = encoded.get("proprio_next_state")
-            else:
-                source_states = torch.as_tensor(
-                    transitions[0], device=self.device
-                ).reshape(len(transitions[0]), -1)
-                next_states = torch.as_tensor(
-                    transitions[4], device=self.device
-                ).reshape(len(transitions[4]), -1)
-            if source_states is None or next_states is None:
-                raise ValueError(
-                    "State dynamics kernel requires source and next-state states "
-                    "in replay metadata"
-                )
-            with torch.no_grad():
-                phi_obs = self._policy_state_dynamics_features(
-                    source_states.to(device=self.device)
-                )
-                phi_next = self._policy_state_dynamics_features(
-                    next_states.to(device=self.device)
-                )
-            encoded["phi_next"] = phi_next.detach().to(
-                device="cpu", dtype=self.compute_dtype
-            )
-            encoded["phi_obs"] = phi_obs.detach().to(
-                device="cpu", dtype=self.compute_dtype
-            )
-            encoded["dynamics_state"] = source_states.detach().to(
-                device="cpu", dtype=self.compute_dtype
-            )
-
         if self.coverage_kernel_input == "pixels":
             raw_next = torch.as_tensor(transitions[4], device=self.device)
             selected_frame = self._selected_coverage_observations(raw_next)
@@ -786,27 +770,6 @@ class RoverSubspaceCoverageAgent(RoverAgent):
             f"coverage space = {coverage_space}\n"
         )
 
-    def _coverage_uses_legacy_path(self) -> bool:
-        """Preserve exact old objective when coverage spans same geometry/kernel."""
-        if self.coverage_kernel_input != "states" or self.obs_type == "pixels":
-            return False
-        if self.coverage_kernel_type != self.dynamics_kernel_type:
-            return False
-        raw_state_dim = math.prod(getattr(self, "obs_shape", (self.obs_dim,)))
-        covers_all_features = self.coverage_state_indices == tuple(range(raw_state_dim))
-        if getattr(self, "embeddings", False) or getattr(self, "train_coverage_encoder", False):
-            return False
-        if not covers_all_features:
-            return False
-        if getattr(self, "coverage_kernel_bandwidth_mult", None) is not None:
-            return False
-        if self.coverage_kernel_bandwidth is None:
-            return True
-        dynamic_bandwidth = self.kernel_fn.bandwidth
-        if dynamic_bandwidth is None:
-            dynamic_bandwidth = 1.0
-        return self.coverage_kernel_bandwidth == float(dynamic_bandwidth)
-
     def _sync_coverage_kernel_bandwidth(self) -> None:
         if (
             self.coverage_kernel_type == self.dynamics_kernel_type
@@ -849,37 +812,12 @@ class RoverSubspaceCoverageAgent(RoverAgent):
                 1e-12,
             )
 
-    def _compute_actor_occupancy_loss(self, **kwargs):
-        if self._coverage_uses_legacy_path():
-            return super()._compute_actor_occupancy_loss(**kwargs)
+    def _actor_coverage_gram(self, sink_norm):
         self._sync_coverage_kernel_bandwidth()
-        return self.coverage_matcher.compute_nystrom_subspace_occupancy_loss(
-            phi_sub_next_obs=kwargs["phi_sub_next_obs"],
-            psi_sub_obs_action=kwargs["psi_sub_obs_action"],
-            H=kwargs["H"],
-            pi=kwargs["pi"],
-            E=kwargs["E"],
-            alpha=kwargs["alpha"],
-            sink_norm=kwargs["sink_norm"],
-            B_nystrom=kwargs["B_nystrom"],
+        return self.coverage_matcher.coverage_gram(
+            phi_sub_next_obs=self._phi_sub_next,
+            sink_coefficients=self._sub_sink_coefficients,
+            sink_norm=sink_norm,
             state_indices=self.coverage_state_indices,
-            coverage_features=getattr(self, "_coverage_sub_next_features", None),
-        )
-
-    def _compute_actor_occupancy_gradient(self, **kwargs):
-        if self._coverage_uses_legacy_path():
-            return super()._compute_actor_occupancy_gradient(**kwargs)
-        self._sync_coverage_kernel_bandwidth()
-        return self.coverage_matcher.compute_gradient_coefficient_nystrom_subspace(
-            phi_sub_next_obs=kwargs["phi_sub_next_obs"],
-            psi_sub_obs_action=kwargs["psi_sub_obs_action"],
-            H=kwargs["H"],
-            pi=kwargs["pi"],
-            E=kwargs["E"],
-            alpha=kwargs["alpha"],
-            sink_norm=kwargs["sink_norm"],
-            B_nystrom=kwargs["B_nystrom"],
-            eig_vecs_r=kwargs["eig_vecs_r"],
-            state_indices=self.coverage_state_indices,
-            coverage_features=getattr(self, "_coverage_sub_next_features", None),
+            coverage_features=self._coverage_sub_next_features,
         )

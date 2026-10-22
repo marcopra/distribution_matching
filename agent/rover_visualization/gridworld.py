@@ -321,27 +321,8 @@ class EmbeddingDistributionVisualizerV2:
 
     def _actor_alpha_features_for_visualization(self):
         """Return the alpha support that matches the active actor update mode."""
-        if (
-            getattr(self.agent, 'subsamples', None) is not None
-            and hasattr(self.agent, '_sub_alpha')
-            and self.agent._sub_alpha is not None
-            and hasattr(self.agent, '_phi_sub_next')
-            and self.agent._phi_sub_next is not None
-        ):
-            # Nyström updates optimize against the subsample support, so alpha
-            # must be interpreted on the same support for visual diagnostics.
-            return self.agent._phi_sub_next, self.agent._sub_alpha
+        return self.agent._phi_sub_next, self.agent._sub_alpha
 
-        if (
-            hasattr(self.agent, '_alpha')
-            and self.agent._alpha is not None
-            and hasattr(self.agent, '_phi_all_next')
-            and self.agent._phi_all_next is not None
-        ):
-            return self.agent._phi_all_next, self.agent._alpha
-
-        return None, None
-    
     def _compute_initial_distribution(self) -> np.ndarray:
         """Compute initial distribution on the active alpha support."""
         with torch.no_grad():

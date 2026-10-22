@@ -54,8 +54,8 @@ handler.setFormatter(formatter)
 
 logger.addHandler(handler)
 from agent.rover_buffers import EncodedTransitionFIFO
-from agent.rover_matchers import DistributionMatcher
-from agent.rover_sink import nystrom_resolvent_diagnostics
+from agent.rover_matchers import DistributionMatcher, NystromActorModel
+from agent.rover_sink import kernel_sink_gram
 from agent.rover_networks import CNNEncoder, Encoder, ProjectSA
 from agent.rover_visualization.exploration import ExplorationVisualizer
 from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
@@ -128,7 +128,6 @@ class RoverAgent:
                  use_recent_actor_support: bool = False,
                  encoded_fifo_capacity: Optional[int] = None,
                  encoded_fifo_encode_batch_size: int = 4096,
-                 encoded_fifo_cuda_oom_splits: int = 4,
                  max_pending_transitions: Optional[int] = None,
                  freeze_observation_encoder_after_warmup: bool = False,
                  kernel_type: str = "inner_product",
@@ -270,22 +269,15 @@ class RoverAgent:
             oversample=nystrom_grid_oversample,
             exact_grid=nystrom_exact_grid,
         )
-        min_fifo_capacity = max(
-            int(self.batch_size_actor),
-            int(self.subsamples) if self.subsamples is not None else 0,
-            1,
-        )
+        min_fifo_capacity = max(int(self.batch_size_actor), 1) + int(self.use_recent_actor_support)
         if encoded_fifo_capacity is None:
             encoded_fifo_capacity = min_fifo_capacity
-        self.encoded_fifo_capacity = int(encoded_fifo_capacity)
-        if self.encoded_fifo_capacity < min_fifo_capacity:
-            utils.ColorPrint.yellow(
-                f"encoded_fifo_capacity={self.encoded_fifo_capacity} is smaller than "
-                f"the actor sample size; raising it to {min_fifo_capacity}."
-            )
-            self.encoded_fifo_capacity = min_fifo_capacity
+        assert int(encoded_fifo_capacity) >= min_fifo_capacity, "FIFO cannot hold actor support"
+        self.encoded_fifo_capacity = (
+            min_fifo_capacity if self.use_recent_actor_support else int(encoded_fifo_capacity)
+        )
         self.encoded_fifo_encode_batch_size = int(encoded_fifo_encode_batch_size)
-        self.encoded_fifo_cuda_oom_splits = int(encoded_fifo_cuda_oom_splits)
+        assert self.encoded_fifo_encode_batch_size > 0
         self.max_pending_transitions = (
             None if max_pending_transitions is None
             else int(max_pending_transitions)
@@ -841,10 +833,8 @@ class RoverAgent:
             )
 
             
-            if torch.sum(probs) == 0.0 or torch.isnan(torch.sum(probs)):
-                utils.ColorPrint.red(f"Warning: action_probs sum to zero or NaN. Returning uniform distribution. Check training stability and learning rates.{torch.sum(probs)}, {probs}")
-                probs = torch.ones_like(probs) / self.n_actions
-                # raise ValueError(f"action_probs sum to zero or NaN", torch.sum(probs), probs)
+            assert torch.isfinite(probs).all() and (probs >= 0).all()
+            assert torch.allclose(probs.sum(), probs.new_tensor(1.))
             logger.debug(f"Action probabilities: {probs.cpu().numpy().flatten()}")
             return probs.cpu().numpy().flatten()
 
@@ -877,18 +867,8 @@ class RoverAgent:
                 H,
                 logits_offset=self._pmd_action_logits_for(obs_tensor, metas=metas),
             )
-            bad_rows = (torch.sum(probs, dim=1) == 0.0) | torch.isnan(torch.sum(probs, dim=1))
-            if torch.any(bad_rows):
-                utils.ColorPrint.red(
-                    "Warning: some batched action_probs sum to zero or NaN. "
-                    "Using uniform distribution for those rows."
-                )
-                probs = probs.clone()
-                probs[bad_rows] = torch.ones(
-                    self.n_actions,
-                    device=probs.device,
-                    dtype=probs.dtype,
-                ) / self.n_actions
+            assert torch.isfinite(probs).all() and (probs >= 0).all()
+            assert torch.allclose(probs.sum(1), torch.ones_like(probs[:, 0]))
             return probs.detach().cpu().numpy()
 
     
@@ -920,31 +900,20 @@ class RoverAgent:
                 policy_indices.append(env_id)
 
         if policy_indices:
-            try:
-                batch_obs = observations[policy_indices]
-                batch_metas = (
-                    [metas[env_id] for env_id in policy_indices]
-                    if metas is not None else None
-                )
-                action_probs = self._compute_action_probs_batch(
-                    batch_obs, metas=batch_metas
-                )
-                if action_probs.shape != (len(policy_indices), self.n_actions):
-                    raise ValueError(f"Unexpected action_probs shape {action_probs.shape}")
-                for row, env_id in enumerate(policy_indices):
-                    probs = action_probs[row]
-                    self.current_action_probs.append(probs)
-                    actions[env_id] = np.random.choice(self.n_actions, p=probs)
-            except Exception as exc:
-                utils.ColorPrint.yellow(f"Batched act_parallel failed; falling back to looped act: {exc}")
-                for env_id in policy_indices:
-                    meta = metas[env_id] if metas is not None else None
-                    actions[env_id] = self.act(
-                        observations[env_id],
-                        meta,
-                        int(steps[env_id]),
-                        eval_mode=eval_mode,
-                    )
+            batch_obs = observations[policy_indices]
+            batch_metas = (
+                [metas[env_id] for env_id in policy_indices]
+                if metas is not None else None
+            )
+            action_probs = self._compute_action_probs_batch(
+                batch_obs, metas=batch_metas
+            )
+            if action_probs.shape != (len(policy_indices), self.n_actions):
+                raise ValueError(f"Unexpected action_probs shape {action_probs.shape}")
+            for row, env_id in enumerate(policy_indices):
+                probs = action_probs[row]
+                self.current_action_probs.append(probs)
+                actions[env_id] = np.random.choice(self.n_actions, p=probs)
 
         return actions
 
@@ -976,10 +945,10 @@ class RoverAgent:
         labels = torch.arange(logits.shape[0], device=logits.device)
         contrastive_loss = self.cross_entropy_loss(logits, labels)
 
-        z_anchor = self.aug_and_encode(obs, project=True)
-        with torch.no_grad():
-            z_pos = self.aug_and_encode(obs, project=True)
         if self.curl:
+            z_anchor = self.aug_and_encode(obs, project=True)
+            with torch.no_grad():
+                z_pos = self.aug_and_encode(obs, project=True)
             if self.mode == 'l1':
                 z_anchor = F.normalize(z_anchor, p=2, dim=1, eps=1e-10)
                 z_pos = F.normalize(z_pos, p=2, dim=1, eps=1e-10)
@@ -1058,9 +1027,8 @@ class RoverAgent:
             if encoded_full is None:
                 raise ValueError("Nyström actor update requires encoded_full when encoded_sub is provided.")
             self._cache_encoded_features(encoded_full, encoded_sub=encoded_sub)
-            if encoded_sub is None:
-                self._use_full_features_as_subsample()
-        elif sub_obs is None or sub_action is None or sub_next_obs is None:
+        elif sub_obs is None:
+            assert sub_action is None and sub_next_obs is None
             self._sync_policy_encoder()
             self._cache_features(
                 full_obs,
@@ -1068,7 +1036,6 @@ class RoverAgent:
                 full_next_obs,
                 encoder=self.policy_encoder,
             )
-            self._use_full_features_as_subsample()
         else:
             self._sync_policy_encoder()
             self._cache_features(
@@ -1094,7 +1061,6 @@ class RoverAgent:
         self.gradient_coeff = torch.zeros((self._phi_all_obs.shape[0]+1, 1), device=self.device, dtype=self.compute_dtype)  # [z_x + 1, 1]
         prev_gradient_coeff = self.gradient_coeff.clone()
         self._fit_state_kernel_bandwidth(self._phi_all_obs, self._phi_sub_next)
-        sub_H = self._kernel(self._phi_all_obs, self._phi_sub_next) # [n, m]
         self._save_actor_kernel_debug_plot(
             step,
             state_X=self._phi_sub_next,
@@ -1111,31 +1077,14 @@ class RoverAgent:
         self.current_eta = 0.0
 
         sink_norm = utils.schedule(self.sink_schedule, step)
-        self.pi = self._policy_from_H(
-            sub_H.T, coeff=self.gradient_coeff, logits_offset=logits_offset
-        )  # [z_x+1, n_actions]
-
-        B_nystrom, U_r = self._prepare_actor_model(sub_H, sink_norm)
+        model = self._prepare_actor_model(sink_norm)
+        self.pi = model.policy(self.gradient_coeff, logits_offset)
 
         utils.ColorPrint.yellow(
             f"Actor state-action kernel: {self._kernel_status(self.distribution_matcher.kernel_fn)}"
         )
 
-        actor_loss = self._compute_actor_occupancy_loss(
-                    phi_all_obs=self._phi_all_obs,
-                    phi_sub_next_obs = self._phi_sub_next,
-                    psi_sub_obs_action = self._psi_sub,
-                    psi_all_obs_action = self._psi_all,
-                    H = sub_H,
-                    pi = self.pi,
-                    E = self.E,
-                    alpha=self._sub_alpha,
-                    sink_norm=sink_norm,
-                    B_nystrom=B_nystrom,
-                    phi_sub_obs=self._phi_sub_obs,
-                    all_actions=self._all_actions,
-                    sub_actions=self._sub_actions,
-                )
+        actor_loss = model.loss(self.pi)
         if not np.isfinite(float(actor_loss)):
             raise RuntimeError("Initial actor occupancy loss is not finite")
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
@@ -1148,17 +1097,7 @@ class RoverAgent:
         self._adagrad_accum = 0.0
 
         for iteration in range(self.pmd_steps):
-            grad_update = self._compute_actor_occupancy_gradient(
-                phi_sub_next_obs = self._phi_sub_next,
-                psi_sub_obs_action = self._psi_sub,
-                H = sub_H,
-                pi=self.pi,
-                E=self.E,
-                alpha = self._sub_alpha,
-                sink_norm=sink_norm,
-                B_nystrom=B_nystrom,
-                eig_vecs_r=U_r,
-            )           
+            grad_update = model.gradient_coefficients(self.pi)
 
             if self.pmd_grad_clip_norm > 0:
                 grad_norm = torch.linalg.norm(grad_update)
@@ -1181,25 +1120,8 @@ class RoverAgent:
                 eta_t = base_eta
 
             candidate_coeff = self.gradient_coeff + eta_t * grad_update
-            candidate_pi = self._policy_from_H(
-                sub_H.T, coeff=candidate_coeff, logits_offset=logits_offset
-            )
-            # candidate_M = sub_H * (self.E @ candidate_pi.T)
-            candidate_loss = self._compute_actor_occupancy_loss(
-                    phi_all_obs=self._phi_all_obs,
-                    phi_sub_next_obs = self._phi_sub_next,
-                    psi_sub_obs_action = self._psi_sub,
-                    psi_all_obs_action = self._psi_all,
-                    H = sub_H,
-                    pi = candidate_pi,
-                    E = self.E,
-                    alpha=self._sub_alpha,
-                    sink_norm=sink_norm,
-                    B_nystrom=B_nystrom,
-                    phi_sub_obs=self._phi_sub_obs,
-                    all_actions=self._all_actions,
-                    sub_actions=self._sub_actions,
-                )
+            candidate_pi = model.policy(candidate_coeff, logits_offset)
+            candidate_loss = model.loss(candidate_pi)
 
             if self.pmd_eta_mode == "backtracking":
                 trial_eta = eta_t
@@ -1210,25 +1132,9 @@ class RoverAgent:
                     trial_eta *= self.pmd_backtrack_factor
                     trial_eta = float(np.clip(trial_eta, self.pmd_eta_min, self.pmd_eta_max))
                     candidate_coeff = self.gradient_coeff + trial_eta * grad_update
-                    candidate_pi = self._policy_from_H(
-                        sub_H.T, coeff=candidate_coeff, logits_offset=logits_offset
-                    )
+                    candidate_pi = model.policy(candidate_coeff, logits_offset)
 
-                    candidate_loss = self._compute_actor_occupancy_loss(
-                            phi_all_obs=self._phi_all_obs,
-                            phi_sub_next_obs = self._phi_sub_next,
-                            psi_sub_obs_action = self._psi_sub,
-                            psi_all_obs_action = self._psi_all,
-                            H = sub_H,
-                            pi = candidate_pi,
-                            E = self.E,
-                            alpha=self._sub_alpha,
-                            sink_norm=sink_norm,
-                            B_nystrom=B_nystrom,
-                            phi_sub_obs=self._phi_sub_obs,
-                            all_actions=self._all_actions,
-                            sub_actions=self._sub_actions,
-                        )
+                    candidate_loss = model.loss(candidate_pi)
                     trial += 1
                 eta_t = trial_eta
                 if not np.isfinite(float(candidate_loss)) or candidate_loss > actor_loss:
@@ -1278,158 +1184,58 @@ class RoverAgent:
             metrics['actor_best_loss'] = float(best_loss)
             metrics['actor_backtracking_rejections'] = backtracking_rejections
             metrics['sink_norm'] = float(sink_norm)
-            diagnostics = self._actor_update_diagnostics(
-                H=sub_H,
-                pi=self.pi,
-                B_nystrom=B_nystrom,
-            )
+            diagnostics = model.diagnostics(self.pi)
             metrics.update({f"actor_{name}": value for name, value in diagnostics.items()})
    
         return metrics
 
-    def _prepare_actor_model(self, H, sink_norm):
-        """Build the regression model for this actor update."""
-        K_sub_sub = self.distribution_matcher.state_action_kernel(
-            self._phi_sub_obs, self._phi_sub_obs,
-            self._sub_actions, self._sub_actions,
-        )
-        K_all_sub = self.distribution_matcher.state_action_kernel(
-            self._phi_all_obs, self._phi_sub_obs,
-            self._all_actions, self._sub_actions,
-        )
-        B, U = self.distribution_matcher.compute_B_and_projections(
-            K_nm=K_all_sub, K_mm=K_sub_sub, components=self.pca_truncation,
-        )
-        return B, U.to(self.compute_dtype)
-
-    def _compute_actor_occupancy_loss(self, **kwargs):
-        """Return squared occupancy norm for the standard state coverage objective."""
-        return self.distribution_matcher.compute_nu_pi_nystrom_kernel_loss(
-            phi_sub_next_obs=kwargs["phi_sub_next_obs"],
-            psi_sub_obs_action=kwargs["psi_sub_obs_action"],
-            H=kwargs["H"],
-            pi=kwargs["pi"],
-            E=kwargs["E"],
-            alpha=kwargs["alpha"],
-            sink_norm=kwargs["sink_norm"],
-            B_nystrom=kwargs["B_nystrom"],
+    def _actor_coverage_gram(self, sink_norm):
+        return kernel_sink_gram(
+            self.distribution_matcher.state_kernel, self._phi_sub_next[:, :-1],
+            self._sub_sink_coefficients, sink_norm,
         )
 
-    def _actor_update_diagnostics(self, *, H, pi, B_nystrom):
-        """Compute actor-update diagnostics once for the selected policy."""
-        return nystrom_resolvent_diagnostics(
-            H, pi, self.E, B_nystrom, self.discount
+    def _prepare_actor_model(self, sink_norm):
+        return NystromActorModel(
+            self.distribution_matcher, self._phi_all_obs, self._phi_sub_obs,
+            self._phi_sub_next, self._all_actions, self._sub_actions,
+            self.E, self._sub_alpha, self._actor_coverage_gram(sink_norm), self.pca_truncation,
         )
 
-    def _compute_actor_occupancy_gradient(self, **kwargs):
-        """Return gradient coefficient for the standard state coverage objective."""
-        return self.distribution_matcher.compute_gradient_coefficient_nystrom_blockwise_and_proj(
-            **kwargs
-        )
-
-    
-    def _cache_features(self, obs, action, next_obs, encoder=None, sub_obs=None, sub_action=None, sub_next_obs=None):
-        """Pre-compute and cache dataset features."""
+    @torch.no_grad()
+    def _cache_features(self, obs, action, next_obs, encoder=None,
+                        sub_obs=None, sub_action=None, sub_next_obs=None):
         encoder = self.encoder if encoder is None else encoder
-       
-        with torch.no_grad():
-            
-            print(f"encoding obs shape: {obs.shape}, next_obs shape: {next_obs.shape}")
-            self._phi_all_obs = self._encode_with_module(encoder, obs, project=True).to(dtype=self.compute_dtype)
-            self._phi_all_next = self._encode_with_module(encoder, next_obs, project=True).to(dtype=self.compute_dtype)
-
-            action = action #.cpu()
-            self._psi_all = self._encode_state_action(self._phi_all_obs, action) #.cpu()
-            self._all_actions = action.long().reshape(-1).detach().cpu()
-           
-            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [n, 1]
-    
-            self._alpha[0] = 1.0  # set alpha to 1.0 for the first state
-            self.E = F.one_hot(
-                action, 
-                self.n_actions,
-            ).reshape(-1, self.n_actions).to(dtype=self.compute_dtype, device=self.device)
-
-            # ** AUGMENTATION STEP **
-            # ψ and Φ are augmented with an additional zero dimension
-            zeros_col = torch.zeros(*self._psi_all.shape[:-1], 1, device=self._psi_all.device, dtype=self._psi_all.dtype)
-            self._psi_all = torch.cat([self._psi_all, zeros_col], dim=-1)
-
-            zero_col = torch.zeros(*self._phi_all_next.shape[:-1], 1, device=self._phi_all_next.device, dtype=self._phi_all_next.dtype)
-            self._phi_all_next = torch.cat([self._phi_all_next, zero_col], dim=-1)
-
-            zero_col = torch.zeros(*self._phi_all_obs.shape[:-1], 1, device=self._phi_all_obs.device, dtype=self._phi_all_obs.dtype)
-            self._phi_all_obs = torch.cat([self._phi_all_obs, zero_col], dim=-1)
-
-            if sub_obs is not None and sub_next_obs is not None and sub_action is not None:
-                self._phi_sub_obs = self._encode_with_module(encoder, sub_obs, project=True).to(dtype=self.compute_dtype)
-                self._phi_sub_next = self._encode_with_module(encoder, sub_next_obs, project=True).to(dtype=self.compute_dtype)
-                self._sub_actions = sub_action.long().reshape(-1).detach().cpu()
-
-                self._psi_sub = self._encode_state_action(self._phi_sub_obs, sub_action)
-
-                zeros_col_sub_next = torch.zeros(*self._phi_sub_next.shape[:-1], 1, device=self._phi_sub_next.device, dtype=self._phi_sub_next.dtype)
-                self._phi_sub_next = torch.cat([self._phi_sub_next, zeros_col_sub_next], dim=-1)
-
-                zero_col_sub_obs = torch.zeros(*self._phi_sub_obs.shape[:-1], 1, device=self._phi_sub_obs.device, dtype=self._phi_sub_obs.dtype)
-                self._phi_sub_obs = torch.cat([self._phi_sub_obs, zero_col_sub_obs], dim=-1)
-
-                zero_col_sub_psi = torch.zeros(*self._psi_sub.shape[:-1], 1, device=self._psi_sub.device, dtype=self._psi_sub.dtype)
-                self._psi_sub = torch.cat([self._psi_sub, zero_col_sub_psi], dim=-1)
-
-                self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self.compute_dtype)  # [m, 1]
-                self._sub_alpha[0] = 1.0  # set alpha to 1.0 for the first state
-
-            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
+        full = {"phi_obs": self._encode_with_module(encoder, obs, project=True), "action": action}
+        if sub_obs is None:
+            full["phi_next"] = self._encode_with_module(encoder, next_obs, project=True)
+            sub = None
+        else:
+            assert sub_action is not None and sub_next_obs is not None
+            sub = {
+                "phi_obs": self._encode_with_module(encoder, sub_obs, project=True),
+                "phi_next": self._encode_with_module(encoder, sub_next_obs, project=True),
+                "action": sub_action,
+            }
+        RoverAgent._cache_encoded_features(self, full, sub)
 
     def _append_zero_feature_column(self, tensor):
-        zeros_col = torch.zeros(*tensor.shape[:-1], 1, device=tensor.device, dtype=tensor.dtype)
-        return torch.cat([tensor, zeros_col], dim=-1)
+        return F.pad(tensor, (0, 1))
 
+    @torch.no_grad()
     def _cache_encoded_features(self, encoded_full, encoded_sub=None):
-        def materialize(encoded):
-            phi_obs = encoded["phi_obs"].to(dtype=self.compute_dtype, device=self.device)
-            phi_next = encoded["phi_next"].to(dtype=self.compute_dtype, device=self.device)
-            if "action" in encoded:
-                actions = encoded["action"].to(device=self.device, dtype=torch.long).reshape(-1)
-                E = F.one_hot(actions, self.n_actions).to(dtype=self.compute_dtype)
-                psi = self._encode_state_action(phi_obs, actions)
-            else:
-                E = encoded["E"].to(dtype=self.compute_dtype, device=self.device)
-                actions = torch.argmax(E, dim=1).long()
-                psi = encoded["psi"].to(dtype=self.compute_dtype, device=self.device)
-            return phi_obs, phi_next, psi, E, actions
-
-        with torch.no_grad():
-            phi_obs, phi_next, psi, E, actions = materialize(encoded_full)
-            self._phi_all_obs = self._append_zero_feature_column(phi_obs)
-            self._phi_all_next = self._append_zero_feature_column(phi_next)
-            self._psi_all = self._append_zero_feature_column(psi)
-
-            self._alpha = torch.zeros((self._phi_all_next.shape[0], 1), device=self.device, dtype=self._phi_all_next.dtype)
-            self._alpha[0] = 1.0
-
-            self.E = E
-            self._all_actions = actions.detach().cpu()
-
-            if encoded_sub is not None:
-                sub_phi_obs, sub_phi_next, sub_psi, _, sub_actions = materialize(encoded_sub)
-                self._phi_sub_obs = self._append_zero_feature_column(sub_phi_obs)
-                self._phi_sub_next = self._append_zero_feature_column(sub_phi_next)
-                self._psi_sub = self._append_zero_feature_column(sub_psi)
-                self._sub_actions = sub_actions.detach().cpu()
-
-                self._sub_alpha = torch.zeros((self._phi_sub_next.shape[0], 1), device=self.device, dtype=self._phi_sub_next.dtype)
-                self._sub_alpha[0] = 1.0
-
-            print(f"dimensions after augmentation: psi_all {self._psi_all.shape}, phi_all_next {self._phi_all_next.shape}, phi_all_obs {self._phi_all_obs.shape}")
-
-    def _use_full_features_as_subsample(self):
-        self._phi_sub_obs = self._phi_all_obs
-        self._phi_sub_next = self._phi_all_next
-        self._psi_sub = self._psi_all
-        self._sub_actions = self._all_actions
-        self._sub_alpha = self._alpha
+        sub = encoded_full if encoded_sub is None else encoded_sub
+        def feature(batch, key):
+            return self._append_zero_feature_column(batch[key].to(device=self.device, dtype=self.compute_dtype))
+        self._phi_all_obs = feature(encoded_full, "phi_obs")
+        self._phi_sub_obs = self._phi_all_obs if sub is encoded_full else feature(sub, "phi_obs")
+        self._phi_sub_next = feature(sub, "phi_next")
+        self._all_actions = encoded_full["action"].to(device=self.device, dtype=torch.long).reshape(-1)
+        self._sub_actions = sub["action"].to(device=self.device, dtype=torch.long).reshape(-1)
+        self.E = F.one_hot(self._all_actions, self.n_actions).to(dtype=self.compute_dtype)
+        self._sub_sink_coefficients = self._phi_sub_obs.sum(1)
+        self._sub_alpha = self._phi_sub_next.new_zeros(len(self._phi_sub_next), 1)
+        self._sub_alpha[0] = 1
 
     def _make_actor_batch(self, obs, action, next_obs, reward):
         return (
@@ -1480,13 +1286,6 @@ class RoverAgent:
             actor_batch[field_idx][:1] = first_field.to(actor_batch[field_idx].device)
         return actor_batch
 
-    def _is_cuda_oom(self, error):
-        return (
-            isinstance(error, RuntimeError)
-            and "out of memory" in str(error).lower()
-            and "cuda" in str(error).lower()
-        )
-
     def _encoded_batch_size(self, encoded):
         return next(iter(encoded.values())).shape[0]
 
@@ -1499,20 +1298,18 @@ class RoverAgent:
     def _slice_raw_transition_batch(self, transitions, index):
         return tuple(field[index] for field in transitions)
 
+    @torch.no_grad()
+    def _encode_actor_dynamics_features(self, transitions):
+        obs, next_obs = utils.to_torch((transitions[0], transitions[4]), self.device)
+        return {
+            "phi_obs": self._encode_with_module(self.policy_encoder, obs, project=True).to(dtype=torch.float32),
+            "phi_next": self._encode_with_module(self.policy_encoder, next_obs, project=True).to(dtype=torch.float32),
+        }
+
     def _encode_actor_transition_batch(self, transitions):
         obs, action, reward, _, next_obs = utils.to_torch(transitions[:5], self.device)
-        reward = reward.reshape(obs.shape[0], -1)
-        with torch.no_grad():
-            phi_obs = self._encode_with_module(self.policy_encoder, obs, project=True)
-            phi_next = self._encode_with_module(self.policy_encoder, next_obs, project=True)
-        # FIFO lives on CPU. Store compact float32 features and action ids;
-        # dense ψ=φ⊗e_a and E are rebuilt only for sampled actor batches.
-        encoded = {
-            "phi_obs": phi_obs.to(dtype=torch.float32),
-            "phi_next": phi_next.to(dtype=torch.float32),
-            "action": action.long().reshape(-1, 1),
-            "reward": reward.to(dtype=torch.float32),
-        }
+        encoded = self._encode_actor_dynamics_features(transitions)
+        encoded.update(action=action.long().reshape(-1, 1), reward=reward.reshape(len(obs), -1).float())
         if self.embeddings:
             # Keep raw support for every learned encoder. Pixel replay is
             # uint8: preserve that dtype on CPU instead of storing float images.
@@ -1552,8 +1349,9 @@ class RoverAgent:
 
     def _refresh_encoded_state_features(self, encoded):
         """Re-encode sampled support in bounded chunks under one policy encoder."""
-        if "obs_raw" not in encoded or "next_obs_raw" not in encoded:
+        if not self.embeddings:
             return encoded
+        assert "obs_raw" in encoded and "next_obs_raw" in encoded, "Learned support requires raw observations"
         transitions = (
             encoded["obs_raw"],
             encoded["action"],
@@ -1573,21 +1371,16 @@ class RoverAgent:
             transitions += (proprio_state,)
         if next_state is not None:
             transitions += (next_state,)
-        chunk_size = max(1, getattr(self, "encoded_fifo_encode_batch_size", 4096))
-        feature_batches = []
+        chunk_size = self.encoded_fifo_encode_batch_size
+        assert chunk_size > 0
+        features = {key: torch.empty_like(encoded[key], device="cpu") for key in ("phi_obs", "phi_next")}
         for start in range(0, self._encoded_batch_size(encoded), chunk_size):
-            chunk = self._slice_raw_transition_batch(
-                transitions, slice(start, start + chunk_size)
-            )
-            refreshed = self._encode_actor_transition_batch_with_retries(chunk)
-            feature_batches.append({
-                key: refreshed[key].detach().cpu()
-                for key in ("phi_obs", "phi_next")
-            })
+            rows = slice(start, start + chunk_size)
+            refreshed = self._encode_actor_dynamics_features(self._slice_raw_transition_batch(transitions, rows))
+            for key, output in features.items():
+                output[rows].copy_(refreshed[key].detach().cpu())
             del refreshed
-        # Frozen coverage and raw/diagnostic sidecars remain valid. Refresh only
-        # dynamics features, without rewriting or duplicating raw FIFO history.
-        return {**encoded, **self._concat_encoded_batches(feature_batches)}
+        return {**encoded, **features}
 
     def _anchor_pointmaze_actor_batch(self, encoded):
         """Put initial mass at reset without changing real replay transitions.
@@ -1624,28 +1417,22 @@ class RoverAgent:
         if next_state is not None:
             # Reset anchor is a self-transition at the reset state.
             transitions += (proprio_state[:1],)
-        anchor = self._encode_actor_transition_batch_with_retries(transitions)
+        anchor = self._encode_actor_transitions(transitions)
         return {
             key: torch.cat([anchor.get(key, value[:1]).to(value), value[1:]], dim=0)
             for key, value in encoded.items()
         }
 
-    def _encode_actor_transition_batch_with_retries(self, transitions, splits_left=None):
-        splits_left = self.encoded_fifo_cuda_oom_splits if splits_left is None else splits_left
-        batch_size = transitions[0].shape[0]
-        try:
-            return self._encode_actor_transition_batch(transitions)
-        except RuntimeError as error:
-            if not self._is_cuda_oom(error) or splits_left <= 0 or batch_size <= 1:
-                raise
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            midpoint = batch_size // 2
-            left = self._slice_raw_transition_batch(transitions, slice(0, midpoint))
-            right = self._slice_raw_transition_batch(transitions, slice(midpoint, None))
-            encoded_left = self._encode_actor_transition_batch_with_retries(left, splits_left - 1)
-            encoded_right = self._encode_actor_transition_batch_with_retries(right, splits_left - 1)
-            return self._concat_encoded_batches([encoded_left, encoded_right])
+    def _encode_actor_transitions(self, transitions):
+        batches = []
+        for start in range(0, len(transitions[0]), self.encoded_fifo_encode_batch_size):
+            chunk = self._slice_raw_transition_batch(
+                transitions, slice(start, start + self.encoded_fifo_encode_batch_size)
+            )
+            encoded = self._encode_actor_transition_batch(chunk)
+            batches.append({key: value.detach().cpu() for key, value in encoded.items()})
+        assert batches, "Cannot encode an empty transition batch"
+        return batches[0] if len(batches) == 1 else self._concat_encoded_batches(batches)
 
     def _insert_first_transition_if_available(self, replay_buffer):
         if self._encoded_actor_fifo.has_first:
@@ -1656,7 +1443,7 @@ class RoverAgent:
             first_transition = replay_buffer.get_first_transition()
         except RuntimeError:
             return
-        encoded = self._encode_actor_transition_batch_with_retries(first_transition)
+        encoded = self._encode_actor_transitions(first_transition)
         self._encoded_actor_fifo.add(np.array([0], dtype=np.int64), encoded)
 
     def _update_encoded_actor_fifo(self, replay_buffer):
@@ -1692,7 +1479,7 @@ class RoverAgent:
                 np.asarray(transitions[3]).reshape(len(transition_ids), -1).min(axis=1)
                 <= 0.0
             )
-            encoded = self._encode_actor_transition_batch_with_retries(transitions)
+            encoded = self._encode_actor_transitions(transitions)
             self._encoded_actor_fifo.add(
                 transition_ids,
                 encoded,
@@ -1715,17 +1502,10 @@ class RoverAgent:
             return self._encoded_actor_fifo.sample_recent(size, device)
         return self._encoded_actor_fifo.sample(size, device, include_first=True)
 
-    def _actor_support_fifo(self, actor_support):
-        size = self._encoded_batch_size(actor_support)
-        assert size > 0, "actor support must contain the pinned first transition"
-        fifo = EncodedTransitionFIFO(size)
-        fifo.add(np.arange(size, dtype=np.int64), actor_support)
-        return fifo
-
     def _sample_encoded_actor_data(
-        self, size, include_first, actor_fifo=None, device=None
+        self, size, include_first, support=None, device=None
     ):
-        fifo = self._encoded_actor_fifo if actor_fifo is None else actor_fifo
+        fifo = self._encoded_actor_fifo
         device = self.device if device is None else device
         encoded = fifo.sample_by_strategy(
             int(size),
@@ -1740,17 +1520,9 @@ class RoverAgent:
             kernel_bandwidth_mult=self.kernel_bandwidth_mult,
             cholesky_progress=self.nystrom_cholesky_progress,
             kernel_feature_key=getattr(self, "nystrom_kernel_feature_key", None),
+            support=support,
         )
         if self.subsampling_strategy == "pivoted_cholesky":
-            self._encoded_actor_fifo.last_pivoted_cholesky_residuals = (
-                fifo.last_pivoted_cholesky_residuals
-            )
-            self._encoded_actor_fifo.last_pivoted_cholesky_candidate_count = (
-                fifo.last_pivoted_cholesky_candidate_count
-            )
-            self._encoded_actor_fifo.last_pivoted_cholesky_bandwidth = (
-                fifo.last_pivoted_cholesky_bandwidth
-            )
             if self.kernel_type == "gaussian":
                 bandwidth = fifo.last_pivoted_cholesky_bandwidth
                 self.kernel_fn.bandwidth = bandwidth
@@ -2009,11 +1781,10 @@ class RoverAgent:
             subsample, subsample_rewards = self.nystrom_debug.encode_subsamples(self)
             subsample_source = "fixed PointMaze Nyström landmarks"
         else:
-            actor_fifo = self._actor_support_fifo(full)
             subsample, subsample_rewards = self._sample_encoded_actor_data(
                 count,
                 include_first=True,
-                actor_fifo=actor_fifo,
+                support=full,
                 device="cpu",
             )
             subsample_source = (

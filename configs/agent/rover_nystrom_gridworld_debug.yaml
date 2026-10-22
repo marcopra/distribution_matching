@@ -32,7 +32,6 @@ synthetic_subsample_excluded_action: 0
 
 encoded_fifo_capacity: 100000
 encoded_fifo_encode_batch_size: 4096
-encoded_fifo_cuda_oom_splits: 4
 max_pending_transitions: null
 kernel_type: inner_product # [inner_product, gaussian, laplacian, dirac]
 kernel_bandwidth: null # fixed Gaussian bandwidth; null lets pivoted Cholesky fit candidates

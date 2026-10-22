@@ -274,7 +274,7 @@ class PointMazeSamplingStrategyTest(unittest.TestCase):
         agent.encoded_fifo_encode_batch_size = 8
         agent._sync_policy_encoder = lambda: None
         agent._insert_first_transition_if_available = lambda replay: None
-        agent._encode_actor_transition_batch_with_retries = (
+        agent._encode_actor_transitions = (
             lambda transitions: encoded(np.arange(transitions[0].shape[0]))
         )
 

@@ -270,3 +270,45 @@ class EncodedActorFIFOTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompactFIFOStorageTest(unittest.TestCase):
+    def test_pinned_row_owns_only_its_storage_and_overflow_drops_backing_rows(self):
+        fifo = EncodedTransitionFIFO(4)
+        fifo.add(np.arange(20), encoded(np.arange(20)))
+        for value in fifo._first.values():
+            self.assertEqual(value.untyped_storage().nbytes(), value.numel() * value.element_size())
+        for value in fifo._data.values():
+            self.assertEqual(value.untyped_storage().nbytes(), value.numel() * value.element_size())
+        fifo.add(np.arange(20, 23), encoded(np.arange(20, 23)))
+        self.assertEqual(fifo.sample_recent(3, "cpu")["phi_obs"].flatten().tolist(), [0., 20., 21., 22.])
+
+    def test_direct_support_selection_preserves_sampling_and_rng(self):
+        support = encoded(np.arange(8))
+        support["action"] = torch.arange(8).reshape(-1, 1) % 2
+        support["obs_raw"] = torch.arange(8, dtype=torch.uint8).reshape(-1, 1)
+        fifo = EncodedTransitionFIFO(8)
+        fifo.add(np.arange(8), support)
+        for strategy in ("random", "pivoted_cholesky", "gamma_h", "reverse_gamma_h"):
+            kwargs = dict(strategy=strategy, gamma=.9, candidate_multiplier=2,
+                          cholesky_tolerance=0, kernel_type="gaussian", kernel_bandwidth=1.,
+                          cholesky_progress=False)
+            torch.manual_seed(12)
+            np.random.seed(12)
+            expected = fifo.sample_by_strategy(3, "cpu", **kwargs)
+            expected_rng = torch.get_rng_state().clone(), np.random.get_state()
+            torch.manual_seed(12)
+            np.random.seed(12)
+            actual = fifo.sample_by_strategy(3, "cpu", support=support, **kwargs)
+            for key in expected:
+                torch.testing.assert_close(actual[key], expected[key])
+            torch.testing.assert_close(torch.get_rng_state(), expected_rng[0])
+            np.testing.assert_array_equal(np.random.get_state()[1], expected_rng[1][1])
+
+
+def test_late_pinned_row_respects_capacity():
+    fifo = EncodedTransitionFIFO(3)
+    fifo.add(np.arange(1, 4), encoded(np.arange(1, 4)))
+    fifo.add(np.array([0]), encoded([0]))
+    assert len(fifo) == 3
+    assert fifo.sample_recent(3, "cpu")["phi_obs"].flatten().tolist() == [0., 2., 3.]

@@ -3,6 +3,8 @@
 import io
 
 import numpy as np
+import weakref
+
 import pytest
 import torch
 
@@ -93,8 +95,8 @@ def test_invalid_policy_and_nonfinite_coefficients_fail_loudly():
         positive_kernel_logits(model.H.T, model.E, coeff, model.prior_mass)
 
 
-def make_agent(dynamics_encoder_mode):
-    return RoverPositiveKernelAgent(
+def agent_kwargs(dynamics_encoder_mode):
+    return dict(
         name="test", obs_type="states", obs_shape=(4,), grayscale=False,
         action_shape=(4,), lr_actor=10., discount=.99, lambda_reg=.001,
         batch_size=4, batch_size_actor=12, subsamples=6, nstep=1,
@@ -109,8 +111,12 @@ def make_agent(dynamics_encoder_mode):
         coverage_state_indices=[0, 1], coverage_kernel_type="gaussian",
         kernel_bandwidth=.6, coverage_kernel_bandwidth=1., pmd_eta_mode="backtracking",
         pmd_best_iterate=True, pmd_warm_start=True, compute_dtype="float64",
-        transition_prior_mass=.3,
     )
+
+
+
+def make_agent(dynamics_encoder_mode):
+    return RoverPositiveKernelAgent(**agent_kwargs(dynamics_encoder_mode), transition_prior_mass=.3)
 
 
 def encoded_batch(agent, n):
@@ -129,18 +135,12 @@ def test_actor_warm_start_changes_basis_and_survives_checkpoint(monkeypatch, dyn
     agent._sync_policy_encoder()
     monkeypatch.setattr(agent, "_save_actor_kernel_debug_plot", lambda *args, **kwargs: None)
     losses = []
-    objective = agent._compute_actor_occupancy_loss
-
-    def record_loss(**kwargs):
-        value = objective(**kwargs)
+    objective = PositiveKernelTransition.loss
+    def record_loss(self, pi):
+        value = objective(self, pi)
         losses.append(float(value))
         return value
-
-    def reject_regression(**kwargs):
-        pytest.fail("Positive transitions must not construct a KRR inverse")
-
-    monkeypatch.setattr(agent, "_compute_actor_occupancy_loss", record_loss)
-    monkeypatch.setattr(agent.distribution_matcher, "compute_B_and_projections", reject_regression)
+    monkeypatch.setattr(PositiveKernelTransition, "loss", record_loss)
     for step, (n, m, steps) in enumerate([(7, 4, 3), (11, 6, 0), (5, 3, 3)]):
         full = encoded_batch(agent, n)
         sub = {key: value[:m] for key, value in full.items()}
@@ -148,7 +148,8 @@ def test_actor_warm_start_changes_basis_and_survives_checkpoint(monkeypatch, dyn
         losses.clear()
         agent.pmd_steps = steps
         metrics = agent.update_actor_nystrom(None, None, None, step, encoded_full=full, encoded_sub=sub)
-        assert agent._positive_transition is None
+        assert "_positive_transition" not in agent.__dict__
+        assert "_phi_all_next" not in agent.__dict__
         assert agent.gradient_coeff.shape == (n + 1, 1) and agent.pi.shape == (m, 4)
         assert float(metrics["actor_loss"]) <= losses[0]
         if steps:
@@ -168,7 +169,7 @@ def test_actor_warm_start_changes_basis_and_survives_checkpoint(monkeypatch, dyn
     torch.save(agent, buffer)
     buffer.seek(0)
     restored = torch.load(buffer, map_location="cpu", weights_only=False)
-    assert restored._positive_transition is None
+    assert "_positive_transition" not in restored.__dict__
     np.testing.assert_allclose(restored._compute_action_probs_batch(query), batched)
 
 
@@ -177,11 +178,12 @@ def test_failed_actor_update_releases_transition_model(monkeypatch):
     agent._sync_policy_encoder()
     monkeypatch.setattr(agent, "_save_actor_kernel_debug_plot", lambda *args, **kwargs: None)
 
-    def fail(**kwargs):
-        assert agent._positive_transition is not None
+    models = []
+    def fail(self, pi):
+        models.append(weakref.ref(self))
         raise RuntimeError("deliberate test failure")
-
-    monkeypatch.setattr(agent, "_compute_actor_occupancy_loss", fail)
+    monkeypatch.setattr(PositiveKernelTransition, "loss", fail)
     with pytest.raises(RuntimeError, match="deliberate"):
         agent.update_actor_nystrom(None, None, None, 0, encoded_full=encoded_batch(agent, 5))
-    assert agent._positive_transition is None
+    assert "_positive_transition" not in agent.__dict__
+    assert models[0]() is None
