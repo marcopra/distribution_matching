@@ -179,7 +179,7 @@ class DistributionMatcher:
 
 
 class NystromActorModel:
-    """Update-local regression with O(m² + n*d + block_size*m) device storage."""
+    """Action-block regression with cached transitions and projected gradients."""
 
     @torch.no_grad()
     def __init__(self, matcher, states, landmarks, next_landmarks, actions,
@@ -211,28 +211,54 @@ class NystromActorModel:
         self.next_landmarks, self.E, self.alpha = next_landmarks, E, alpha
         self.gram, self.block_size = coverage_gram, int(block_size)
 
-        A = states.new_empty(m, m)
-        for start in range(0, m, self.block_size):
-            stop = start + self.block_size
-            A[start:stop] = matcher.state_action_kernel(
-                landmarks[start:stop], landmarks,
-                self.landmark_actions[start:stop], self.landmark_actions,
-            )
-        # Preserve the existing float32 CPU eigenspace, including its jitter.
-        K_cpu = A.to(device="cpu", copy=True)
-        K_cpu.diagonal().add_(1e-8)
-        K_cpu = K_cpu.float()
-        _, vectors = torch.linalg.eigh(K_cpu)
         rank = m if components is None else min(m, int(components))
-        self.U = vectors[:, -rank:].to(device=states.device, dtype=states.dtype, copy=True)
-        del K_cpu, vectors
-        A.mul_(matcher.lambda_reg)
-        for rows in self._rows():
-            K = self._kernel(rows)
-            A.addmm_(K.T, K)
-        A.diagonal().add_(1e-6)
-        self.lu, self.pivots = torch.linalg.lu_factor(A)
-        del A, K
+        self.blocks, eigenspaces = [], []
+        for action in self.landmark_actions.unique(sorted=True).tolist():
+            rows = torch.nonzero(self.actions == action, as_tuple=True)[0]
+            columns = torch.nonzero(self.landmark_actions == action, as_tuple=True)[0]
+            support = landmarks[columns]
+            A = states.new_empty(len(columns), len(columns))
+            for start in range(0, len(columns), self.block_size):
+                section = slice(start, start + self.block_size)
+                A[section] = matcher.kernel(support[section], support)
+            # Same jitter and CPU float32 eigensolver; retain global top-r below.
+            K_cpu = A.to(device="cpu", copy=True)
+            K_cpu.diagonal().add_(1e-8)
+            values, vectors = torch.linalg.eigh(K_cpu.float())
+            keep = min(rank, len(columns))
+            eigenspaces.append((values[-keep:].clone(), vectors[:, -keep:].clone()))
+            del K_cpu, values, vectors
+            A.mul_(matcher.lambda_reg)
+            C = states.new_zeros(len(columns), m)
+            for start in range(0, len(rows), self.block_size):
+                batch = states[rows[start:start + self.block_size]]
+                K = matcher.kernel(batch, support)
+                H = matcher.state_kernel(batch, next_landmarks)
+                A.addmm_(K.T, K)
+                C.addmm_(K.T, H)
+                del K, H
+            A.diagonal().add_(1e-6)
+            lu, pivots = torch.linalg.lu_factor(A)
+            # For row action a, T(pi) = solve(A_a, K_a.T @ H_a) diag(pi[:, a]).
+            self.blocks.append(dict(action=action, rows=rows, columns=columns, lu=lu, pivots=pivots,
+                                    transition=torch.linalg.lu_solve(lu, pivots, C)))
+            del A, C, support
+
+        values = torch.cat([values for values, _ in eigenspaces])
+        selected = torch.argsort(values, stable=True)[-rank:]
+        self.U = states.new_zeros(m, rank)
+        offset = 0
+        for block, (values, vectors) in zip(self.blocks, eigenspaces):
+            basis = torch.nonzero((selected >= offset) & (selected < offset + len(values)), as_tuple=True)[0]
+            local_U = vectors[:, selected[basis] - offset].to(device=states.device, dtype=states.dtype)
+            basis = basis.to(states.device)
+            self.U[block["columns"][:, None], basis] = local_U
+            block["basis"] = basis
+            block["adjoint_projection"] = torch.linalg.lu_solve(block["lu"], block["pivots"], local_U, adjoint=True)
+            block["projected_transition"] = local_U.T @ block["transition"]
+            offset += len(values)
+        # Float32 eigenvectors are only approximately orthonormal.
+        self.U_gram = self.U.T @ self.U
         self.K_rr = self.U.T @ self.gram[:-1, :-1] @ self.U
         self.k_re = self.U.T @ self.gram[:-1, -1:]
         self.k_er = self.gram[-1:, :-1] @ self.U
@@ -242,10 +268,24 @@ class NystromActorModel:
         for start in range(0, len(self.states), self.block_size):
             yield slice(start, start + self.block_size)
 
-    def _kernel(self, rows):
-        return self.matcher.state_action_kernel(
-            self.states[rows], self.landmarks, self.actions[rows], self.landmark_actions,
-        )
+    def _solve(self, rhs, adjoint=False):
+        assert rhs.ndim == 2 and rhs.shape[0] == len(self.landmarks)
+        assert rhs.dtype == self.states.dtype and rhs.device == self.states.device
+        result = torch.empty_like(rhs)
+        for block in self.blocks:
+            columns = block["columns"]
+            result[columns] = torch.linalg.lu_solve(block["lu"], block["pivots"], rhs[columns], adjoint=adjoint)
+        return result
+
+    def _apply_kernel(self, coefficients):
+        result = self.states.new_zeros(len(self.states), coefficients.shape[1])
+        for block in self.blocks:
+            rows, columns = block["rows"], block["columns"]
+            support, coeff = self.landmarks[columns], coefficients[columns]
+            for start in range(0, len(rows), self.block_size):
+                batch = rows[start:start + self.block_size]
+                result[batch] = self.matcher.kernel(self.states[batch], support) @ coeff
+        return result
 
     @torch.no_grad()
     def policy(self, coeff, logits_offset=None):
@@ -261,27 +301,25 @@ class NystromActorModel:
         assert torch.isfinite(logits).all(), "Nonfinite Nyström policy logits"
         return torch.softmax(-logits, dim=1)
 
-    @torch.no_grad()
-    def transition_matrix(self, pi):
+    def _validate_policy(self, pi):
         assert pi.shape == (len(self.landmarks), self.E.shape[1])
+        assert pi.dtype == self.states.dtype and pi.device == self.states.device
         assert torch.isfinite(pi).all() and (pi >= 0).all()
         assert torch.allclose(pi.sum(1), torch.ones_like(pi[:, 0]))
-        C = self.states.new_zeros(len(self.landmarks), len(self.landmarks))
-        for rows in self._rows():
-            K = self._kernel(rows)
-            M = self.matcher.state_kernel(self.states[rows], self.next_landmarks)
-            M.mul_(self.E[rows] @ pi.T)
-            C.addmm_(K.T, M)
-        return torch.linalg.lu_solve(self.lu, self.pivots, C)
+
+    @torch.no_grad()
+    def transition_matrix(self, pi):
+        self._validate_policy(pi)
+        transition = self.states.new_empty(len(self.landmarks), len(self.landmarks))
+        for block in self.blocks:
+            for start in range(0, len(block["columns"]), self.block_size):
+                section = slice(start, start + self.block_size)
+                transition[block["columns"][section]] = block["transition"][section] * pi[:, block["action"]]
+        return transition
 
     @torch.no_grad()
     def adjoint(self, q):
-        assert q.ndim == 2 and q.shape[0] == len(self.landmarks)
-        solved = torch.linalg.lu_solve(self.lu, self.pivots, q, adjoint=True)
-        result = self.states.new_empty(len(self.states), q.shape[1])
-        for rows in self._rows():
-            result[rows] = self._kernel(rows) @ solved
-        return result
+        return self._apply_kernel(self._solve(q, adjoint=True))
 
     @torch.no_grad()
     def loss(self, pi):
@@ -291,19 +329,23 @@ class NystromActorModel:
     @torch.no_grad()
     def gradient_coefficients(self, pi):
         gamma, eps = self.matcher.gamma, 1e-6
-        S = self.transition_matrix(pi)
-        S.mul_(-gamma)
-        S.diagonal().add_(1)
-        S_r = self.U.T @ S @ self.U
-        del S
+        self._validate_policy(pi)
+        S_r = self.U_gram.clone()
+        for block in self.blocks:
+            weighted_U = pi[:, block["action"]:block["action"] + 1] * self.U
+            S_r[block["basis"]] -= gamma * (block["projected_transition"] @ weighted_U)
+        del weighted_U
         z_r = torch.linalg.solve(S_r, self.alpha_r)
         S_r.diagonal().add_(eps)
         z_e = 1 / (1 - gamma)
         h_r = self.K_rr @ z_r + self.k_re * z_e
         h_e = self.k_er @ z_r + self.gram[-1:, -1:] * z_e
-        q = self.U @ torch.linalg.solve(S_r.T, h_r)
+        tmp = torch.linalg.solve(S_r.T, h_r)
+        solved = self.states.new_empty(len(self.landmarks), 1)
+        for block in self.blocks:
+            solved[block["columns"]] = block["adjoint_projection"] @ tmp[block["basis"]]
         gradient = self.states.new_empty(len(self.states) + 1, 1)
-        gradient[:-1] = self.adjoint(q)
+        gradient[:-1] = self._apply_kernel(solved)
         gradient[-1:] = h_e / (1 - gamma + eps)
         gradient.mul_(2 * gamma * (1 - gamma) ** 2)
         assert torch.isfinite(gradient).all(), "Nonfinite Nyström gradient"

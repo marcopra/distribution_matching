@@ -75,7 +75,7 @@ def test_streamed_matches_dense(kernel, rank, block_size, duplicate):
     offset = model.states.new_full((5, 3), .2)
     pi = model.policy(coeff, offset)
     A, B, H, BM, loss, gradient = dense(model, pi)
-    torch.testing.assert_close(torch.linalg.lu_solve(model.lu, model.pivots, A), torch.eye(5, dtype=A.dtype), atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(model._solve(A), torch.eye(5, dtype=A.dtype), atol=1e-8, rtol=1e-8)
     torch.testing.assert_close(pi, torch.softmax(-(H.T @ (coeff[:-1] * model.E) + coeff[-1] + offset), 1))
     torch.testing.assert_close(model.transition_matrix(pi), BM, atol=1e-8, rtol=1e-8)
     torch.testing.assert_close(model.adjoint(model.U), B.T @ model.U, atol=1e-8, rtol=1e-8)
@@ -86,12 +86,12 @@ def test_streamed_matches_dense(kernel, rank, block_size, duplicate):
 
 def test_kernel_blocks_are_bounded_and_policy_survives_pickle(monkeypatch):
     calls = []
-    original = DistributionMatcher.state_action_kernel
-    def checked(self, X, Y, *actions):
+    original = DistributionMatcher.kernel
+    def checked(self, X, Y):
         calls.append(len(X))
         assert len(X) <= 2
-        return original(self, X, Y, *actions)
-    monkeypatch.setattr(DistributionMatcher, "state_action_kernel", checked)
+        return original(self, X, Y)
+    monkeypatch.setattr(DistributionMatcher, "kernel", checked)
     state_kernel = DistributionMatcher.state_kernel
     def checked_state(self, X, Y):
         assert len(X) <= 2
@@ -126,6 +126,74 @@ def test_nonfinite_inputs_and_invalid_policy_fail():
         model.transition_matrix(model.states.new_zeros(5, 3))
 
 
+def test_regression_and_eigendecomposition_use_action_blocks(monkeypatch):
+    sizes = {"lu_factor": [], "eigh": []}
+    for name in sizes:
+        original = getattr(torch.linalg, name)
+        def checked(matrix, *args, _name=name, _original=original, **kwargs):
+            sizes[_name].append(len(matrix))
+            return _original(matrix, *args, **kwargs)
+        monkeypatch.setattr(torch.linalg, name, checked)
+    model = case()
+    assert sizes == {"lu_factor": [2, 2, 1], "eigh": [2, 2, 1]}
+    assert sum(block["transition"].numel() for block in model.blocks) == 25
+    assert sum(block["lu"].numel() for block in model.blocks) == 9
+    assert sum(block["projected_transition"].numel() for block in model.blocks) == 15
+    K = model.matcher.state_action_kernel(model.landmarks, model.landmarks,
+                                          model.landmark_actions, model.landmark_actions)
+    K = K.cpu().clone()
+    K.diagonal().add_(1e-8)
+    reference = torch.linalg.eigh(K.float())[1][:, -3:].to(model.U)
+    torch.testing.assert_close(model.U @ model.U.T, reference @ reference.T, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(model.U_gram, model.U.T @ model.U)
+
+
+def test_cached_transition_never_recomputes_kernels(monkeypatch):
+    model = case()
+    pi = model.policy(model.states.new_zeros(10, 1))
+    expected = model.transition_matrix(pi)
+    def fail(*args, **kwargs):
+        raise AssertionError("Transition recomputed a kernel")
+    monkeypatch.setattr(model.matcher, "kernel", fail)
+    monkeypatch.setattr(model.matcher, "state_kernel", fail)
+    torch.testing.assert_close(model.transition_matrix(pi), expected)
+    assert torch.isfinite(model.loss(pi))
+    assert model.diagnostics(pi)
+
+
+def test_projected_gradient_never_builds_full_transition(monkeypatch):
+    model = case()
+    pi = model.policy(model.states.new_zeros(10, 1))
+    expected = dense(model, pi)[-1]
+    def fail(*args, **kwargs):
+        raise AssertionError("Projected gradient built a full transition")
+    monkeypatch.setattr(model, "transition_matrix", fail)
+    torch.testing.assert_close(model.gradient_coefficients(pi), expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA required"))])
+def test_unbalanced_projection_and_action_without_landmarks(device):
+    x = torch.tensor([[3., 0.], [2., 0.], [0., .2], [0., .1], [.3, .1]], dtype=torch.float64, device=device)
+    actions = torch.tensor([0, 0, 1, 1, 2], device=device)
+    indices = torch.tensor([2, 0, 3, 1], device=device)
+    y, b = x[indices], actions[indices]
+    E = F.one_hot(actions, 3).to(x.dtype)
+    alpha = x.new_zeros(4, 1)
+    alpha[0] = 1
+    matcher = DistributionMatcher(.001, gamma=.7, kernel_type="inner_product")
+    gram = kernel_sink_gram(matcher.state_kernel, y, y.sum(1), .2)
+    model = NystromActorModel(matcher, x, y, y, actions, b, E, alpha, gram, 1, block_size=2)
+    assert [len(block["basis"]) for block in model.blocks] == [1, 0]
+    pi = model.policy(x.new_zeros(6, 1))
+    _, B, _, BM, loss, gradient = dense(model, pi)
+    torch.testing.assert_close(model.transition_matrix(pi), BM, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(model.adjoint(model.U), B.T @ model.U, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(model.loss(pi), loss, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(model.gradient_coefficients(pi), gradient, atol=1e-8, rtol=1e-8)
+    assert model.gradient_coefficients(pi)[-2] == 0
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_repeated_cuda_updates_release_live_memory():
     baselines = []
@@ -147,6 +215,7 @@ def test_repeated_cuda_updates_release_live_memory():
 def test_regression_actor_checkpoint_preserves_queries_without_update_model(monkeypatch, mode):
     from agent.rover_nystrom_subspace import RoverSubspaceCoverageAgent
     from tests.unit.test_rover_positive_kernel import agent_kwargs, encoded_batch
+    torch.manual_seed(0)  # Keep the tiny ReLU fixture's landmark features nonzero.
     agent = RoverSubspaceCoverageAgent(**agent_kwargs(mode))
     agent._sync_policy_encoder()
     monkeypatch.setattr(agent, "_save_actor_kernel_debug_plot", lambda *args, **kwargs: None)
@@ -197,7 +266,8 @@ def test_float32_configuration_retains_dtype_and_dense_algebra():
     model = case(dtype=torch.float32)
     pi = model.policy(model.states.new_zeros(10, 1))
     _, _, _, BM, loss, gradient = dense(model, pi)
-    assert model.lu.dtype == model.U.dtype == pi.dtype == torch.float32
+    assert all(block["lu"].dtype == torch.float32 for block in model.blocks)
+    assert model.U.dtype == pi.dtype == torch.float32
     torch.testing.assert_close(model.transition_matrix(pi), BM, rtol=1e-3, atol=1e-4)
     torch.testing.assert_close(model.loss(pi), loss, rtol=1e-3, atol=1e-4)
     torch.testing.assert_close(model.gradient_coefficients(pi), gradient, rtol=1e-3, atol=1e-4)
