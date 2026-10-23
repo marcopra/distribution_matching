@@ -5,10 +5,10 @@ set -eo pipefail
 BASE="launchers/slurm/pretraining/pointmaze_subspace/umaze/states/rover/base.sh"
 seeds=(1 2 3)
 
-batch_sizes_actor=(32000)
+batch_sizes_actor=(100000)
 feature_dims=(256)
-subsample_sizes=(5000)
-sink_idxs=(1 2)
+subsample_sizes=(10000)
+sink_idxs=(1)
 # "linear(0.0,10.0,50000,100000)"
 # "linear(0.0,5.0,50000,250000)"
 # "linear(0.0,2.0,50000,250000)"
