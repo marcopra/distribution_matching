@@ -22,6 +22,8 @@ BATCH_SIZE_ACTOR="${BATCH_SIZE_ACTOR:-16000}"
 FEATURE_DIM="${FEATURE_DIM:-256}"
 SUBSAMPLES="${SUBSAMPLES:-4000}"
 SINK_IDX="${SINK_IDX:-0}"
+START_X="${START_X:--1.0}"
+START_Y="${START_Y:-1.0}"
 
 # Schedules seen in local UMaze runs.
 sink_schedules=(
@@ -32,12 +34,12 @@ sink_schedules=(
 )
 SINK_SCHEDULE="${sink_schedules[${SINK_IDX}]}"
 DYNAMICS_KERNEL_TYPE="${DYNAMICS_KERNEL_TYPE:-inner_product}"
-RUN_LABEL="${DYNAMICS_KERNEL_TYPE}_batch${BATCH_SIZE_ACTOR}_dim${FEATURE_DIM}_nys${SUBSAMPLES}_sink${SINK_IDX}"
+RUN_LABEL="${DYNAMICS_KERNEL_TYPE}_batch${BATCH_SIZE_ACTOR}_dim${FEATURE_DIM}_nys${SUBSAMPLES}_sink${SINK_IDX}_start${START_X}_${START_Y}"
 
 python pretrain_parallel.py \
     --config-name=pretrain_parallel/pointmaze_subspace_states \
     env=pointmaze/pointmaze_umaze_full_state_discrete \
-    'env.pointmaze.start_position=[-1.0,1.0]' \
+    "env.pointmaze.start_position=[${START_X},${START_Y}]" \
     seed="${SEED}" \
     device="${DEVICE}" \
     num_train_frames=250000 \

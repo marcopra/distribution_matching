@@ -46,7 +46,8 @@ and 1000 warm-up updates. Cholesky tolerance stays at the reference values:
 0 for states, 1e-6 for pixels; it is not swept. Image CNN ignores `hidden_dim`.
 
 UMaze and LargeDense use their full `(x,y,vx,vy)` observation environment
-configs and fixed starts `[-1,1]` and `[-4,3]`. Baselines match the ROVER
+configs. UMaze launchers sweep start positions `[-1,1]`, `[1,0]`, and `[1,1]`;
+LargeDense keeps fixed start `[-4,3]`. Baselines match the ROVER
 profile for each input: states use continuing tasks; pixels retain the
 episodic setting of `good_pixels`. Both use a 10000-frame seed phase.
 

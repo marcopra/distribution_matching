@@ -19,11 +19,14 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 SEED="${SEED:-1}"
 DEVICE="${DEVICE:-cuda}"
 AGENT="${AGENT:-rnd_discrete}"
+START_X="${START_X:--1.0}"
+START_Y="${START_Y:-1.0}"
+START_LABEL="start_${START_X}_${START_Y}"
 
 python pretrain.py \
     --config-name=pretrain/pointmaze_subspace_baselines \
     env=pointmaze/pointmaze_umaze_full_state_discrete \
-    'env.pointmaze.start_position=[-1.0,1.0]' \
+    "env.pointmaze.start_position=[${START_X},${START_Y}]" \
     env.continuing_task=false \
     obs_type=pixels \
     frame_stack=4 \
@@ -36,8 +39,8 @@ python pretrain.py \
     save_eval_best=true \
     save_snapshot=false \
     'snapshots=[250000,500000,750000,1000000]' \
-    snapshot_dir="models/pointmaze_subspace/umaze/pixels/${AGENT}/seed_${SEED}" \
+    snapshot_dir="models/pointmaze_subspace/umaze/pixels/${AGENT}/${START_LABEL}/seed_${SEED}" \
     use_wandb=true \
     wandb_project=pointmaze_subspace \
-    wandb_tag="${AGENT}_umaze_pixels" \
-    wandb_run_name="umaze_pixels_${AGENT}_seed${SEED}"
+    wandb_tag="${AGENT}_umaze_pixels_${START_LABEL}" \
+    wandb_run_name="umaze_pixels_${AGENT}_${START_LABEL}_seed${SEED}"
