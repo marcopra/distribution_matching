@@ -6,9 +6,9 @@ BASE="launchers/slurm/pretraining/pointmaze_subspace/umaze/states/baselines/base
 seeds=(1)
 
 agents=(
-    # rnd_discrete
-    # icm_apt_discrete
-    # maxent_discrete
+    rnd_discrete
+    icm_apt_discrete
+    maxent_discrete
     cic_discrete
     smm_discrete
 )

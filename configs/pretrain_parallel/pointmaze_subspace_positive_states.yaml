@@ -7,4 +7,4 @@ defaults:
 
 agent:
   dynamics_kernel_type: gaussian
-  pmd_warm_start: true
+  pmd_warm_start: false

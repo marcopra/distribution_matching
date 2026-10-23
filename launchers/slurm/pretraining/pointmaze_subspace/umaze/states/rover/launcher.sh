@@ -14,8 +14,8 @@ sink_idxs=(1 2)
 # "linear(0.0,2.0,50000,250000)"
 # "linear(0.0,1.0,50000,250000)"
 kernel_types=(gaussian)
-start_xs=(1.0 1.0) # -1.0
-start_ys=(0.0 1.0) # 1.0
+start_xs=(1.0 1.0 -1.0)
+start_ys=(0.0 1.0 1.0)
 
 # 6 configurations per seed: start position x sink schedule.
 for seed in "${seeds[@]}"; do
