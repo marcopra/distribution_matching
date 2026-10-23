@@ -41,7 +41,7 @@ def command(run, batch, obs_type, num_train_frames):
             f"wandb_run_name={run['name']}", f'hydra.run.dir={directory}']
 
 
-def worker(batch, gpu):
+def worker(batch, gpu, slot=None):
     manifest = json.loads((batch / 'manifest.json').read_text())
     obs_type = manifest['obs_type']
     num_train_frames = manifest['num_train_frames']
@@ -50,12 +50,13 @@ def worker(batch, gpu):
                MKL_NUM_THREADS='2', OPENBLAS_NUM_THREADS='1',
                NUMEXPR_NUM_THREADS='2', HYDRA_FULL_ERROR='1',
                PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
-               WANDB_RUN_GROUP=batch.name, WANDB_JOB_TYPE='local-pretraining',
+               WANDB_RUN_GROUP=manifest.get('wandb_group', batch.name),
+               WANDB_JOB_TYPE='local-pretraining',
                WANDB_MODE='online', PYTHONUNBUFFERED='1')
     cpus = manifest['cpu_affinity'][str(gpu)]
     os.sched_setaffinity(0, cpus)
     for run in manifest['runs']:
-        if run['gpu'] != gpu:
+        if run['gpu'] != gpu or (slot is not None and run.get('slot') != slot):
             continue
         status = batch / 'status' / (run['name'] + '.json')
         if status.exists() and json.loads(status.read_text())['state'] == 'completed':
@@ -74,7 +75,8 @@ def worker(batch, gpu):
     print(f'GPU {gpu} queue finished.', flush=True)
 
 
-def launch(obs_type, num_train_frames, starts, run_specs=None):
+def launch(obs_type, num_train_frames, starts, run_specs=None, batch_name=None,
+           wandb_group=None):
     import torch
     assert torch.cuda.device_count() == 8, 'This allocation expects eight GPUs.'
     cpus = sorted(os.sched_getaffinity(0))
@@ -82,9 +84,12 @@ def launch(obs_type, num_train_frames, starts, run_specs=None):
     if run_specs is None:
         run_specs = [dict(obs_type=obs_type, seed=seed, start=start, agent=agent)
                      for seed in [11, 12, 13] for start in starts for agent in AGENTS]
-    launch_label = (obs_type if len({spec.get('obs_type', obs_type) for spec in run_specs}) == 1
-                    else 'mixed')
-    batch = ROOT / 'exp_local' / (f'umaze_baselines_{launch_label}_{num_train_frames // 1000}k_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
+    run_obs_types = {spec.get('obs_type', obs_type) for spec in run_specs}
+    launch_label = next(iter(run_obs_types)) if len(run_obs_types) == 1 else 'mixed'
+    name = batch_name or (f'umaze_baselines_{launch_label}_{num_train_frames // 1000}k_' +
+                          datetime.now().strftime('%Y%m%d_%H%M%S'))
+    batch = ROOT / 'exp_local' / name
+    batch_group = wandb_group or batch.name
     for name in ['logs', 'status', 'runs']:
         (batch / name).mkdir(parents=True, exist_ok=True)
     runs = []
@@ -97,6 +102,7 @@ def launch(obs_type, num_train_frames, starts, run_specs=None):
                          seed=spec['seed'], start=start, gpu=len(runs) % 8))
     assert runs and len(runs) == len({r['name'] for r in runs})
     manifest = dict(runs=runs, obs_type=launch_label, num_train_frames=num_train_frames,
+                    wandb_group=batch_group,
                     cpu_affinity={str(g): cpus[4*g:4*g+4] for g in range(8)},
                     gpu_names=[torch.cuda.get_device_name(g) for g in range(8)])
     (batch / 'manifest.json').write_text(json.dumps(manifest, indent=2))
@@ -115,6 +121,8 @@ def launch(obs_type, num_train_frames, starts, run_specs=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worker', type=int)
+    parser.add_argument('--slot', type=int,
+                        help='Optional queue slot used to run multiple state jobs on one GPU')
     parser.add_argument('--batch', type=Path)
     parser.add_argument('--obs-type', choices=['states', 'pixels'], default='states')
     parser.add_argument('--num-train-frames', type=int, default=500_000)
@@ -124,6 +132,8 @@ if __name__ == '__main__':
                         help='Optional JSON array of {obs_type, agent, seed, start} runs')
     parser.add_argument('--run-specs-file', type=Path,
                         help='Optional JSON file of {obs_type, agent, seed, start} runs')
+    parser.add_argument('--batch-name',
+                        help='Optional shared batch directory and W&B group name')
     args = parser.parse_args()
     if args.worker is None:
         starts = json.loads(args.starts_json)
@@ -134,6 +144,7 @@ if __name__ == '__main__':
         run_specs = json.loads(args.run_specs_json) if args.run_specs_json else None
         if args.run_specs_file:
             run_specs = json.loads(args.run_specs_file.read_text())
-        launch(args.obs_type, args.num_train_frames, starts, run_specs)
+        launch(args.obs_type, args.num_train_frames, starts, run_specs,
+               batch_name=args.batch_name)
     else:
-        worker(args.batch.resolve(), args.worker)
+        worker(args.batch.resolve(), args.worker, args.slot)
