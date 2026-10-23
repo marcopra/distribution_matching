@@ -66,4 +66,4 @@ python pretrain_parallel.py \
     use_wandb=true \
     wandb_project=pointmaze_subspace \
     wandb_tag=rover_umaze_pixels \
-    wandb_run_name="umaze_pixels_rover_${RUN_LABEL}_seed${SEED}"
+    wandb_run_name="umaze_pixels_rover_${RUN_LABEL}_seed${SEED}" agent.lr_actor=100

@@ -3,14 +3,14 @@ set -eo pipefail
 
 # Run from repository root. This script only submits base.sh jobs.
 BASE="launchers/slurm/pretraining/pointmaze_subspace/umaze/pixels/rover/base.sh"
-seeds=(1)
+seeds=(1 2 3)
 
-batch_sizes_actor=(80000)
-feature_dims=(1024 2048)
+batch_sizes_actor=(100000)
+feature_dims=(1024)
 subsample_sizes=(15000)
 lambda_regs=(1e-3)
-cholesky_tolerances=(1e-5 1e-6)
-sink_idxs=(0 1)
+cholesky_tolerances=(1e-6)
+sink_idxs=(0)
 kernel_types=(inner_product gaussian)
 start_xs=(-1.0 1.0 1.0)
 start_ys=(1.0 0.0 1.0)
