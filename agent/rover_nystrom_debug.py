@@ -2102,7 +2102,15 @@ class RoverAgent:
 
         self._maybe_freeze_encoder(step)
 
-        if step % self.update_every_steps != 0 and self._is_T_sufficiently_initialized(step) is True:
+        transition_initialized = self._is_T_sufficiently_initialized(step)
+        encoder_update_due = (
+            not transition_initialized or step % self.update_every_steps == 0
+        )
+        actor_update_due = (
+            step % self.update_actor_every_steps == 0
+            or step == self.num_expl_steps + self.T_init_steps
+        )
+        if not encoder_update_due and not actor_update_due:
             return metrics
 
         batch = next(replay_iter)
@@ -2118,7 +2126,7 @@ class RoverAgent:
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
-        if self.embeddings:
+        if self.embeddings and encoder_update_due:
             metrics.update(self.update_encoders(
                 obs, action, next_obs, reward,
                 proprio_state=proprio_state,
@@ -2126,11 +2134,11 @@ class RoverAgent:
             ))
 
         # Train the encoder/transition model first; PMD starts once T is ready.
-        if not self._is_T_sufficiently_initialized(step):
+        if not transition_initialized:
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
 
-        if step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps:
+        if actor_update_due:
             self._resolve_kernel_bandwidth(step)
             actor_update_data = self._get_actor_update_data(
                 replay_iter,

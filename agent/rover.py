@@ -941,7 +941,15 @@ class RoverAgent:
     def update(self, replay_iter, step):
         metrics = dict()
 
-        if step % self.update_every_steps != 0 and self._is_T_sufficiently_initialized(step) is True:
+        transition_initialized = self._is_T_sufficiently_initialized(step)
+        encoder_update_due = (
+            not transition_initialized or step % self.update_every_steps == 0
+        )
+        actor_update_due = (
+            step % self.update_actor_every_steps == 0
+            or step == self.num_expl_steps + self.T_init_steps
+        )
+        if not encoder_update_due and not actor_update_due:
             return metrics
 
         batch = next(replay_iter)
@@ -950,16 +958,16 @@ class RoverAgent:
 
         if self.use_tb or self.use_wandb:
             metrics['batch_reward'] = reward.mean().item()
-        if self.embeddings:
+        if self.embeddings and encoder_update_due:
             metrics.update(self.update_encoders(obs, action, next_obs, reward))
 
         # If T is not sufficiently initialized, skip actor update
-        if self._is_T_sufficiently_initialized(step) is False:   
+        if not transition_initialized:
             metrics['actor_loss'] = 100.0  # dummy value
             return metrics
         
         # In ideal mode, we can update actor immediately
-        if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
+        if actor_update_due: # or self.ideal:  
 
             num_batches_needed = self.batch_size_actor // self.batch_size
             

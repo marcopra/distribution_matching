@@ -551,7 +551,8 @@ class Workspace:
             )
         else:
             metrics = self.agent.update(self.replay_iter, int(logical_step))
-        self.logger.log_metrics(metrics, self.global_frame, ty='train')
+        update_frame = int(logical_step) * self.cfg.action_repeat
+        self.logger.log_metrics(metrics, update_frame, ty='train')
         return metrics
 
     def _pending_transition_count(self):
